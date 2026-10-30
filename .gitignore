@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+backend/.venv/
+.venv/
+.pytest_cache/
+.req-hash
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.build-hash
+
+# Local data (SQLite DB, logs, scratch)
+data/
+.tmp/
+*.db
+*.db-wal
+*.db-shm
+*.log
+.env
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
