@@ -41,6 +41,8 @@ class Transaction:
 
 
 class Database:
+    dialect = "sqlite"
+
     def __init__(self, path: Path):
         self.path = Path(path)
         self.conn: aiosqlite.Connection | None = None
@@ -151,3 +153,15 @@ class Database:
             async with self._lock:
                 await self.conn.close()
             self.conn = None
+
+
+async def open_database():
+    """Local SQLite file (default) or PostgreSQL when NEXUS_DATABASE_URL is set (cloud / Supabase).
+    Both expose the same API; module SQL is written for SQLite and translated by app.db_pg."""
+    from app import config
+
+    if config.DATABASE_URL:
+        from app.db_pg import PostgresDatabase
+
+        return await PostgresDatabase.open(config.DATABASE_URL, schema=config.DB_SCHEMA)
+    return await Database.open(config.DB_PATH)

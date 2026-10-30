@@ -1,5 +1,7 @@
 // Single WebSocket connection to the backend with auto-reconnect, ref-counted topic subscriptions and
-// request/response terminal commands.
+// request/response terminal commands. In cloud mode it authenticates with ?token=<supabase access token>.
+import { authEnabled, getAccessToken, onAuthChange, refreshSession, signOut } from '../auth/session'
+import { wsUrl } from '../lib/config'
 import type { CommandResult, ServerMessage, ServerMessageType } from './types'
 
 export type WsStatus = 'connecting' | 'open' | 'closed'
@@ -27,12 +29,44 @@ class NexusSocket {
   private seq = 0
   private reconnectTimer: number | null = null
   private pingTimer: number | null = null
+  private hadSession = false
+
+  constructor() {
+    // Reconnect when the user logs in or out (token refreshes do not require a new socket).
+    onAuthChange((s) => {
+      const has = !!s
+      if (has !== this.hadSession) {
+        this.hadSession = has
+        this.restart()
+      }
+    })
+  }
+
+  /** Drop the current connection (if any) and connect again immediately. */
+  restart(): void {
+    const old = this.ws
+    this.ws = null
+    if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer)
+    if (this.pingTimer) window.clearInterval(this.pingTimer)
+    if (old) {
+      old.onclose = null
+      old.close()
+    }
+    this.retry = 0
+    this.setStatus('closed')
+    this.connect()
+  }
 
   connect(): void {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    const token = getAccessToken()
+    if (authEnabled() && !token) {
+      this.setStatus('closed') // wait for login (onAuthChange reconnects)
+      return
+    }
+    this.hadSession = !!token
     this.setStatus('connecting')
-    const ws = new WebSocket(`${proto}://${location.host}/ws`)
+    const ws = new WebSocket(token ? `${wsUrl()}?token=${encodeURIComponent(token)}` : wsUrl())
     this.ws = ws
     ws.onopen = () => {
       this.retry = 0
@@ -61,11 +95,16 @@ class NexusSocket {
       this.dispatch(msg.type, msg)
       this.dispatch('*', msg)
     }
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       if (this.ws !== ws) return
       this.ws = null
       if (this.pingTimer) window.clearInterval(this.pingTimer)
       this.setStatus('closed')
+      if (ev.code === 4401 && authEnabled()) {
+        // Token rejected: refresh it once; if that fails the user must log in again.
+        void refreshSession().then((s) => (s ? this.connect() : signOut()))
+        return
+      }
       const delay = Math.min(10000, 500 * 2 ** this.retry++)
       if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer)
       this.reconnectTimer = window.setTimeout(() => this.connect(), delay)

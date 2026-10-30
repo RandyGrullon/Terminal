@@ -4,15 +4,21 @@
 - `runtime_factory`: `async with runtime_factory() as rt:` gives a temp SQLite DB + settings + event bus (no services).
 - `api_client`: FastAPI TestClient over a temp DB with NEXUS_OFFLINE / no background loops (full app incl. services).
 - Synthetic candle fixtures (deterministic).
+- NEXUS_TEST_PG_URL=postgresql://... runs every DB-backed test against PostgreSQL instead of SQLite (one
+  throw-away schema per test) to prove the SQL works in cloud mode (Supabase).
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
+
+PG_URL = os.environ.get("NEXUS_TEST_PG_URL", "").strip()
 
 BACKEND = Path(__file__).resolve().parents[1]
 if str(BACKEND) not in sys.path:
@@ -66,7 +72,12 @@ def runtime_factory(tmp_path):
         from app.ws import WSManager
 
         rt.reset()
-        rt.db = await Database.open(tmp_path / "test.db")
+        if PG_URL:
+            from app.db_pg import PostgresDatabase
+
+            rt.db = await PostgresDatabase.open(PG_URL, schema=_test_schema())
+        else:
+            rt.db = await Database.open(tmp_path / "test.db")
         await rt.db.init_schema()
         rt.settings = SettingsStore(rt.db)
         await rt.settings.load()
@@ -77,23 +88,48 @@ def runtime_factory(tmp_path):
             yield rt
         finally:
             await rt.bus.stop()
+            if PG_URL:
+                await rt.db.drop_schema()
             await rt.db.close()
             rt.reset()
 
     return factory
 
 
+def _test_schema() -> str:
+    return f"t_{uuid.uuid4().hex[:12]}"
+
+
+async def _drop_pg_schema(url: str, schema: str) -> None:
+    import asyncpg
+
+    conn = await asyncpg.connect(url)
+    try:
+        await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+    finally:
+        await conn.close()
+
+
 @pytest.fixture
 def api_client(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
+    schema = _test_schema() if PG_URL else None
     monkeypatch.setattr(nexus_config, "DB_PATH", tmp_path / "api.db")
+    monkeypatch.setattr(nexus_config, "DATABASE_URL", PG_URL)
+    monkeypatch.setattr(nexus_config, "DB_SCHEMA", schema or "nexus")
+    monkeypatch.setattr(nexus_config, "AUTH_MODE", "none")
+    monkeypatch.setattr(nexus_config, "CORS_ORIGINS", [])
     monkeypatch.setattr(nexus_config, "OFFLINE", True)
     monkeypatch.setattr(nexus_config, "BACKGROUND", False)
     from app.main import create_app
     from app.runtime import rt
 
     rt.reset()
-    with TestClient(create_app()) as client:
-        yield client
-    rt.reset()
+    try:
+        with TestClient(create_app()) as client:
+            yield client
+    finally:
+        rt.reset()
+        if schema:
+            asyncio.run(_drop_pg_schema(PG_URL, schema))

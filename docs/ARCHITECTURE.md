@@ -504,7 +504,30 @@ Visual language: dark TradingView-like, dense but readable, green `--pos` = long
 short/down/NO TOMAR, amber `--warn` = ESPERAR/advertencias. Every page handles loading, empty and error states.
 
 ---------------------------------------------------------------------------------------------------------------------
-## 14. Verification checklist (what "done" means)
+## 14. Cloud mode (hybrid: Vercel UI + Supabase Postgres/Auth + always-on backend container)
+
+- **Database**: `app.db.open_database()` returns SQLite (`Database`) or, when `NEXUS_DATABASE_URL` is set,
+  `app.db_pg.PostgresDatabase` (asyncpg pool, schema `NEXUS_DB_SCHEMA`=`nexus`, RLS on, `schema_pg.sql`).
+  Same API. Module SQL stays in the SQLite dialect and is translated (`?`→`$n`, INSERT OR IGNORE/REPLACE →
+  ON CONFLICT, IFNULL/INSTR/GROUP_CONCAT/ROUND(x,n)/scalar MAX-MIN/strftime(...,'unixepoch')/json_extract,
+  LIKE→ILIKE, LIMIT -1); params are coerced to server types; NUMERIC → float; INSERTs into identity tables
+  return the id. **Portability rules for module SQL**: no PRAGMA / sqlite_master / rowid / `SUM(<boolean
+  expression>)` (use `SUM(CASE WHEN … THEN 1 ELSE 0 END)`), no type-mixing in comparisons, prefer explicit
+  `ON CONFLICT(...) DO UPDATE` upserts, never touch `rt.db.conn` directly. Run the whole suite on Postgres with
+  `NEXUS_TEST_PG_URL=postgresql://... pytest` (embedded server without Docker: `tools/pg_start.py`).
+- **Auth**: `NEXUS_AUTH=supabase` → `app.auth.AuthMiddleware` requires a Supabase access token on every `/api`
+  request (except `/api/health`, `/api/auth/config`, CORS preflight) and on `/ws?token=`; validated against
+  Supabase `/auth/v1/user`, cached, restricted to `NEXUS_ALLOWED_EMAILS`. The server refuses to bind a public
+  interface without auth. CORS / WS origins: `NEXUS_CORS_ORIGINS`.
+- **Frontend**: `src/lib/config.ts` (`VITE_API_BASE`), `src/auth/session.ts` (GoTrue REST: password login,
+  refresh, logout, multi-tab sync), `src/auth/AuthGate.tsx` (login screen when `/api/auth/config` says
+  `supabase`). `api/client.ts` adds the bearer token (refresh + retry on 401); `api/ws.ts` adds `?token=`.
+- **Deploy**: `Dockerfile` + `railway.json` / `fly.toml` (backend, 1 always-on instance, EU region),
+  `frontend/vercel.json`, `.env.example`, step-by-step guide in `docs/DEPLOY.md`.
+- **Retention**: `app.maintenance` prunes fine-grained candles, old events and resolved learning rows.
+
+---------------------------------------------------------------------------------------------------------------------
+## 15. Verification checklist (what "done" means)
 
 - `start.ps1` from a clean clone: creates venv, installs deps, builds UI, starts server, opens browser; DB created
   and seeded; services running; `/api/health` ok.

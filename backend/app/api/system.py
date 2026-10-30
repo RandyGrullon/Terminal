@@ -4,9 +4,10 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Request
 from pydantic import BaseModel
 
+from app import config
 from app.config import VERSION
 from app.runtime import rt
 from app.terminal import execute, list_commands
@@ -27,7 +28,10 @@ def _service_status(svc: Any) -> dict:
 
 
 @router.get("/api/health")
-async def health() -> dict:
+async def health(request: Request) -> dict:
+    if config.AUTH_MODE != "none" and not getattr(request.state, "user", None):
+        # Public liveness probe for the hosting platform: reveal nothing else without a session.
+        return {"ok": True, "version": VERSION, "auth": "required", "server_time": now_ms()}
     services = {attr: _service_status(svc) for attr, svc in rt.services}
     if rt.ws is not None:
         services["ws"] = rt.ws.status()
@@ -37,11 +41,23 @@ async def health() -> dict:
             "version": VERSION,
             "uptime_s": int(time.time() - rt.started_at),
             "server_time": now_ms(),
-            "db": {"path": str(rt.db.path), "size_bytes": rt.db.size_bytes()},
+            "db": {"path": str(rt.db.path), "size_bytes": rt.db.size_bytes(), "dialect": rt.db.dialect},
+            "auth": config.AUTH_MODE,
             "services": services,
             "load_errors": rt.load_errors,
         }
     )
+
+
+@router.get("/api/auth/config")
+async def auth_config() -> dict:
+    """Public: lets the web UI know whether to show the login screen (the anon key is public by design)."""
+    supabase = config.AUTH_MODE == "supabase"
+    return {
+        "mode": config.AUTH_MODE,
+        "supabase_url": config.SUPABASE_URL if supabase else None,
+        "supabase_anon_key": config.SUPABASE_ANON_KEY if supabase else None,
+    }
 
 
 @router.get("/api/settings")

@@ -33,14 +33,19 @@ def market_topic(symbol: str, tf: str) -> str:
 
 
 def origin_allowed(origin: str | None) -> bool:
-    """Block cross-site WebSocket hijacking: only pages served from this machine may connect."""
+    """Block cross-site WebSocket hijacking: only pages served from this machine (or the configured cloud
+    frontend origins, NEXUS_CORS_ORIGINS) may connect."""
     if not origin or origin == "null":
         return origin is None
     try:
         host = urlparse(origin).hostname or ""
     except ValueError:
         return False
-    return host in _LOCAL_HOSTS
+    if host in _LOCAL_HOSTS:
+        return True
+    from app import config
+
+    return origin.rstrip("/") in config.CORS_ORIGINS
 
 
 class _Client:

@@ -1,0 +1,227 @@
+/* Markets page ("Todos los activos de TradingView"): full-height layout, the table scrolls inside its card. */
+.mk-page {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 10px;
+}
+.mk-title {
+  font-size: 17px;
+}
+.mk-markets {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+}
+.mk-tabs {
+  flex: 1;
+  min-width: 0;
+}
+.mk-tabs .tabs {
+  border-bottom: 0;
+}
+.mk-markets .select {
+  margin-bottom: 5px;
+  flex: none;
+}
+.mk-tab-count {
+  font-size: 10.5px;
+  color: var(--muted);
+  font-weight: 500;
+  font-family: var(--mono);
+}
+.tab.active .mk-tab-count {
+  color: var(--text-2);
+}
+.mk-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.mk-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 1 340px;
+  min-width: 200px;
+}
+.mk-search .input {
+  width: 100%;
+  padding-left: 28px;
+  padding-right: 26px;
+}
+.mk-search-ico {
+  position: absolute;
+  left: 9px;
+  color: var(--muted);
+  pointer-events: none;
+}
+.mk-search-clr {
+  position: absolute;
+  right: 5px;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.mk-search-clr:hover {
+  color: var(--text);
+  background: var(--panel-3);
+}
+.mk-count {
+  white-space: nowrap;
+}
+.mk-card {
+  flex: 1;
+  min-height: 280px;
+}
+.mk-card-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.mk-pad {
+  padding: 12px;
+}
+.mk-table-wrap {
+  flex: 1;
+  min-height: 0;
+  transition: opacity 0.15s;
+}
+.mk-dim {
+  opacity: 0.55;
+}
+.mk-pager {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-top: 1px solid var(--border);
+}
+.mk-pager .btn-group .btn:disabled {
+  opacity: 0.45;
+}
+.mk-foot {
+  margin: 0;
+}
+
+/* ----------------------------------------------------------------------------- table */
+.mk-table {
+  font-size: 12px;
+}
+.mk-table th {
+  padding: 7px 6px;
+  font-size: 10.5px;
+}
+.mk-table td {
+  padding: 5px 6px;
+}
+.mk-table th:first-child,
+.mk-table td:first-child {
+  padding-left: 10px;
+}
+.mk-table th:last-child,
+.mk-table td:last-child {
+  padding-right: 12px;
+}
+.mk-th {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.mk-table th.num .mk-th {
+  justify-content: flex-end;
+}
+.mk-sort-hint {
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.mk-table th.sortable:hover .mk-sort-hint {
+  opacity: 0.7;
+}
+.mk-table th.mk-sorted {
+  color: var(--text);
+}
+.mk-star-cell {
+  width: 26px;
+}
+.mk-star {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #4b5468;
+  cursor: pointer;
+}
+.mk-star:hover {
+  color: var(--warn);
+  background: var(--panel-3);
+}
+.mk-star.on {
+  color: var(--warn);
+}
+.mk-sym-cell {
+  max-width: 230px;
+  min-width: 150px;
+}
+.mk-sym {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.mk-ticker {
+  font-family: var(--mono);
+  font-weight: 700;
+  color: #fff;
+  font-size: 12.5px;
+}
+.mk-exch {
+  font-size: 10.5px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+.mk-type {
+  font-size: 10px;
+  color: var(--info);
+  opacity: 0.85;
+}
+.mk-desc {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.mk-meter-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 84px;
+}
+.mk-meter-label {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.mk-meter-label.muted {
+  color: var(--text-2);
+  font-weight: 500;
+}

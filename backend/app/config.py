@@ -21,6 +21,19 @@ PORT = int(os.environ.get("NEXUS_PORT", "8420"))
 OFFLINE = os.environ.get("NEXUS_OFFLINE", "0") == "1"
 BACKGROUND = os.environ.get("NEXUS_BACKGROUND", "1") != "0"
 
+# ----------------------------------------------------------------------------- cloud mode (Supabase + hosting)
+# NEXUS_DATABASE_URL=postgresql://...  -> PostgreSQL (Supabase) instead of the local SQLite file.
+DATABASE_URL = os.environ.get("NEXUS_DATABASE_URL", "").strip()
+DB_SCHEMA = os.environ.get("NEXUS_DB_SCHEMA", "nexus").strip() or "nexus"
+# NEXUS_AUTH=supabase -> every API/WS call needs a Supabase session (mandatory when the server is public).
+AUTH_MODE = os.environ.get("NEXUS_AUTH", "none").strip().lower()
+SUPABASE_URL = os.environ.get("NEXUS_SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_ANON_KEY = os.environ.get("NEXUS_SUPABASE_ANON_KEY", "").strip()
+ALLOWED_EMAILS = [e.strip().lower() for e in os.environ.get("NEXUS_ALLOWED_EMAILS", "").split(",") if e.strip()]
+# Browser origins allowed to call the API and open the WebSocket (e.g. https://nexus-terminal.vercel.app).
+CORS_ORIGINS = [o.strip().rstrip("/") for o in os.environ.get("NEXUS_CORS_ORIGINS", "").split(",") if o.strip()]
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
 # Honest identification for every outbound request (never impersonate a browser).
 USER_AGENT = f"NexusTerminal/{VERSION} (+local research tool)"
 

@@ -5,6 +5,7 @@ import {
   Code,
   FlaskConical,
   Globe,
+  LogOut,
   Radar,
   Settings as SettingsIcon,
   SquareTerminal,
@@ -16,6 +17,7 @@ import {
 import { api } from './api/client'
 import type { Health, Page, Timeframe } from './api/types'
 import { socket } from './api/ws'
+import { authEnabled, currentSession, signOut } from './auth/session'
 import { Badge, Button, IconButton } from './components/ui'
 import SymbolSearch from './components/SymbolSearch'
 import Terminal from './components/terminal/Terminal'
@@ -215,6 +217,14 @@ export default function App() {
           active={terminalOpen}
           onClick={toggleTerminal}
         />
+        {authEnabled() && (
+          <>
+            <span className="small muted ellipsis" style={{ maxWidth: 180 }} title="Sesión iniciada">
+              {currentSession()?.email}
+            </span>
+            <IconButton icon={<LogOut size={15} />} title="Cerrar sesión" onClick={() => void signOut()} />
+          </>
+        )}
       </header>
 
       <nav className="app-nav" aria-label="Secciones">

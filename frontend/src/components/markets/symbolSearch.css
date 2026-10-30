@@ -1,0 +1,154 @@
+/* SymbolSearch (header search + symbol picker). The dropdown is position: fixed (placed from JS). */
+.symsearch {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+}
+.symsearch-ico {
+  position: absolute;
+  left: 9px;
+  color: var(--muted);
+  pointer-events: none;
+}
+.symsearch .symsearch-input {
+  width: 100%;
+  padding-left: 29px;
+  padding-right: 28px;
+}
+.symsearch.compact .symsearch-input {
+  height: 26px;
+  font-size: 12px;
+  padding-left: 26px;
+}
+.symsearch.compact .symsearch-ico {
+  left: 8px;
+}
+.symsearch-right {
+  position: absolute;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+}
+.symsearch-right .spinner {
+  width: 13px;
+  height: 13px;
+}
+.symsearch-clear {
+  width: 20px;
+  height: 20px;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.symsearch-clear:hover {
+  color: var(--text);
+  background: var(--panel-3);
+}
+.symsearch-kbd {
+  min-width: 18px;
+  height: 18px;
+  justify-content: center;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border-2);
+  background: var(--panel-2);
+  color: var(--muted);
+  font: 600 11px var(--mono);
+  pointer-events: none;
+}
+.symsearch-drop {
+  position: fixed;
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.symsearch-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+.symsearch-item {
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.symsearch-item.active {
+  background: var(--accent-bg);
+}
+.symsearch-item.direct {
+  border: 1px dashed var(--border-2);
+  margin-bottom: 4px;
+}
+.symsearch-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.symsearch-ticker {
+  font-weight: 700;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: #fff;
+  white-space: nowrap;
+}
+.symsearch-price {
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.symsearch-chg {
+  font-size: 11.5px;
+  min-width: 64px;
+  text-align: right;
+  white-space: nowrap;
+}
+.symsearch-desc {
+  color: var(--muted);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.symsearch-msg {
+  padding: 12px;
+  font-size: 12.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.symsearch-msg.neg {
+  color: #ffb3b8;
+}
+.symsearch-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  border-top: 1px solid var(--border);
+  font-size: 10.5px;
+  color: var(--muted);
+  background: var(--panel-2);
+}
+.symsearch-foot .spinner {
+  width: 11px;
+  height: 11px;
+}

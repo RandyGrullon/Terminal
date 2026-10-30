@@ -1,0 +1,337 @@
+/* Aprendizaje (learning) page */
+.brain-page .page-header h1 {
+  font-size: 18px;
+}
+.brain-p {
+  margin: 0;
+  line-height: 1.5;
+}
+.brain-pad {
+  padding: 12px;
+}
+
+/* feedback loop explainer */
+.brain-loop {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.brain-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+.brain-step-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.brain-step {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  min-width: 0;
+  align-self: stretch;
+}
+.brain-step strong {
+  font-size: 12.5px;
+}
+.brain-step span {
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.45;
+}
+.brain-step-arrow {
+  flex: none;
+  color: var(--muted);
+}
+.brain-honest {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 12px;
+  border-radius: var(--radius);
+  background: var(--pos-bg);
+  border: 1px solid rgba(22, 199, 132, 0.3);
+  font-size: 12.5px;
+  color: var(--text);
+  line-height: 1.5;
+}
+.brain-honest svg {
+  flex: none;
+  margin-top: 2px;
+}
+@media (max-width: 1100px) {
+  .brain-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .brain-step-arrow {
+    display: none;
+  }
+}
+
+/* layout rows */
+.brain-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr);
+  gap: 12px;
+  align-items: stretch;
+}
+.brain-row.even {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@media (max-width: 1060px) {
+  .brain-row,
+  .brain-row.even {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* charts */
+.brain-timeline {
+  position: relative;
+  width: 100%;
+}
+.brain-chart-canvas {
+  position: absolute;
+  inset: 0;
+}
+.brain-chart-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(11, 14, 20, 0.7);
+  z-index: 3;
+}
+.brain-chart-frame {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.brain-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+.brain-source {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.4fr) repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  font-size: 12px;
+}
+
+/* calibration (SVG) */
+.brain-cal {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+}
+.brain-cal-svg {
+  width: 100%;
+  max-width: 380px;
+  height: auto;
+}
+.brain-cal-grid {
+  stroke: rgba(42, 49, 66, 0.55);
+  stroke-width: 1;
+}
+.brain-cal-frame {
+  fill: none;
+  stroke: var(--border-2);
+}
+.brain-cal-diag {
+  stroke: var(--muted);
+  stroke-dasharray: 4 4;
+  stroke-width: 1.2;
+}
+.brain-cal-line {
+  fill: none;
+  stroke: var(--accent-2);
+  stroke-width: 1.6;
+  stroke-opacity: 0.8;
+}
+.brain-cal-dot {
+  fill: var(--accent);
+  fill-opacity: 0.85;
+  stroke: var(--bg);
+  stroke-width: 1.5;
+}
+.brain-cal-dot.off {
+  fill: var(--warn);
+}
+.brain-cal-tick {
+  fill: var(--muted);
+  font-size: 10px;
+  font-family: var(--mono);
+}
+.brain-cal-axis {
+  fill: var(--text-2);
+  font-size: 10.5px;
+}
+.brain-cal-note {
+  fill: var(--muted);
+  font-size: 9.5px;
+  font-style: italic;
+}
+.brain-cal-foot {
+  text-align: center;
+}
+.brain-cal-empty {
+  min-height: 120px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  padding: 12px;
+}
+
+/* weight bars */
+.brain-weights {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.brain-weights-axis {
+  font-size: 10.5px;
+}
+.brain-weights-hints {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+.brain-weight-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 42%) minmax(0, 1fr) 60px;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+.brain-weight-label {
+  color: var(--text-2);
+}
+.brain-weight-track {
+  position: relative;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--panel-3);
+  overflow: hidden;
+}
+.brain-weight-mid {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-2);
+  z-index: 1;
+}
+.brain-weight-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 3px;
+}
+.brain-weight-bar.pos {
+  background: var(--pos);
+}
+.brain-weight-bar.neg {
+  background: var(--neg);
+}
+.brain-weight-val {
+  text-align: right;
+  font-size: 11.5px;
+}
+.brain-more {
+  align-self: flex-start;
+  border: 0;
+  background: transparent;
+  color: var(--accent-2);
+  font: 12px var(--font);
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+/* gate learning */
+.brain-gate-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.brain-gate-box {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  min-width: 0;
+}
+.brain-gate-empty {
+  line-height: 1.5;
+}
+.brain-split {
+  display: flex;
+  height: 8px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel-3);
+}
+.brain-split .pos-part {
+  background: var(--pos);
+}
+.brain-split .wait-part {
+  background: var(--warn);
+  opacity: 0.85;
+}
+.brain-split .neg-part {
+  background: var(--neg);
+  opacity: 0.8;
+}
+
+/* model modal */
+.brain-modal-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.85fr);
+  gap: 16px;
+}
+@media (max-width: 860px) {
+  .brain-modal-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.brain-heat-wrap {
+  max-height: 340px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.brain-heat td,
+.brain-heat th {
+  padding: 5px 9px;
+}
+
+/* tables */
+.brain-filters .select {
+  height: 28px;
+}
+.brain-link {
+  border: 0;
+  background: transparent;
+  color: var(--accent-2);
+  padding: 0;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+.brain-link:hover {
+  text-decoration: underline;
+}

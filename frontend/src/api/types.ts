@@ -772,9 +772,16 @@ export interface Health {
   version: string
   uptime_s: number
   server_time: number
-  db: { path: string; size_bytes: number }
+  db: { path: string; size_bytes: number; dialect?: 'sqlite' | 'postgres' }
+  auth?: 'none' | 'supabase'
   services: Record<string, Record<string, unknown>>
   load_errors: string[]
+}
+
+export interface AuthConfig {
+  mode: 'none' | 'supabase'
+  supabase_url: string | null
+  supabase_anon_key: string | null
 }
 
 export type Settings = Record<string, unknown>

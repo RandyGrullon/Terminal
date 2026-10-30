@@ -19,6 +19,8 @@ class Runtime:
         self.evaluator: Any = None  # app.sim.evaluator.PredictionEvaluator
         self.sim: Any = None  # app.sim.simulator.Simulator
         self.scripts: Any = None  # app.scripting.service.ScriptService
+        self.maintenance: Any = None  # app.maintenance.Maintenance
+        self.auth: Any = None  # app.auth.SupabaseVerifier (cloud mode only)
         self.started_at: float = time.time()
         self.load_errors: list[str] = []
         self.services: list[tuple[str, Any]] = []

@@ -1,0 +1,35 @@
+# Fly.io (alternativa a Railway). Pasos en docs/DEPLOY.md:
+#   fly launch --no-deploy --copy-config --name <tu-app>
+#   fly secrets set NEXUS_DATABASE_URL=... NEXUS_SUPABASE_URL=... NEXUS_SUPABASE_ANON_KEY=... NEXUS_ALLOWED_EMAILS=... NEXUS_CORS_ORIGINS=...
+#   fly deploy
+app = "nexus-terminal"
+primary_region = "fra"   # Europa: compatible con Binance/OKX (sus APIs bloquean IPs de EE. UU.)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NEXUS_HOST = "0.0.0.0"
+  NEXUS_PORT = "8080"
+  NEXUS_AUTH = "supabase"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # NEXUS tiene servicios de fondo (vigilancia, escáner, evaluador, cuenta demo): debe quedarse encendido
+  # y con UNA sola máquina (los bucles de fondo no deben duplicarse).
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "40s"
+    interval = "30s"
+    method = "GET"
+    path = "/api/health"
+    timeout = "5s"
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1

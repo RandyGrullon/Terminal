@@ -1,4 +1,7 @@
-// Typed REST client for the NEXUS backend. All calls are relative (same origin / Vite proxy).
+// Typed REST client for the NEXUS backend. Same origin in local mode; VITE_API_BASE in cloud mode, where every
+// call carries the Supabase session token (refreshed and retried once on 401).
+import { authEnabled, ensureFreshSession, getAccessToken, refreshSession, signOut } from '../auth/session'
+import { apiUrl } from '../lib/config'
 import type {
   BacktestResult,
   CandlesResponse,
@@ -60,8 +63,8 @@ interface RequestOptions {
   signal?: AbortSignal
 }
 
-export async function request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
-  let url = path
+export async function request<T>(method: string, path: string, opts: RequestOptions = {}, retried = false): Promise<T> {
+  let url = apiUrl(path)
   if (opts.query) {
     const params = new URLSearchParams()
     for (const [k, v] of Object.entries(opts.query)) {
@@ -70,17 +73,26 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
     const qs = params.toString()
     if (qs) url += (url.includes('?') ? '&' : '?') + qs
   }
+  await ensureFreshSession()
+  const headers: Record<string, string> = {}
+  if (opts.body !== undefined) headers['Content-Type'] = 'application/json'
+  const token = getAccessToken()
+  if (token) headers.Authorization = `Bearer ${token}`
   let res: Response
   try {
     res = await fetch(url, {
       method,
-      headers: opts.body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      headers,
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
       signal: opts.signal,
     })
   } catch (err) {
     if ((err as Error)?.name === 'AbortError') throw err
     throw new ApiError('No hay conexión con el servidor NEXUS', 0, null)
+  }
+  if (res.status === 401 && authEnabled()) {
+    if (!retried && (await refreshSession())) return request<T>(method, path, opts, true)
+    void signOut()
   }
   const text = await res.text()
   let data: unknown = null
