@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -29,6 +30,7 @@ from app.ws import WSManager
 # (attribute on rt, module, class) — constructed in this order, started in this order, stopped in reverse.
 SERVICES: list[tuple[str, str, str]] = [
     ("hub", "app.data.hub", "MarketDataHub"),
+    ("macro", "app.macro.service", "MacroService"),
     ("nexus", "app.engine.service", "NexusService"),
     ("scanner", "app.sim.scanner", "ScannerService"),
     ("paper", "app.sim.paper", "PaperEngine"),
@@ -37,8 +39,15 @@ SERVICES: list[tuple[str, str, str]] = [
     ("scripts", "app.scripting.service", "ScriptService"),
     ("maintenance", "app.maintenance", "Maintenance"),
 ]
-ROUTERS = ["app.api.system", "app.api.market", "app.api.nexus", "app.api.sim", "app.api.scripts"]
-COMMAND_MODULES = ["app.terminal", "app.data.commands", "app.engine.commands", "app.sim.commands", "app.scripting.commands"]
+ROUTERS = ["app.api.system", "app.api.market", "app.api.nexus", "app.api.sim", "app.api.scripts", "app.api.macro"]
+COMMAND_MODULES = [
+    "app.terminal",
+    "app.data.commands",
+    "app.engine.commands",
+    "app.sim.commands",
+    "app.scripting.commands",
+    "app.macro.commands",
+]
 
 
 def _import(modname: str):
@@ -150,6 +159,36 @@ def _mount_frontend(app: FastAPI) -> None:
         return HTMLResponse(_NOT_BUILT)
 
 
+_VALIDATION_ES = {
+    "missing": "falta este campo",
+    "int_parsing": "debe ser un número entero",
+    "int_type": "debe ser un número entero",
+    "int_from_float": "debe ser un número entero",
+    "float_parsing": "debe ser un número",
+    "float_type": "debe ser un número",
+    "string_type": "debe ser texto",
+    "bool_parsing": "debe ser verdadero o falso",
+    "bool_type": "debe ser verdadero o falso",
+    "list_type": "debe ser una lista",
+    "dict_type": "debe ser un objeto",
+    "json_invalid": "JSON no válido",
+    "literal_error": "valor no permitido",
+    "enum": "valor no permitido",
+    "string_too_short": "texto demasiado corto",
+    "string_too_long": "texto demasiado largo",
+}
+
+
+def _validation_es(err: dict) -> str:
+    kind = str(err.get("type", ""))
+    ctx = err.get("ctx") or {}
+    if kind in ("greater_than_equal", "greater_than"):
+        return f"debe ser ≥ {ctx.get('ge', ctx.get('gt'))}"
+    if kind in ("less_than_equal", "less_than"):
+        return f"debe ser ≤ {ctx.get('le', ctx.get('lt'))}"
+    return _VALIDATION_ES.get(kind, str(err.get("msg", "valor no válido")))
+
+
 def _allowed_hosts() -> list[str]:
     extra = [h.strip() for h in os.environ.get("NEXUS_ALLOWED_HOSTS", "").split(",") if h.strip()]
     if config.HOST not in config.LOOPBACK_HOSTS:
@@ -199,6 +238,14 @@ def create_app() -> FastAPI:
         app.include_router(router)
 
     app.add_api_websocket_route("/ws", ws_endpoint)
+
+    @app.exception_handler(RequestValidationError)
+    async def _invalid(request: Request, exc: RequestValidationError):
+        problems = []
+        for err in exc.errors()[:6]:
+            where = ".".join(str(p) for p in err.get("loc", ()) if p not in ("body", "query", "path", "header"))
+            problems.append(f"{where or 'petición'}: {_validation_es(err)}")
+        return JSONResponse(status_code=422, content={"detail": "Parámetros no válidos — " + "; ".join(problems)})
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception):

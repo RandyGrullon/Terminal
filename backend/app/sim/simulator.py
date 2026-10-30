@@ -3,9 +3,11 @@
 - synthetic: SyntheticMarket ("SIM:NEXUS"), regime switchable live (auto bull bear range volatile crash).
 - replay: real history of any symbol revealed bar by bar; NEXUS only ever sees the revealed bars.
 
-Each bar: push through the hub (charts on market:SIM:*:tf update too) → NEXUS on the last ≤ 600 revealed bars
-(worker thread) → paper account 2 managed with the bar (SL/TP/partials/trailing) and auto-trading of TAKE
-verdicts only, filled at the bar close → WS `sim` message (bar, current, new markers, positions) + events.
+Each bar: push through the hub (charts on market:SIM:*:tf update too) → NEXUS on the last 300–600 revealed bars
+(worker thread; the window shrinks when the engine cannot keep up with the speed — long memory is carried by the
+latest learner snapshot taken at or before the window start, so there is no lookahead) → paper account 2 managed
+with the bar (SL/TP/partials/trailing) and auto-trading of TAKE verdicts only, filled at the bar close → WS `sim`
+message (bar, current, new markers, positions) + events.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ from app.sim.common import (
     fmt_pct,
     fmt_prob,
     gate_line,
+    json_loads,
     load_engine,
     normalize_snapshots,
     run_engine,
@@ -32,8 +35,11 @@ from app.sim.synthetic import REGIMES, SyntheticConfig, SyntheticMarket
 from app.util import RateLimitedLog, clamp, floor_time, normalize_tf, now_ms, now_s, safe_float, tf_seconds
 
 NEXUS_WINDOW = 600
+MIN_NEXUS_WINDOW = 300
 MAX_REVEALED = 1500
 MAX_MARKERS = 2000
+SNAPSHOT_SPACING_BARS = 50
+MAX_SNAPSHOTS = 40  # × 50 bars ≥ MAX_REVEALED: covers any window start
 MIN_SPEED, MAX_SPEED = 0.5, 20.0
 SYNTH_SYMBOL = "SIM:NEXUS"
 REPLAY_PUSH_SYMBOL = "SIM:REPLAY"
@@ -45,10 +51,11 @@ class SimError(ValueError):
     """Invalid simulator request (Spanish message)."""
 
 
-def _default_nexus(cs: CandleSet, prior: Any) -> tuple[dict, Any]:
+def _default_nexus(cs: CandleSet, prior: Any, gate_state: dict | None = None) -> tuple[dict, Any]:
+    """NEXUS with the live settings (runs in a worker thread)."""
     _, nexus_params_cls = load_engine()
     params, _ = build_nexus_params(nexus_params_cls, current_settings(), None)
-    return run_engine(cs, params, prior)
+    return run_engine(cs, params, prior, gate_state=gate_state)
 
 
 class Simulator:
@@ -76,14 +83,16 @@ class Simulator:
         self._last_nexus: dict | None = None
         self._snapshots: list[tuple[int, Any]] = []
         self._prior_ok = True
+        self._window = NEXUS_WINDOW
         self._markers_seen: set[tuple[int, str]] = set()
         self._markers: list[dict] = []
         self._account: dict | None = None
         self._last_action: str | None = None
         self._event_window = (0.0, 0)
         self._log = RateLimitedLog()
+        self._gate_state: dict | None = None
         # Overridable for tests: (CandleSet, prior) -> (NexusResponse dict | None, snapshots)
-        self.nexus_fn: Callable[[CandleSet, Any], tuple[dict | None, Any]] = _default_nexus
+        self.nexus_fn: Callable[[CandleSet, Any], tuple[dict | None, Any]] = self._engine_nexus
 
     # ------------------------------------------------------------------ service protocol
 
@@ -129,6 +138,19 @@ class Simulator:
     @property
     def price(self) -> float | None:
         return float(self._revealed[-1]["close"]) if self._revealed else None
+
+    def _engine_nexus(self, cs: CandleSet, prior: Any) -> tuple[dict, Any]:
+        """Default runner. Synthetic sessions use the gate weights learned from real outcomes (no lookahead on a
+        synthetic market); replays keep the engine's initial gate weights so real history stays out-of-sample."""
+        return _default_nexus(cs, prior, self._gate_state)
+
+    async def _load_gate_state(self) -> dict | None:
+        try:
+            row = await self.rt.db.fetchone("SELECT state FROM model_state WHERE kind='gate' AND key='global'")
+        except Exception:
+            return None
+        state = json_loads(row["state"]) if row else None
+        return state if isinstance(state, dict) else None
 
     # ------------------------------------------------------------------ state
 
@@ -233,6 +255,10 @@ class Simulator:
                     cs = await asyncio.wait_for(self.rt.hub.get_candles(symbol, tf, MAX_REVEALED), timeout=60)
                 except asyncio.TimeoutError:
                     raise SimError(f"Tiempo agotado descargando {symbol} {tf}") from None
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # ProviderError (invalid input) or an unexpected provider failure
+                    raise SimError(f"No se pudo cargar el historial de {symbol} {tf}: {exc}") from None
                 candles = cs.to_list() if cs is not None else []
                 if len(candles) < 80:
                     note = getattr(cs, "note", None)
@@ -256,6 +282,8 @@ class Simulator:
             self._last_nexus = None
             self._snapshots = []
             self._prior_ok = True
+            self._window = NEXUS_WINDOW
+            self._gate_state = await self._load_gate_state() if mode == "synthetic" else None
             self._markers_seen, self._markers = set(), []
             self._last_action = None
 
@@ -399,8 +427,19 @@ class Simulator:
                     self._emit("warn", f"No se pudo publicar la vela simulada en el hub: {exc}")
                 return
 
+    def _adapt_window(self, elapsed_s: float) -> None:
+        """Keep NEXUS inside the per-bar time budget at high speed by shrinking the window (long memory lives in
+        the prior snapshot); grow it back when there is slack. Never below nexus.min_bars + 100."""
+        budget = 0.8 / max(self.speed, MIN_SPEED)
+        floor = max(MIN_NEXUS_WINDOW, int(safe_float(self._setting("nexus.min_bars", 150)) or 150) + 100)
+        floor = min(floor, NEXUS_WINDOW)
+        if elapsed_s > budget and self._window > floor:
+            self._window = max(floor, int(self._window * 0.75))
+        elif elapsed_s < 0.4 * budget and self._window < NEXUS_WINDOW:
+            self._window = min(NEXUS_WINDOW, self._window + 50)
+
     async def _compute_nexus(self) -> dict | None:
-        window = self._revealed[-NEXUS_WINDOW:]
+        window = self._revealed[-self._window:]
         if not window:
             return None
         cs = CandleSet.from_rows(window, self.symbol or SYNTH_SYMBOL, self.tf or "1h",
@@ -413,8 +452,10 @@ class Simulator:
                 if t <= first:
                     prior = state
                     break
+        started = time.monotonic()
         try:
             resp, snaps = await asyncio.to_thread(self.nexus_fn, cs, prior)
+            self._adapt_window(time.monotonic() - started)
         except EngineUnavailable as exc:
             if self._log.should_log("engine", 3600):
                 self._emit("warn", f"{exc}: la simulación solo mostrará el precio")
@@ -435,11 +476,14 @@ class Simulator:
                 return None
         if not isinstance(resp, dict):
             return None
+        # Keep learner snapshots ≥ SNAPSHOT_SPACING_BARS apart (the engine also snapshots the last bar of every
+        # run): whatever the window position there is then always a snapshot at or before its first bar.
+        spacing = SNAPSHOT_SPACING_BARS * tf_seconds(self.tf or "1h")
         for t, state in normalize_snapshots(snaps):
-            if not self._snapshots or t > self._snapshots[-1][0]:
+            if not self._snapshots or t >= self._snapshots[-1][0] + spacing:
                 self._snapshots.append((t, state))
-        if len(self._snapshots) > 40:
-            self._snapshots = self._snapshots[-40:]
+        if len(self._snapshots) > MAX_SNAPSHOTS:
+            del self._snapshots[: len(self._snapshots) - MAX_SNAPSHOTS]
         resp.setdefault("symbol", self.symbol)
         resp.setdefault("tf", self.tf)
         resp.setdefault("provider", "synthetic" if self.mode == "synthetic" else "replay")

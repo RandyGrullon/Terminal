@@ -517,6 +517,7 @@ export interface Position {
   tp2: number | null
   tp3: number | null
   trail: number | null
+  tp_hits?: number // 0..3 objectives already reached
   status: 'open' | 'closed'
   price: number | null // last known price
   exit_price: number | null
@@ -555,6 +556,8 @@ export interface SimState {
   account: PaperAccount | null
   last_action: string | null
   stats: { trades: number; win_rate: number | null; pnl_pct: number } | null
+  market_regime?: string | null // synthetic market's current regime
+  seed?: number | null
 }
 
 export interface SimSnapshot {
@@ -792,6 +795,57 @@ export interface DbStats {
   tables: Record<string, number>
 }
 
+// ----------------------------------------------------------------------------- market conditions (macro semáforo)
+
+/** green = operar con normalidad · amber = precaución · red = no operar ahora */
+export type MacroLevel = 'green' | 'amber' | 'red'
+
+export interface MacroEvent {
+  id: string
+  title: string // original (English) title from the source
+  title_es: string // Spanish title shown to the user ("IPC de EE. UU. (mensual)")
+  currency: string // USD | EUR | GBP | JPY | ...
+  time: number // unix s
+  impact: 'high' | 'medium' | 'low' | 'holiday'
+  forecast: string | null
+  previous: string | null
+  source: string // forexfactory | federalreserve
+  countdown_s: number // seconds until the event (negative = already happened)
+}
+
+export interface MacroMetric {
+  id: string // vix | us_futures | dxy | us10y | move | crypto_fng | funding ...
+  label: string // "Miedo en bolsa (VIX)"
+  value: number | null
+  display: string // "22,65"
+  change_pct: number | null
+  change_display: string // "+31,8 %" or "+8 pb"
+  level: 'ok' | 'warn' | 'danger'
+  note: string // "Volatilidad alta: reduce el tamaño"
+}
+
+export interface MarketConditions {
+  level: MacroLevel
+  label: string // "Operar con normalidad" | "Precaución" | "No operar ahora"
+  headline: string // one sentence: "IPC de EE. UU. en 24 min: espera a que pase la volatilidad."
+  advice: string // what to do: "Reduce el tamaño a la mitad y evita entrar antes del dato."
+  reasons: string[] // at most 3
+  scope: string // "global" | "crypto" | "forex:EUR/USD" | "us_equities" ...
+  symbol: string | null
+  blackout: { active: boolean; until: number | null; event: string | null } // "no operar" window; until = unix s
+  next_event: MacroEvent | null // next high-impact event relevant to the scope
+  events: MacroEvent[] // upcoming relevant events (max ~5)
+  metrics: MacroMetric[] // at most 6, only the ones that matter
+  updated_at: number // ms
+  stale: boolean // data older than expected (source unavailable)
+}
+
+export interface MacroAlert {
+  kind: 'level' | 'event_soon' | 'event_now' | 'blackout_end' | 'volatility'
+  level: MacroLevel
+  message: string
+}
+
 // ----------------------------------------------------------------------------- websocket
 
 export type ServerMessage =
@@ -811,6 +865,7 @@ export type ServerMessage =
     }
   | { type: 'paper'; account: PaperAccount; positions: Position[] }
   | { type: 'scanner'; event: 'started' | 'progress' | 'done' | 'error'; run_id: number; progress?: number; message?: string }
+  | { type: 'macro'; conditions: MarketConditions; alert?: MacroAlert | null }
   | ({ type: 'ui' } & UiAction)
   | { type: 'pong' }
 

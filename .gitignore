@@ -12,7 +12,7 @@ frontend/dist/
 frontend/.build-hash
 
 # Local data (SQLite DB, logs, scratch)
-data/
+/data/
 .tmp/
 *.db
 *.db-wal

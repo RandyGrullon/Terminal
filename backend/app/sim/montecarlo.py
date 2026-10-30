@@ -262,7 +262,12 @@ async def run_montecarlo(
     if rt is None or rt.hub is None:
         raise MonteCarloError("Servicio de datos no disponible")
     limit = int(min(max(int(bars), 1000), 5000))
-    cs = await rt.hub.get_candles(symbol, tf, limit)
+    try:
+        cs = await rt.hub.get_candles(symbol, tf, limit)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # ProviderError (invalid input) or an unexpected provider failure
+        raise MonteCarloError(f"No se pudieron obtener las velas de {symbol} {tf}: {exc}") from None
     if cs is None or len(cs) == 0:
         note = getattr(cs, "note", None) if cs is not None else None
         raise MonteCarloError(f"Sin velas para {symbol} {tf}" + (f": {note}" if note else ""))

@@ -87,6 +87,18 @@ def _windows(x: np.ndarray, n: int) -> np.ndarray | None:
     return sliding_window_view(x, n)
 
 
+def _rows(w: np.ndarray) -> np.ndarray:
+    """C-contiguous copy of a sliding-window view: per-row reductions then use the same summation order whatever
+    the number of rows, so a truncated series gives bit-identical values (exact causality, stable crossovers)."""
+    return np.ascontiguousarray(w)
+
+
+def _wdot(w: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Row-wise dot product ``w @ v`` without BLAS (its kernels group rows, which changes the rounding of the
+    last rows depending on how many rows there are)."""
+    return (_rows(w) * v).sum(axis=1)
+
+
 # ============================================================================= rolling statistics
 
 
@@ -98,8 +110,11 @@ def rolling_sum(x: np.ndarray, n: int) -> np.ndarray:
     if m < n:
         return out
     bad = ~np.isfinite(x)
-    finite = x[~bad]
-    offset = float(np.median(finite)) if finite.size else 0.0  # improves precision of the cumulative sums
+    # Offset by the FIRST finite value (improves precision of the cumulative sums). It must not depend on later
+    # bars: a whole-array statistic (e.g. the median) changes the last bits of every sum when the series is
+    # truncated, which flips exact comparisons downstream (crossovers) -> numerical lookahead.
+    first = int(np.argmax(~bad)) if not bad.all() else -1
+    offset = float(x[first]) if first >= 0 else 0.0
     xz = np.where(bad, 0.0, x - offset)
     c = np.concatenate(([0.0], np.cumsum(xz)))
     b = np.concatenate(([0], np.cumsum(bad)))
@@ -121,7 +136,7 @@ def rolling_std(x: np.ndarray, n: int, ddof: int = 0) -> np.ndarray:
     w = _windows(x, n)
     if w is None or n - ddof <= 0:
         return out
-    out[n - 1 :] = w.std(axis=1, ddof=ddof)
+    out[n - 1 :] = _rows(w).std(axis=1, ddof=ddof)
     return out
 
 
@@ -264,7 +279,7 @@ def wma(x: np.ndarray, n: int) -> np.ndarray:
     if w is None:
         return out
     weights = np.arange(1, n + 1, dtype=float)
-    out[n - 1 :] = w @ weights / weights.sum()
+    out[n - 1 :] = _wdot(w, weights) / weights.sum()
     return out
 
 
@@ -339,7 +354,7 @@ def alma(x: np.ndarray, n: int = 9, offset: float = 0.85, sigma: float = 6.0) ->
     s = n / max(sigma, 1e-9)
     k = np.arange(n, dtype=float)
     weights = np.exp(-((k - m) ** 2) / (2.0 * s * s))
-    out[n - 1 :] = w @ weights / weights.sum()
+    out[n - 1 :] = _wdot(w, weights) / weights.sum()
     return out
 
 
@@ -391,11 +406,12 @@ def linreg_stats(y: np.ndarray, n: int) -> dict[str, np.ndarray]:
     w = _windows(y, n)
     if w is None:
         return out
+    w = _rows(w)
     xk = np.arange(n, dtype=float)
     xm = xk.mean()
     sxx = float(((xk - xm) ** 2).sum())
     ym = w.mean(axis=1)
-    slope = ((w - ym[:, None]) @ (xk - xm)) / sxx
+    slope = _wdot(w - ym[:, None], xk - xm) / sxx
     intercept = ym - slope * xm
     fit = intercept[:, None] + slope[:, None] * xk[None, :]
     resid = w - fit
@@ -584,6 +600,7 @@ def cci(high, low, close, n: int = 20) -> np.ndarray:
     w = _windows(tp, n)
     if w is None:
         return out
+    w = _rows(w)
     mean = w.mean(axis=1)
     md = np.abs(w - mean[:, None]).mean(axis=1)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -670,7 +687,8 @@ def tsi(x: np.ndarray, long: int = 25, short: int = 13) -> np.ndarray:
     pc = diff(x, 1)
     num = ema(ema(pc, long), short)
     den = ema(ema(np.abs(pc), long), short)
-    return 100.0 * safe_div(num, den, fill=0.0)
+    out = 100.0 * safe_div(num, den, fill=0.0)
+    return np.where(np.isfinite(num) & np.isfinite(den), out, NAN)
 
 
 def ultimate(high, low, close, a: int = 7, b: int = 14, c: int = 28) -> np.ndarray:
@@ -684,7 +702,8 @@ def ultimate(high, low, close, a: int = 7, b: int = 14, c: int = 28) -> np.ndarr
     tr[0] = NAN
 
     def avg(k: int) -> np.ndarray:
-        return safe_div(rolling_sum(bp, k), rolling_sum(tr, k), fill=0.5)
+        sb, st = rolling_sum(bp, k), rolling_sum(tr, k)
+        return np.where(np.isfinite(sb) & np.isfinite(st), safe_div(sb, st, fill=0.5), NAN)
 
     return 100.0 * (4.0 * avg(a) + 2.0 * avg(b) + avg(c)) / 7.0
 
@@ -698,7 +717,8 @@ def cmo(x: np.ndarray, n: int = 14) -> np.ndarray:
     d = diff(x, 1)
     up = rolling_sum(np.where(np.isfinite(d), np.maximum(d, 0.0), NAN), n)
     dn = rolling_sum(np.where(np.isfinite(d), np.maximum(-d, 0.0), NAN), n)
-    return 100.0 * safe_div(up - dn, up + dn, fill=0.0)
+    out = 100.0 * safe_div(up - dn, up + dn, fill=0.0)
+    return np.where(np.isfinite(up) & np.isfinite(dn), out, NAN)
 
 
 def efficiency_ratio(x: np.ndarray, n: int = 10) -> np.ndarray:
@@ -716,7 +736,7 @@ def swma(x: np.ndarray) -> np.ndarray:
     w = _windows(x, 4)
     if w is None:
         return out
-    out[3:] = w @ np.array([1.0, 2.0, 2.0, 1.0]) / 6.0
+    out[3:] = _wdot(w, np.array([1.0, 2.0, 2.0, 1.0])) / 6.0
     return out
 
 
@@ -823,7 +843,9 @@ def ad_line(high, low, close, volume) -> np.ndarray:
 
 def cmf(high, low, close, volume, n: int = 20) -> np.ndarray:
     v = nz(volume)
-    return safe_div(rolling_sum(money_flow_multiplier(high, low, close) * v, n), rolling_sum(v, n), fill=0.0)
+    num = rolling_sum(money_flow_multiplier(high, low, close) * v, n)
+    den = rolling_sum(v, n)
+    return np.where(np.isfinite(num) & np.isfinite(den), safe_div(num, den, fill=0.0), NAN)
 
 
 def mfi(high, low, close, volume, n: int = 14) -> np.ndarray:
@@ -919,10 +941,10 @@ def hurst(x: np.ndarray, n: int = 100, max_lag: int = 20) -> np.ndarray:
     for lag in lags:
         d = lp - shift(lp, lag)
         logs.append(np.log(rolling_std(d, n - lag) + 1e-300))
-    y = np.vstack(logs).T  # (m, L)
+    y = np.ascontiguousarray(np.vstack(logs).T)  # (m, L)
     lx = np.log(np.array(lags, dtype=float))
     lxm = lx - lx.mean()
-    slope = ((y - y.mean(axis=1, keepdims=True)) @ lxm) / float((lxm * lxm).sum())
+    slope = _wdot(y - y.mean(axis=1, keepdims=True), lxm) / float((lxm * lxm).sum())
     valid = np.all(np.isfinite(y), axis=1)
     out[valid] = np.clip(slope[valid], 0.0, 1.0)
     return out

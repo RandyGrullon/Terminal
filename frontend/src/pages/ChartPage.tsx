@@ -27,6 +27,7 @@ import { useMarketData } from '../components/chart/useMarketData'
 import SignalPanel from '../components/nexus/SignalPanel'
 import TradeCheck from '../components/nexus/TradeCheck'
 import Watchlist from '../components/nexus/Watchlist'
+import { MacroBadge } from '../components/macro/MacroBadge'
 import { Badge, Button, Empty, ErrorBox, IconButton, Loading, Spinner } from '../components/ui'
 import { VERDICT_LABEL, fmtPct, fmtPrice, signTone, splitSymbol, verdictTone, type Tone } from '../lib/format'
 import { useApp } from '../store'
@@ -312,6 +313,7 @@ export default function ChartPage() {
               <GateChip label="Corto" gate={current.gate.short} />
             </span>
           )}
+          <MacroBadge symbol={symbol} />
           {(md.nexusLoading || md.nexusRefreshing || (md.candlesLoading && !!candles)) && (
             <span className="row gap-1 tiny muted nowrap" title={md.nexusLoading ? 'Calculando NEXUS…' : 'Actualizando datos…'}>
               <Spinner /> {md.nexusLoading ? 'NEXUS…' : ''}

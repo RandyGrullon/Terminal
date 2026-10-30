@@ -241,7 +241,10 @@ async def _backtest(ctx: CommandContext) -> None:
     tf = _tf(ctx, ctx.arg(1), "1h")
     bars = int(clamp(ctx.flag_int("bars", 2000) or 2000, 300, 5000))
     use_gate = not bool(ctx.flag("nogate", False))
-    cs = await hub.get_candles(sym, tf, bars)
+    try:
+        cs = await hub.get_candles(sym, tf, bars)
+    except Exception as exc:  # ProviderError (invalid input) or an unexpected provider failure
+        ctx.fail(f"No se pudieron obtener las velas de {sym} {tf}: {exc}")
     if cs is None or len(cs) == 0:
         ctx.fail(f"Sin velas para {sym} {tf}" + (f": {cs.note}" if cs is not None and cs.note else ""))
     ctx.print(f"Backtest de {sym} {tf} sobre {len(cs)} velas ({cs.provider or 'datos locales'})…", "muted")

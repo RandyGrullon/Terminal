@@ -16,6 +16,8 @@ import type {
   IndicatorRequestItem,
   IndicatorSpec,
   LearningSummary,
+  MacroEvent,
+  MarketConditions,
   MarketInfo,
   MonteCarloResult,
   NexusEvent,
@@ -224,6 +226,10 @@ export const api = {
   predictions: (q: { source?: string; symbol?: string; resolved?: boolean; limit?: number } = {}) =>
     get<{ predictions: PredictionRow[]; stats: PredictionStats }>('/api/predictions', q),
   learning: () => get<LearningSummary>('/api/learning/summary'),
+
+  // ------------------------------------------------------------------ market conditions (macro semáforo)
+  macro: (symbol?: string) => get<MarketConditions>('/api/macro', { symbol }),
+  macroCalendar: (q: { days?: number; impact?: string } = {}) => get<{ events: MacroEvent[] }>('/api/macro/calendar', q),
 
   // ------------------------------------------------------------------ PyChart scripts
   scripts: {

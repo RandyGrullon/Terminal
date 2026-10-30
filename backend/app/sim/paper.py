@@ -28,6 +28,7 @@ from app.sim import metrics as M
 from app.sim.common import (
     EXIT_LABEL,
     SIDE_LABEL,
+    call_maybe_async,
     fmt_num,
     fmt_pct,
     fmt_price,
@@ -243,7 +244,7 @@ class PaperEngine:
         for pos in stale_sim:  # the simulator session that owned them no longer exists
             px = safe_float(pos["meta"].get("last_price")) or pos["entry_price"]
             await self._close(pos, px, "MANUAL", "Sesión de simulación finalizada", now_s(), market=False, emit=False)
-        self._register_listener()
+        await self._register_listener()
         if self.rt.settings is not None:
             self.rt.settings.add_listener(self._on_setting)
         if config.BACKGROUND:
@@ -264,7 +265,7 @@ class PaperEngine:
         hub = self.rt.hub
         for symbol, tf, owner in list(self._subs):
             try:
-                hub.unsubscribe(symbol, tf, owner)
+                await call_maybe_async(hub.unsubscribe, symbol, tf, owner)
             except Exception:
                 pass
         self._subs.clear()
@@ -284,12 +285,12 @@ class PaperEngine:
             [(aid, name, size, size, ts, ts) for aid, name in ACCOUNTS.items()],
         )
 
-    def _register_listener(self) -> None:
+    async def _register_listener(self) -> None:
         hub = self.rt.hub
         if self._listener_registered or hub is None or not hasattr(hub, "add_listener"):
             return
         try:
-            hub.add_listener(self._on_candle)
+            await call_maybe_async(hub.add_listener, self._on_candle)
             self._listener_registered = True
         except Exception as exc:
             self._emit("warn", "paper", f"No se pudo escuchar el feed de precios: {exc}")
@@ -388,6 +389,7 @@ class PaperEngine:
             "tp2": pos.get("tp2"),
             "tp3": pos.get("tp3"),
             "trail": pos.get("trail"),
+            "tp_hits": int(pos.get("tp_hits") or 0),
             "status": pos["status"],
             "price": price,
             "exit_price": pos.get("exit_price"),
@@ -1012,7 +1014,7 @@ class PaperEngine:
                 if not info["early_exit"]:
                     self._warned.pop(pos["id"], None)
                     continue
-                auto = pos["origin"] != "manual" or bool(self._setting("paper.auto_trade", False))
+                auto = pos["origin"] != "manual"  # the user's own trades are never closed for them: warn instead
                 if auto and price is not None:
                     async with self._lock:
                         if pos["id"] in self._open:
@@ -1113,14 +1115,14 @@ class PaperEngine:
                 wanted.add((str(s).upper(), tf, "paper:auto"))
         for item in wanted - self._subs:
             try:
-                hub.subscribe(*item)
+                await call_maybe_async(hub.subscribe, *item)
                 self._subs.add(item)
             except Exception as exc:
                 if self._log.should_log(f"sub:{item[0]}", 600):
                     self._emit("warn", "paper", f"No se pudo seguir {item[0]} en vivo: {exc}")
         for item in self._subs - wanted:
             try:
-                hub.unsubscribe(*item)
+                await call_maybe_async(hub.unsubscribe, *item)
             except Exception:
                 pass
             self._subs.discard(item)

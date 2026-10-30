@@ -11,7 +11,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from app.config import VERSION
 from app.util import clean_json, now_ms
 
-DEFAULT_TOPICS = ("events", "sim", "paper", "scanner", "ui")
+DEFAULT_TOPICS = ("events", "sim", "paper", "scanner", "ui", "macro")
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 

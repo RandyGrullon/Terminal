@@ -19,6 +19,7 @@ import type { Health, Page, Timeframe } from './api/types'
 import { socket } from './api/ws'
 import { authEnabled, currentSession, signOut } from './auth/session'
 import { Badge, Button, IconButton } from './components/ui'
+import MarketPulse from './components/macro/MarketPulse'
 import SymbolSearch from './components/SymbolSearch'
 import Terminal from './components/terminal/Terminal'
 import BrainPage from './pages/BrainPage'
@@ -149,6 +150,23 @@ export default function App() {
   }, [toggleTerminal])
 
   useEffect(() => {
+    // Messages like "no operes hasta las 9:00" use the user's clock, also when the server runs in the cloud (UTC).
+    let tz = ''
+    try {
+      tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''
+    } catch {
+      tz = ''
+    }
+    if (!tz) return
+    api.settings
+      .get()
+      .then(({ settings }) => {
+        if (settings['ui.timezone'] !== tz) return api.settings.update({ 'ui.timezone': tz })
+      })
+      .catch(() => undefined)
+  }, [])
+
+  useEffect(() => {
     let alive = true
     const load = () =>
       api
@@ -201,6 +219,7 @@ export default function App() {
           {symbol}
         </span>
         <div className="header-spacer" />
+        <MarketPulse />
         {loadErrors.length > 0 && (
           <Badge tone="warn" title={loadErrors.join('\n')}>
             <TriangleAlert size={12} /> {loadErrors.length} módulo(s) con error

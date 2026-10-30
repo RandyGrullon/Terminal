@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app import config
+from app.data.base import ProviderError
 from app.runtime import rt
 from app.sim.backtest import BacktestError, run_backtest, save_backtest, summarize_backtest
 from app.sim.common import EngineUnavailable, load_engine
@@ -170,7 +171,12 @@ async def backtest(req: BacktestRequest) -> dict:
     except EngineUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from None
     limit = int(clamp(int(req.limit or 2000), 300, 5000))
-    cs = await hub.get_candles(symbol, tf, limit)
+    try:
+        cs = await hub.get_candles(symbol, tf, limit)
+    except ProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"No se pudieron obtener las velas de {symbol} {tf}: {exc}") from None
     if cs is None or len(cs) == 0:
         note = getattr(cs, "note", None) if cs is not None else None
         raise HTTPException(status_code=404, detail=f"Sin velas para {symbol} {tf}" + (f": {note}" if note else ""))

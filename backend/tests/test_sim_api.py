@@ -5,10 +5,9 @@ import time
 
 import pytest
 
-from app.sim.common import engine_available
 from app.sim.synthetic import generate_candleset
 from tests.conftest import FIXED_END
-from tests.test_sim_fakes import FakeHub, FakeNexus
+from tests.test_sim_fakes import FakeHub, FakeNexus, engine_runs
 
 BTC = "BINANCE:BTCUSDT"
 
@@ -133,12 +132,11 @@ def test_scanner_prediction_and_learning_endpoints(client):
 
 def test_backtest_and_montecarlo_endpoints(client, monkeypatch):
     assert client.post("/api/montecarlo", json={"mode": "nope"}).status_code == 400
-    if not engine_available():
+    if not engine_runs():
         assert client.post("/api/backtest", json={"symbol": "SIM:NEXUS", "tf": "1h"}).status_code == 503
         assert client.post("/api/montecarlo", json={"mode": "synthetic"}).status_code == 503
         # with a stand-in engine the endpoint runs end to end
         from app.api import sim as api_sim
-        from app.sim import backtest as bt
         from tests.test_sim_metrics import _fake_engine
 
         _fake_engine(monkeypatch)
@@ -186,7 +184,7 @@ def test_terminal_commands(client):
     res = _term(client, "auto on btc eth --tf 4h")
     assert res["ok"] and res["data"]["symbols"] == [BTC, "BINANCE:ETHUSDT"] and res["data"]["tf"] == "4h"
     assert _term(client, "auto off")["ok"] and _term(client, "auto")["ok"]
-    if not engine_available():
+    if not engine_runs():
         res = _term(client, "backtest SIM:NEXUS 1h")
         assert res["ok"] is False and "NEXUS" in _text(res)
         assert _term(client, "mc --synthetic")["ok"] is False

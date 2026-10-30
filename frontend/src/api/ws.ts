@@ -17,6 +17,10 @@ interface Pending {
 
 export const marketTopic = (symbol: string, tf: string) => `market:${symbol.toUpperCase()}:${tf}`
 
+/** Topics the server subscribes every client to on connect. Never unsubscribe them (that would silence the
+ *  topic for the whole app): socket.subscribe() on these is a no-op; just use socket.on(). */
+export const DEFAULT_TOPICS: ReadonlySet<string> = new Set(['events', 'sim', 'paper', 'scanner', 'ui', 'macro'])
+
 class NexusSocket {
   status: WsStatus = 'closed'
   private ws: WebSocket | null = null
@@ -140,6 +144,7 @@ class NexusSocket {
 
   /** Ref-counted topic subscription (re-sent automatically after reconnects). Returns an unsubscribe fn. */
   subscribe(topic: string): () => void {
+    if (DEFAULT_TOPICS.has(topic)) return () => undefined // always on: see DEFAULT_TOPICS
     const n = this.topics.get(topic) ?? 0
     this.topics.set(topic, n + 1)
     if (n === 0) this.rawSend({ type: 'subscribe', topic })

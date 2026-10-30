@@ -108,13 +108,25 @@ def test_simulate_account_single_long_trade_sizing_and_costs():
     cs = flat_candles(20)
     sim = bt.simulate_account(cs, [trade(5, 10, r=2.0, exit_price=104.0)], initial_capital=10000, risk_pct=1.0,
                               fee_pct=0.1, slippage_pct=0.02)
-    # qty = 1% of 10000 / 2 = 50 ; gross = 2R × 50 × 2 = 200 ; costs = 0.12 % of (5000 + 5200)
-    expected_costs = 50 * 100 * 0.0012 + 50 * 104 * 0.0012
+    # Engine R multiples are already net of commissions (Position.result), so the account only deducts slippage
+    # and reports commissions + slippage as costs (no double counting).
+    # qty = 1% of 10000 / 2 = 50 ; net P&L = 2R × 50 × 2 = 200 ; slippage = 0.02 % of (5000 + 5200)
+    slippage = 50 * 100 * 0.0002 + 50 * 104 * 0.0002
+    commissions = 50 * 100 * 0.001 + 50 * 104 * 0.001
+    assert sim["costs"] == pytest.approx(slippage + commissions)
+    assert sim["equity"][-1] == pytest.approx(10000 + 200 - slippage)
+    assert sim["equity"][4] == 10000  # flat before the entry
+    assert sim["equity"][5] == pytest.approx(10000 - 50 * 100 * 0.0002)  # entry slippage paid
+    assert sim["in_position"].sum() == 6
+
+
+def test_simulate_account_gross_trades_charge_commissions():
+    cs = flat_candles(20)
+    sim = bt.simulate_account(cs, [trade(5, 10, r=2.0, exit_price=104.0)], initial_capital=10000, risk_pct=1.0,
+                              fee_pct=0.1, slippage_pct=0.02, trades_net_of_fees=False)
+    expected_costs = 50 * 100 * 0.0012 + 50 * 104 * 0.0012  # commissions + slippage charged by the account
     assert sim["costs"] == pytest.approx(expected_costs)
     assert sim["equity"][-1] == pytest.approx(10000 + 200 - expected_costs)
-    assert sim["equity"][4] == 10000  # flat before the entry
-    assert sim["equity"][5] == pytest.approx(10000 - 50 * 100 * 0.0012)  # entry costs paid
-    assert sim["in_position"].sum() == 6
     t = sim["trades"][0]
     assert t["qty"] == pytest.approx(50.0) and t["pnl"] == pytest.approx(200 - expected_costs, abs=0.01)
     assert t["pnl_account_pct"] == pytest.approx((200 - expected_costs) / 100, abs=1e-3)
@@ -252,7 +264,9 @@ def test_save_backtest_row(runtime_factory, monkeypatch):
 
 
 def test_real_engine_backtest_is_causal(candles):
-    pytest.importorskip("app.engine.nexus")
+    from tests.test_sim_fakes import require_engine
+
+    require_engine()
     full = bt.run_backtest(candles, include_candles=False)
     assert full["bars"] == len(candles)
     assert all(math.isfinite(p["equity"]) for p in full["equity"])

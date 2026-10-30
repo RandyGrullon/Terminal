@@ -11,6 +11,7 @@ Also provides the aggregations behind GET /api/predictions and GET /api/learning
 from __future__ import annotations
 
 import asyncio
+import importlib
 import math
 import time
 from typing import Any, Iterable
@@ -123,7 +124,7 @@ def _gate_learner_api() -> tuple[str, Any] | None:
     `checks` is the gate_log JSON {check_id: 1 | 0 | None}; `won` = TP1 reached before SL.
     """
     try:
-        import app.engine.gate as gate_mod
+        gate_mod = importlib.import_module("app.engine.gate")
     except Exception:
         return None
     cls = getattr(gate_mod, "GateLearner", None)
@@ -134,6 +135,23 @@ def _gate_learner_api() -> tuple[str, Any] | None:
         if callable(fn):
             return "func", fn
     return None
+
+
+def _make_gate_learner(cls: Any, state: dict | None) -> Any:
+    """GateLearner.from_state(state) (contract); a fresh learner when there is no stored state yet."""
+    if hasattr(cls, "from_state"):
+        try:
+            return cls.from_state(state)
+        except (TypeError, ValueError, KeyError, AttributeError):
+            if state is not None:
+                raise
+        for build in (lambda: cls.from_state({}), cls):
+            try:
+                return build()
+            except (TypeError, ValueError, KeyError, AttributeError):
+                continue
+        raise TypeError("GateLearner no se puede crear sin estado")
+    return cls(state) if state is not None else cls()
 
 
 # ----------------------------------------------------------------------------- service
@@ -481,10 +499,7 @@ class PredictionEvaluator:
             try:
                 kind, obj = api
                 if kind == "class":
-                    if hasattr(obj, "from_state"):
-                        learner = obj.from_state(state)
-                    else:
-                        learner = obj(state) if state is not None else obj()
+                    learner = _make_gate_learner(obj, state if isinstance(state, dict) else None)
                     for checks, won in samples:
                         learner.update(checks, won)
                     new_state = learner.to_state() if hasattr(learner, "to_state") else to_plain(learner)
@@ -493,11 +508,13 @@ class PredictionEvaluator:
                     for checks, won in samples:
                         new_state = obj(new_state, checks, won)
                 if isinstance(new_state, dict):
+                    own = safe_float(new_state.get("updates"))  # the learner's own counter when it keeps one
+                    updates = int(own) if own is not None and own >= 0 else prev + len(samples)
                     await db.execute(
                         "INSERT INTO model_state(kind, key, state, updates, trained_until, updated_at) "
                         "VALUES ('gate', 'global', ?, ?, NULL, ?) ON CONFLICT(kind, key) DO UPDATE SET "
                         "state=excluded.state, updates=excluded.updates, updated_at=excluded.updated_at",
-                        (json_dumps(new_state), prev + len(samples), now_ms()),
+                        (json_dumps(new_state), updates, now_ms()),
                     )
                     reload_fn = getattr(self.rt.nexus, "reload_gate_state", None) if self.rt.nexus else None
                     if callable(reload_fn):
@@ -667,14 +684,28 @@ async def calibration_bins(db: Any, *, model_key_value: str | None = None, sourc
     ]
 
 
-def _state_metric(state: Any, name: str) -> float | None:
-    if not isinstance(state, dict):
+def _state_metric(state: Any, name: str, _depth: int = 0) -> float | None:
+    """A learner metric from a stored model_state JSON: top level, a common sub-object, or the latest snapshot
+    (the NEXUS service may persist {"snapshots": [{"time", "state"}, ...]} instead of the bare learner state)."""
+    if not isinstance(state, dict) or _depth > 2:
         return None
-    for container in (state, state.get("learning"), state.get("stats"), state.get("perf"), state.get("metrics")):
+    for key in (None, "learning", "stats", "perf", "metrics", "learner", "latest", "model"):
+        container = state if key is None else state.get(key)
         if isinstance(container, dict):
             v = safe_float(container.get(name))
             if v is not None:
                 return v
+    snaps = state.get("snapshots")
+    if isinstance(snaps, list) and snaps:
+        last = snaps[-1]
+        inner = last.get("state") if isinstance(last, dict) and isinstance(last.get("state"), dict) else last
+        return _state_metric(inner, name, _depth + 1)
+    if isinstance(snaps, dict) and snaps:  # {time: state}
+        try:
+            last_key = max(snaps, key=lambda k: safe_float(k, 0.0) or 0.0)
+        except ValueError:
+            return None
+        return _state_metric(snaps[last_key], name, _depth + 1)
     return None
 
 

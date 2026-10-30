@@ -527,7 +527,49 @@ short/down/NO TOMAR, amber `--warn` = ESPERAR/advertencias. Every page handles l
 - **Retention**: `app.maintenance` prunes fine-grained candles, old events and resolved learning rows.
 
 ---------------------------------------------------------------------------------------------------------------------
-## 15. Verification checklist (what "done" means)
+## 15. Market conditions — "semáforo de mercado" (MACRO-BE / MACRO-FE)
+
+Goal (user's words): not a screen full of data — only the alerts and data needed to know **when to trade and when
+not** (Fed/FOMC, CPI, jobs, futures, volatility). Output = `MarketConditions` (types.ts): a level
+`green` (Operar con normalidad) / `amber` (Precaución) / `red` (No operar ahora), one headline, one advice line,
+≤ 3 reasons, a `blackout` window around high-impact events, the next relevant event with countdown, ≤ 5 upcoming
+events and ≤ 6 metrics.
+
+Sources (verified with plain requests from this network):
+- Economic calendar: `https://nfs.faireconomy.media/ff_calendar_thisweek.json` (current week only; fields title,
+  country (= currency), date (ISO with offset), impact High/Medium/Low/Holiday, forecast, previous). Refresh at most
+  every 60 min, persist the last good copy in `model_state(kind='macro', key='calendar')`.
+- FOMC (official federalreserve.gov schedule; decision 14:00 America/New_York on day 2, press conference 14:30):
+  2026: Jan 27-28, Mar 17-18*, Apr 28-29, Jun 16-17*, Jul 28-29, Sep 15-16*, Oct 27-28, Dec 8-9*;
+  2027 (tentative): Jan 26-27, Mar 16-17*, Apr 27-28, Jun 8-9*, Jul 27-28, Sep 14-15*, Oct 26-27, Dec 7-8*
+  (* = with Summary of Economic Projections: more volatile).
+- Quotes via `rt.hub.tv_scan("global", columns, tickers=[...])`: TVC:VIX, CME_MINI:ES1!, CME_MINI:NQ1!, TVC:DXY,
+  TVC:US10Y, TVC:US02Y, TVC:MOVE, NYMEX:CL1!, COMEX:GC1! (columns close, change, change_abs, high, low).
+- Crypto: Fear & Greed `https://api.alternative.me/fng/?limit=1` (60 min cache), OKX funding
+  `https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP` (10 min cache).
+
+Rules (settings `macro.*`): **red** = high-impact event of a relevant currency within
+[−block_after_min, +block_before_min] (blackout), or VIX ≥ vix_danger, or VIX intraday ≥ +25 %, or S&P futures
+|Δ| ≥ 3 %. **amber** = high-impact event within warn_before_min (or ≤ 2 h after one), VIX ≥ vix_caution or
+VIX Δ ≥ +12 %, S&P futures |Δ| ≥ 1.5 %, DXY |Δ| ≥ 0.8 %, US10Y Δ ≥ 10 pb, MOVE ≥ 120; crypto scope also
+Fear & Greed ≤ 15 / ≥ 85 and extreme funding. Scope by symbol: crypto → USD events + crypto metrics; forex
+EURUSD → EUR + USD events; US stocks / indices / commodities → USD; others → own currency + USD high impact.
+No data at all → amber "Sin datos macro: opera con cautela" with `stale: true`.
+
+Backend (`app/macro/*`, `app/api/macro.py`): `rt.macro` = `MacroService(rt)`; `await rt.macro.conditions(symbol=None)
+-> MarketConditions`; `await rt.macro.calendar(days=7, impacts=("high","medium")) -> list[MacroEvent]`;
+`await rt.macro.gate_check(symbol, direction) -> GateCheck | None` (id `macro`, label "Calendario y volatilidad",
+critical when red) — merged into the Trade Gate by the NEXUS service. Alerts: level changes and T−60 / T−15 / T−0
+minutes before high-impact events → bus events (source `macro`, level `warn`) + WS topic `macro`
+(`{"type":"macro","conditions","alert"}`). REST: `GET /api/macro?symbol=`, `GET /api/macro/calendar?days=&impact=`.
+Terminal: `macro [símbolo]` (alias `mercado`, `semaforo`), `calendario [días] [--all]` (alias `agenda`).
+
+Frontend (`components/macro/*`): `MarketPulse` (default export, header pill: colored dot + label + countdown to
+the next high-impact event; click → compact panel with headline, advice, reasons, ≤ 6 metrics, ≤ 5 events) and
+`MacroBadge` (`symbol` prop, scoped conditions for the chart toolbar). Toasts for WS `macro` alerts.
+
+---------------------------------------------------------------------------------------------------------------------
+## 16. Verification checklist (what "done" means)
 
 - `start.ps1` from a clean clone: creates venv, installs deps, builds UI, starts server, opens browser; DB created
   and seeded; services running; `/api/health` ok.

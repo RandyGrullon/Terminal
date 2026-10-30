@@ -1,0 +1,416 @@
+/* Paper trading page ("Cuenta demo"): stats, open positions, history, order ticket with gate preview, auto-trading. */
+.pp-page {
+  gap: 12px;
+}
+.pp-title {
+  font-size: 17px;
+}
+.pp-stats {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+}
+/* Wide screens (>= 1700 px, see PaperPage): tables on the left, ticket + auto-trading on the right. */
+.pp-layout {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  align-items: start;
+}
+.pp-main,
+.pp-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+/* Narrower screens: positions full width, then ticket + auto-trading side by side, then history. */
+.pp-tickets {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .pp-tickets {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.pp-sub.warn {
+  color: var(--warn);
+}
+
+/* ----------------------------------------------------------------------------- tables */
+.pp-table-wrap {
+  max-height: 60vh;
+}
+.pp-table td {
+  padding: 6px 8px;
+  vertical-align: middle;
+}
+.pp-table th {
+  padding: 7px 8px;
+}
+.pp-table .verdict {
+  padding: 2px 7px;
+  font-size: 11px;
+  gap: 4px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+.pp-table .verdict svg {
+  width: 12px;
+  height: 12px;
+}
+.pp-table tr.pp-row-close td {
+  background: rgba(234, 57, 67, 0.07);
+}
+.pp-table tr.pp-row-close td:first-child {
+  box-shadow: inset 3px 0 0 var(--neg);
+}
+.pp-sym {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.pp-sym button {
+  all: unset;
+  cursor: pointer;
+  font-weight: 600;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+}
+.pp-sym button:hover {
+  color: var(--accent-2);
+  text-decoration: underline;
+}
+.pp-sym button:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+.pp-sub {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.pp-stack {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+.pp-tps {
+  display: flex;
+  gap: 4px;
+}
+.pp-tp {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-2);
+  font-size: 10.5px;
+  line-height: 1.25;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.pp-tp b {
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.pp-tp.hit {
+  border-color: rgba(22, 199, 132, 0.55);
+  background: var(--pos-bg);
+  color: var(--pos);
+}
+.pp-advice {
+  white-space: normal;
+  min-width: 170px;
+  max-width: 280px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-2);
+}
+.pp-advice.close {
+  color: #ffb3b8;
+  font-weight: 600;
+}
+.pp-advice.close .pp-advice-head {
+  color: var(--neg);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  text-transform: uppercase;
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+}
+.pp-warns {
+  display: inline-flex;
+  gap: 3px;
+  margin-top: 2px;
+}
+/* Narrow screens: the advice lives in a sub-row under its position. */
+.pp-table tr.pp-has-sub td {
+  border-bottom-color: transparent;
+  padding-bottom: 2px;
+}
+.pp-table tr.pp-advice-row td {
+  padding: 0 8px 7px 8px;
+  white-space: normal;
+}
+.pp-table tr.pp-advice-row:hover td {
+  background: transparent;
+}
+.pp-table tr.pp-advice-row.pp-row-close td,
+.pp-table tr.pp-advice-row.pp-row-close:hover td {
+  background: rgba(234, 57, 67, 0.07);
+}
+.pp-advice.inline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  max-width: none;
+  min-width: 0;
+}
+.pp-advice.inline .pp-warns {
+  margin-top: 0;
+}
+.pp-advice-tag {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--accent-2);
+  border: 1px solid rgba(47, 107, 255, 0.4);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+.pp-warns span {
+  display: inline-flex;
+  cursor: help;
+}
+.pp-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+/* Actions stay visible even when the table scrolls horizontally. */
+.pp-table th.pp-sticky,
+.pp-table td.pp-sticky {
+  position: sticky;
+  right: 0;
+  background: var(--panel);
+  box-shadow: -10px 0 10px -10px rgba(0, 0, 0, 0.7);
+}
+.pp-table th.pp-sticky {
+  z-index: 2;
+}
+.pp-table tbody tr:hover td.pp-sticky {
+  background: linear-gradient(rgba(47, 107, 255, 0.06), rgba(47, 107, 255, 0.06)), var(--panel);
+}
+.pp-table tr.pp-row-close td.pp-sticky {
+  background: linear-gradient(rgba(234, 57, 67, 0.07), rgba(234, 57, 67, 0.07)), var(--panel);
+}
+@media (max-width: 1359px) {
+  .pp-table td,
+  .pp-table th {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+  .pp-tp {
+    padding: 1px 4px;
+  }
+}
+
+/* ----------------------------------------------------------------------------- history breakdown */
+.pp-breakdown {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.pp-bd {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  font-size: 11.5px;
+  min-width: 0;
+}
+.pp-bd .verdict {
+  padding: 2px 7px;
+  font-size: 11px;
+  align-self: flex-start;
+}
+.pp-bd > .badge {
+  align-self: flex-start;
+}
+.pp-bd .verdict svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* ----------------------------------------------------------------------------- order ticket */
+.pp-dir {
+  display: flex;
+}
+.pp-dir .btn {
+  flex: 1;
+}
+.pp-dir .btn.active.long {
+  background: var(--pos-bg);
+  border-color: var(--pos);
+  color: var(--pos);
+}
+.pp-dir .btn.active.short {
+  background: var(--neg-bg);
+  border-color: var(--neg);
+  color: var(--neg);
+}
+.pp-grid2 {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.pp-grid2 .input,
+.pp-grid2 .select {
+  width: 100%;
+}
+.pp-symbol {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  min-width: 0;
+}
+.pp-symbol b {
+  font-family: var(--mono);
+}
+.pp-gate {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-2);
+  background: var(--panel-2);
+}
+.pp-gate.pos {
+  border-color: rgba(22, 199, 132, 0.45);
+}
+.pp-gate.neg {
+  border-color: rgba(234, 57, 67, 0.5);
+}
+.pp-gate.warn {
+  border-color: rgba(245, 165, 36, 0.45);
+}
+.pp-gate-summary {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text);
+  line-height: 1.4;
+}
+.pp-reasons {
+  display: grid;
+  gap: 6px;
+}
+.pp-reasons ul {
+  margin: 2px 0 0;
+  padding-left: 16px;
+  font-size: 12px;
+  color: var(--text-2);
+  display: grid;
+  gap: 2px;
+}
+.pp-reasons-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.pp-gnums {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+.pp-gnums > div {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 7px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  min-width: 0;
+}
+.pp-gnums span {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+.pp-gnums b {
+  font-family: var(--mono);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.pp-gate-more > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--accent-2);
+  user-select: none;
+  padding: 2px 0;
+}
+.pp-gate-more > summary:hover {
+  text-decoration: underline;
+}
+.pp-gate-more[open] > summary {
+  margin-bottom: 6px;
+}
+
+/* ----------------------------------------------------------------------------- auto-trading chips */
+.pp-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border-2);
+  background: var(--panel-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.pp-chip button {
+  all: unset;
+  cursor: pointer;
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 50%;
+  color: var(--muted);
+}
+.pp-chip button:hover {
+  color: var(--neg);
+  background: var(--neg-bg);
+}
+.pp-chip button:focus-visible {
+  outline: 1px solid var(--accent);
+}

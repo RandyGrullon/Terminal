@@ -3,16 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 import pytest
 
 from app import config as nexus_config
-from app.sim.common import EngineUnavailable, engine_available
+from app.sim.common import EngineUnavailable
 from app.sim.paper import PaperEngine
 from app.sim.simulator import SimError, Simulator
 from app.sim.synthetic import generate_candleset
 from tests.conftest import FIXED_END
-from tests.test_sim_fakes import FakeHub, make_current
+from tests.test_sim_fakes import FakeHub, make_current, require_engine
 
 
 def scripted_nexus(buy_every: int = 6, verdict: str = "TAKE"):
@@ -87,7 +88,9 @@ def test_synthetic_session_auto_trades_take_signals(runtime_factory, offline, mo
             assert len(snap["candles"]) == 90 and snap["nexus"]["symbol"] == "SIM:NEXUS"
             assert snap["nexus"]["provider"] == "synthetic" and snap["state"]["bars_done"] == 30
             json.dumps(snap, allow_nan=False)
-            assert sim._snapshots and sim._snapshots[-1][0] == int(snap["candles"][-1]["time"])
+            snap_times = [t for t, _ in sim._snapshots]
+            assert snap_times and snap_times[-1] <= int(snap["candles"][-1]["time"])
+            assert all(b - a >= 50 * 3600 for a, b in zip(snap_times, snap_times[1:]))  # thinned, never too dense
             st = await sim.configure(regime="bull", speed=50)
             assert st["regime"] == "bull" and sim._market.regime == "bull" and st["speed"] == 20.0
             stopped = await sim.stop_session()
@@ -119,6 +122,20 @@ def test_rejected_signals_do_not_trade(runtime_factory, offline):
     asyncio.run(scenario())
 
 
+async def _wait_until(predicate, timeout: float = 30.0, step: float = 0.05) -> bool:
+    """Poll `predicate` until true or timeout (robust on a loaded machine; returns the final value)."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() >= deadline:
+            return bool(predicate())
+        await asyncio.sleep(step)
+    return True
+
+
+REPLAY_END = re.compile(r"^Replay terminado: \d+ operaciones, \d+ % aciertos, [+−]?\d+(,\d+)? % · 30 velas$")
+
+
 def test_realtime_loop_and_replay_end(runtime_factory, offline):
     async def scenario():
         async with runtime_factory() as rt:
@@ -127,23 +144,21 @@ def test_realtime_loop_and_replay_end(runtime_factory, offline):
             sim = await _setup(rt, hub)
             sim.nexus_fn = scripted_nexus(buy_every=7)
             await sim.start_session({"mode": "synthetic", "speed": 20, "seed": 1, "warmup": 60})
-            await asyncio.sleep(0.6)
-            assert sim.bars_done >= 3
+            assert await _wait_until(lambda: sim.bars_done >= 3)
             await sim.configure(paused=True)
             paused_at = sim.bars_done
             await asyncio.sleep(0.3)
-            assert sim.bars_done <= paused_at + 1
+            assert sim.bars_done <= paused_at + 1  # at most the bar that was in flight
             await sim.configure(paused=False)
             st = await sim.start_session({"mode": "replay", "symbol": "BINANCE:BTCUSDT", "tf": "1h", "speed": 20,
                                           "warmup": 100})
             assert st["mode"] == "replay" and st["bars_total"] == 30 and st["regime"] is None
-            for _ in range(100):
-                if not sim.state()["running"]:
-                    break
-                await asyncio.sleep(0.1)
+            assert await _wait_until(lambda: not sim.state()["running"], timeout=60.0)
             final = sim.state()
             assert final["running"] is False and final["bars_done"] == 30
-            assert any(e["message"].startswith("Replay terminado:") for e in rt.bus.recent(level="success"))
+            ends = [e for e in rt.bus.recent(level="success") if e["message"].startswith("Replay terminado:")]
+            assert len(ends) == 1 and REPLAY_END.match(ends[0]["message"]), ends
+            assert final["stats"] is not None and final["stats"]["trades"] == ends[0]["data"]["stats"]["trades"]
             replay_pushes = [p for p in hub.pushed if p[0] == "SIM:REPLAY"]
             assert len(replay_pushes) == 130  # warmup + every revealed bar, under the SIM symbol
             assert [c["time"] for c in (await sim.snapshot())["candles"]] == real.time.tolist()
@@ -204,8 +219,7 @@ def test_session_without_engine_still_reveals_prices(runtime_factory, offline):
 
 
 def test_real_engine_in_simulator(runtime_factory, offline):
-    pytest.importorskip("app.engine.nexus")
-    assert engine_available()
+    require_engine()
 
     async def scenario():
         async with runtime_factory() as rt:
@@ -216,6 +230,42 @@ def test_real_engine_in_simulator(runtime_factory, offline):
                 await sim.step(sim._market.next_bar())
             snap = await sim.snapshot()
             assert snap["nexus"] is not None and snap["nexus"].get("current") is not None
+            await sim.stop_session(emit=False)
+            await rt.paper.stop()
+
+    asyncio.run(scenario())
+
+
+def test_adaptive_nexus_window_keeps_up_with_speed(runtime_factory, offline):
+    import time as _time
+
+    async def scenario():
+        async with runtime_factory() as rt:
+            sim = await _setup(rt)
+            seen: list[int] = []
+            fast = scripted_nexus()
+
+            def slow(cs, prior):
+                seen.append(len(cs))
+                _time.sleep(0.06)  # slower than the 0.04 s budget of 20 bars/s
+                return fast(cs, prior)
+
+            sim.nexus_fn = slow
+            await sim.start_session({"mode": "synthetic", "speed": 20, "seed": 2, "warmup": 650})
+            sim._paused = True
+            for _ in range(4):
+                await sim.step(sim._market.next_bar())
+            assert seen == [600, 450, 337, 300, 300]  # shrinks to max(300, nexus.min_bars + 100), never below
+            sim.speed = 0.5  # plenty of time per bar: the window grows back 50 bars per step
+            sim.nexus_fn = fast
+            for _ in range(7):
+                await sim.step(sim._market.next_bar())
+            assert sim._window == 600
+            await rt.settings.set("nexus.min_bars", 400)
+            for _ in range(10):
+                sim.speed = 20.0
+                sim._adapt_window(0.5)
+            assert sim._window == 500  # floor follows nexus.min_bars
             await sim.stop_session(emit=False)
             await rt.paper.stop()
 

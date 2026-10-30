@@ -179,3 +179,31 @@ def scan_row(symbol: str, *, close: float = 100.0, rating: float = 0.5, rsi: flo
         "EMA50|240": close * (1 - 0.02 * s), "ADX|60": 30.0, "change|60": 0.4 * s, "change|240": 0.9 * s,
         "close|60": close, "close|240": close,
     }
+
+
+_ENGINE_RUNS: list[bool] = []
+
+
+def engine_runs() -> bool:
+    """True when the real NEXUS engine imports AND runs (it may be incomplete while it is being developed)."""
+    if not _ENGINE_RUNS:
+        from app.config import DEFAULT_SETTINGS
+        from app.sim.common import EngineUnavailable, build_nexus_params, load_engine, run_engine
+        from app.sim.synthetic import generate_candleset
+
+        try:
+            _, params_cls = load_engine()
+            params, _ = build_nexus_params(params_cls, dict(DEFAULT_SETTINGS), None)
+            run_engine(generate_candleset(n=220, seed=1, end_time=1_760_000_400), params)
+            _ENGINE_RUNS.append(True)
+        except EngineUnavailable:
+            _ENGINE_RUNS.append(False)
+    return _ENGINE_RUNS[0]
+
+
+def require_engine() -> None:
+    """Skip a real-engine integration test while the engine is missing or incomplete."""
+    import pytest
+
+    if not engine_runs():
+        pytest.skip("motor NEXUS no disponible o incompleto")

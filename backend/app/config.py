@@ -57,7 +57,9 @@ DEFAULT_SETTINGS: dict = {
     "risk.fee_pct": 0.1,
     "risk.slippage_pct": 0.02,
     # NEXUS engine
-    "nexus.entry_threshold": 0.35,
+    # Calibrated on real 1h crypto data: |score| p90 ≈ 0.21-0.24, p99 ≈ 0.35-0.53. 0.20 yields ~30 candidates per
+    # 1500 bars, which the Trade Gate then filters (TOMAR / ESPERAR / NO TOMAR with the reason on the chart).
+    "nexus.entry_threshold": 0.2,
     "nexus.exit_threshold": 0.0,
     "nexus.horizon": 5,
     "nexus.sl_atr": 2.0,
@@ -101,7 +103,17 @@ DEFAULT_SETTINGS: dict = {
     "paper.partial_tp": True,
     # Simulator
     "sim.default_speed": 4.0,
+    # Market conditions (macro semáforo: calendario económico + volatilidad)
+    "macro.enabled": True,
+    "macro.alerts": True,
+    "macro.block_before_min": 30,
+    "macro.block_after_min": 30,
+    "macro.warn_before_min": 120,
+    "macro.vix_caution": 22.0,
+    "macro.vix_danger": 30.0,
+    "macro.currencies": ["USD"],
     # UI (free-form "ui.*" keys are also accepted)
     "ui.language": "es",
+    "ui.timezone": "",  # IANA zone of the user's browser (set by the UI); used for clock times in messages
     "ui.chart_indicators": [],
 }

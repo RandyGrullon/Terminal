@@ -20,6 +20,7 @@ from app.data.base import CandleSet
 from app.sim import metrics as M
 from app.sim.common import (
     DISCLAIMER,
+    EXIT_LABEL,
     build_nexus_params,
     current_settings,
     finite,
@@ -79,6 +80,36 @@ def normalize_trade(tr: dict) -> dict | None:
     }
 
 
+def public_trade(tr: dict, index: int) -> dict:
+    """Exactly the `Trade` shape of types.ts (account-only fields such as qty / pnl are internal)."""
+    reason = tr.get("exit_reason")
+    if reason is None and finite(tr.get("exit_time")) is None:
+        reason = "OPEN"
+    gate_score = finite(tr.get("gate_score"))
+    trade_id = finite(tr.get("id"))
+    exit_time = finite(tr.get("exit_time"))
+    return {
+        "id": int(trade_id) if trade_id is not None else index + 1,
+        "side": str(tr.get("side") or "").lower(),
+        "entry_time": int(finite(tr.get("entry_time")) or 0),
+        "entry_price": finite(tr.get("entry_price")),
+        "exit_time": int(exit_time) if exit_time is not None else None,
+        "exit_price": finite(tr.get("exit_price")),
+        "sl_initial": finite(tr.get("sl_initial", tr.get("sl"))),
+        "tp1": finite(tr.get("tp1")),
+        "tp2": finite(tr.get("tp2")),
+        "tp3": finite(tr.get("tp3")),
+        "exit_reason": str(reason) if reason is not None else None,
+        "exit_label": tr.get("exit_label") or (EXIT_LABEL.get(str(reason)) if reason is not None else None),
+        "pnl_pct": finite(tr.get("pnl_pct")),
+        "r_multiple": finite(tr.get("r_multiple")),
+        "bars": int(finite(tr.get("bars")) or 0),
+        "mfe_pct": finite(tr.get("mfe_pct")) or 0.0,
+        "mae_pct": finite(tr.get("mae_pct")) or 0.0,
+        "gate_score": gate_score,
+    }
+
+
 # ----------------------------------------------------------------------------- account simulation
 
 
@@ -91,14 +122,19 @@ def simulate_account(
     fee_pct: float = 0.1,
     slippage_pct: float = 0.02,
     max_leverage: float = M.DEFAULT_MAX_LEVERAGE,
+    trades_net_of_fees: bool = True,
 ) -> dict[str, Any]:
     """Size and account the engine trades over the candle set (one position at a time).
 
-    P&L of a trade = r_multiple × qty × |entry − SL| (gross, includes the engine's partial exits) minus
-    commissions + slippage on the entry and exit notional. For the per-bar mark-to-market curve the TP1/TP2
+    P&L of a closed trade = r_multiple × qty × |entry − SL| (includes the engine's partial exits) minus the
+    account-level costs. The NEXUS engine already charges commissions inside r_multiple (Position.result: fees on
+    the entry and on every exit fill), so with `trades_net_of_fees` (default) the account only deducts slippage
+    here and commissions are reported, not charged twice. Trades still open at the end are valued from prices
+    (gross), so their commissions are deducted explicitly. For the per-bar mark-to-market curve the TP1/TP2
     partial exits (1/3 each) are placed on the bar where the level is first touched; the final fill realises
     the residual so the trade total always matches the engine's R multiple.
     """
+    acct_fee_pct = 0.0 if trades_net_of_fees else fee_pct
     n = len(cs)
     equity = np.full(n, float(initial_capital))
     in_pos = np.zeros(n, dtype=bool)
@@ -146,13 +182,15 @@ def simulate_account(
         qty = M.position_size(eq_entry, risk_pct, entry, tr["stop"], max_leverage=max_leverage)
         if qty <= 0:
             continue
-        entry_cost = M.trade_cost(qty * entry, fee_pct, slippage_pct)
+        entry_cost = M.trade_cost(qty * entry, acct_fee_pct, slippage_pct)
         cash -= entry_cost
         size_left = 1.0
         realized = 0.0
+        partial_notional = 0.0  # sum of part × level of the partial exits (for commission reporting)
         partial_levels = [lvl for lvl in (tr["tp1"], tr["tp2"]) if lvl is not None]
         hits = 0
         exit_cost = 0.0
+        avg_exit = None
         r_value = tr["r_multiple"]
         if r_value is None and closed and tr["exit_price"] is not None:
             r_value = sign * (tr["exit_price"] - entry) / risk_unit
@@ -163,7 +201,7 @@ def simulate_account(
                     r_value = sign * (close[k] - entry) / risk_unit
                 total_gross = r_value * qty * risk_unit
                 avg_exit = max(entry + sign * r_value * risk_unit, 0.0)
-                exit_cost = M.trade_cost(qty * avg_exit, fee_pct, slippage_pct)
+                exit_cost = M.trade_cost(qty * avg_exit, acct_fee_pct, slippage_pct)
                 cash += (total_gross - realized) - exit_cost
                 realized = total_gross
                 size_left = 0.0
@@ -176,21 +214,28 @@ def simulate_account(
                     break
                 part = min(PARTIAL_FRACTION, size_left)
                 gain = part * qty * sign * (lvl - entry)
+                partial_notional += part * lvl
                 realized += gain
                 cash += gain
                 size_left -= part
                 hits += 1
             equity[k] = cash + size_left * qty * sign * (close[k] - entry)
 
+        fee_rate = fee_pct / 100.0
         if not closed:  # still open at the end of the data: valued at the last close, no exit fill
             total_gross = realized + size_left * qty * sign * (close[n - 1] - entry)
+            # valued from prices (gross): charge the commissions already paid (entry + partial exits)
+            open_fees = qty * fee_rate * (entry + partial_notional) if trades_net_of_fees else 0.0
+            total_gross -= open_fees
             r_value = total_gross / (qty * risk_unit)
+            fees = open_fees if trades_net_of_fees else 0.0
         else:
             total_gross = realized
+            fees = qty * fee_rate * (entry + (avg_exit or entry)) if trades_net_of_fees else 0.0
         in_pos[ei : xi + 1] = True
         filled_upto = xi
-        costs = entry_cost + exit_cost
-        total_costs += costs
+        costs = entry_cost + exit_cost  # what this function deducts (slippage only when trades are net)
+        total_costs += costs + fees  # reported as fees_paid: commissions + slippage
         pnl = total_gross - costs
         pnl_pct = pnl / eq_entry * 100.0 if eq_entry > 0 else 0.0
         n_bars = tr["bars"] if tr["bars"] is not None else float(xi - ei + 1)
@@ -205,7 +250,7 @@ def simulate_account(
                 "qty": qty,
                 "pnl": round(pnl, 2),
                 "pnl_account_pct": round(pnl_pct, 4),
-                "costs": round(costs, 2),
+                "costs": round(costs + fees, 2),
                 "equity_before": round(eq_entry, 2),
             }
         )
@@ -341,7 +386,8 @@ def run_backtest(
         raise BacktestError("El riesgo por operación debe estar entre 0 y 100 %")
     if fee_pct < 0 or slippage_pct < 0:
         raise BacktestError("Comisión y deslizamiento no pueden ser negativos")
-    settings = settings if settings is not None else current_settings()
+    settings = dict(settings if settings is not None else current_settings())
+    settings["risk.fee_pct"] = float(fee_pct)  # the gate's expected value uses the same costs as the account
     min_bars = int(settings.get("nexus.min_bars", MIN_BARS_DEFAULT) or MIN_BARS_DEFAULT)
     if len(cs) < min_bars + 20:
         raise BacktestError(
@@ -392,6 +438,8 @@ def run_backtest(
                 f"{max_leverage:g}×).",
                 "Los % por operación (avg_win_pct, expectancy_pct…) son sobre el capital, netos de costes.",
                 "fees_paid incluye comisiones y deslizamiento.",
+                "El filtro parte de sus pesos iniciales (no usa lo aprendido en vivo), así el resultado es fuera de "
+                "muestra.",
                 DISCLAIMER,
             ],
         },
@@ -399,7 +447,7 @@ def run_backtest(
         "ungated": ungated_metrics,
         "equity": equity_points(cs, main["sim"]["equity"]),
         "benchmark": benchmark_points(cs, float(initial_capital)),
-        "trades": main["sim"]["trades"],
+        "trades": [public_trade(t, i) for i, t in enumerate(main["sim"]["trades"])],
         "markers": response.get("markers") or [],
         "candles": cs.to_list() if include_candles else [],
     }

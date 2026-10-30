@@ -64,6 +64,12 @@ class SettingsStore:
         """cb(key, value) is called after every change."""
         self._listeners.append(cb)
 
+    def remove_listener(self, cb: Callable[[str, Any], None]) -> None:
+        try:
+            self._listeners.remove(cb)
+        except ValueError:
+            pass
+
     @staticmethod
     def coerce(key: str, value: Any) -> Any:
         if key not in DEFAULT_SETTINGS:

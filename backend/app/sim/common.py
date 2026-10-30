@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import importlib
+import inspect
 import json
 import math
 from typing import Any, Iterable
@@ -190,6 +192,14 @@ def mean_or_none(values: Iterable[float]) -> float | None:
     return sum(vals) / len(vals) if vals else None
 
 
+async def call_maybe_async(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Call a service method that may be sync or async (e.g. hub.subscribe / add_listener) and return its result."""
+    result = fn(*args, **kwargs)
+    if inspect.isawaitable(result):
+        result = await result
+    return result
+
+
 # ----------------------------------------------------------------------------- settings
 
 
@@ -226,10 +236,11 @@ class EngineUnavailable(RuntimeError):
 def load_engine() -> tuple[Any, Any]:
     """Lazy import of the pure engine API: (run_nexus, NexusParams)."""
     try:
-        from app.engine.nexus import NexusParams, run_nexus
+        mod = importlib.import_module("app.engine.nexus")
+        run_nexus, nexus_params_cls = mod.run_nexus, mod.NexusParams
     except Exception as exc:  # module missing or failing while other engineers work on it
         raise EngineUnavailable(f"Motor NEXUS no disponible ({type(exc).__name__}: {exc})") from exc
-    return run_nexus, NexusParams
+    return run_nexus, nexus_params_cls
 
 
 def engine_available() -> bool:
@@ -284,15 +295,27 @@ def build_nexus_params(
     if gate_enabled is not None:
         base["gate.enabled"] = bool(gate_enabled)
 
+    # Contract: NexusParams is a dataclass and from_settings(settings, **overrides) accepts its field names.
+    fields = _param_fields(nexus_params_cls)
     ignored: list[str] = []
+    if fields is not None:
+        ignored = sorted(k for k in kwargs if k not in fields)
+        kwargs = {k: v for k, v in kwargs.items() if k in fields}
     try:
         params = nexus_params_cls.from_settings(base, **kwargs)
     except TypeError:
-        ignored = sorted(kwargs)
+        ignored = sorted(set(ignored) | set(kwargs))
         params = nexus_params_cls.from_settings(base)
     if gate_enabled is not None:
         params = _with_gate(params, gate_enabled)
     return params, ignored
+
+
+def _param_fields(nexus_params_cls: Any) -> set[str] | None:
+    """Field names of a dataclass NexusParams (None when the class is not a dataclass)."""
+    if isinstance(nexus_params_cls, type) and dataclasses.is_dataclass(nexus_params_cls):
+        return {f.name for f in dataclasses.fields(nexus_params_cls)}
+    return None
 
 
 def _with_gate(params: Any, enabled: bool) -> Any:
@@ -313,7 +336,8 @@ def _with_gate(params: Any, enabled: bool) -> Any:
 
 
 def params_to_dict(params: Any) -> dict[str, Any]:
-    plain = to_plain(params)
+    fn = getattr(params, "to_dict", None)
+    plain = fn() if callable(fn) else to_plain(params)
     return dict(plain) if isinstance(plain, dict) else {}
 
 
@@ -334,10 +358,28 @@ def nexus_to_response(res: Any, cs: Any) -> dict[str, Any]:
     return out
 
 
-def run_engine(cs: Any, params: Any, prior: Any = None) -> tuple[dict[str, Any], Any]:
-    """Run NEXUS synchronously (call from a worker thread). Returns (response_dict, snapshots)."""
+def run_engine(cs: Any, params: Any, prior: Any = None, gate_state: dict | None = None) -> tuple[dict[str, Any], Any]:
+    """Run NEXUS synchronously (call from a worker thread). Returns (response_dict, snapshots).
+
+    Contract: run_nexus(cs, params, prior=None, *, gate_state=None). `gate_state` (the learned GateLearner state)
+    is only passed when given. An engine that is still incomplete (ImportError at call time) → EngineUnavailable.
+    """
     run_nexus, _ = load_engine()
-    res = run_nexus(cs, params, prior=prior) if prior is not None else run_nexus(cs, params)
+    kwargs: dict[str, Any] = {}
+    if prior is not None:
+        kwargs["prior"] = prior
+    if gate_state is not None:
+        kwargs["gate_state"] = gate_state
+    try:
+        try:
+            res = run_nexus(cs, params, **kwargs)
+        except TypeError as exc:
+            if "gate_state" not in kwargs or "gate_state" not in str(exc):
+                raise
+            kwargs.pop("gate_state")  # an engine build without learned gate weights
+            res = run_nexus(cs, params, **kwargs)
+    except ImportError as exc:
+        raise EngineUnavailable(f"Motor NEXUS no disponible (instalación incompleta: {exc})") from exc
     return nexus_to_response(res, cs), getattr(res, "snapshots", None)
 
 

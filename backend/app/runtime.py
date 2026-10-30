@@ -13,6 +13,7 @@ class Runtime:
         self.bus: Any = None  # app.events.EventBus
         self.ws: Any = None  # app.ws.WSManager
         self.hub: Any = None  # app.data.hub.MarketDataHub
+        self.macro: Any = None  # app.macro.service.MacroService (market conditions / semáforo)
         self.nexus: Any = None  # app.engine.service.NexusService
         self.scanner: Any = None  # app.sim.scanner.ScannerService
         self.paper: Any = None  # app.sim.paper.PaperEngine

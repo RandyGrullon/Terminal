@@ -376,8 +376,13 @@ class OnlineLogit:
         model.updates = int(safe_float(state.get("updates"), 0) or 0)
         tu = safe_float(state.get("trained_until"))
         model.trained_until = int(tu) if tu is not None else None
-        recent = state.get("recent") or []
-        model.recent = [(float(p), int(y)) for p, y in recent if safe_float(p) is not None][-cls.RECENT:]
+        parsed: list[tuple[float, int]] = []
+        for item in state.get("recent") or []:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                p, y = safe_float(item[0]), safe_float(item[1])
+                if p is not None and y is not None:
+                    parsed.append((p, 1 if y > 0 else 0))
+        model.recent = parsed[-cls.RECENT:]
         return model
 
 
@@ -738,6 +743,17 @@ class ScanError(RuntimeError):
     """Scan failure with a Spanish message."""
 
 
+def tv_available(hub: Any) -> bool:
+    """False only when the hub says TradingView is disabled/unreachable (`hub.tv_online()`); unknown → True."""
+    fn = getattr(hub, "tv_online", None)
+    if not callable(fn):
+        return True
+    try:
+        return bool(fn())
+    except Exception:
+        return True
+
+
 # ----------------------------------------------------------------------------- service
 
 
@@ -920,6 +936,9 @@ class ScannerService:
             raise ScanError("Modo sin conexión: el escáner necesita datos de TradingView")
         if hub is None or not hasattr(hub, "tv_scan"):
             raise ScanError("Servicio de datos no disponible para escanear")
+        if not tv_available(hub):
+            raise ScanError("TradingView no está disponible (desactivado en Ajustes o sin conexión): "
+                            "el escáner necesita sus datos")
         profile = market_profile(market)
         extra = [c for c in (profile["value_col"], "currency") if c]
         fetch_n = int(min(limit * 2 if profile["dedupe_base"] else limit + 50, 1000))
@@ -1178,7 +1197,8 @@ class ScannerService:
             return cached
         result: dict | None = None
         hub = self.rt.hub
-        if not symbol.startswith("SIM:") and not config.OFFLINE and hub is not None and hasattr(hub, "tv_scan"):
+        if (not symbol.startswith("SIM:") and not config.OFFLINE and hub is not None and hasattr(hub, "tv_scan")
+                and tv_available(hub)):
             market = await self._market_for(symbol)
             for columns in (BASE_COLUMNS + MTF_COLUMNS, BASE_COLUMNS):
                 try:

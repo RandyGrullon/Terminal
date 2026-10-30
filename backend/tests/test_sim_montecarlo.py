@@ -106,7 +106,9 @@ def test_run_montecarlo_validation():
 
 
 def test_real_engine_synthetic_montecarlo():
-    pytest.importorskip("app.engine.nexus")
+    from tests.test_sim_fakes import require_engine
+
+    require_engine()
     res = mc.run_synthetic(paths=5, bars=300, seed=1)
     assert res["paths"] == 5 and len(res["percentiles"]) > 10
     json.dumps(res, allow_nan=False)
