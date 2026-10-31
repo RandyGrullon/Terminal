@@ -1124,7 +1124,11 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     a restart or the placement, the bars that began before the feed was watched count by close only. The position
     opens in the same transaction that marks the order filled and is managed exactly like a market one (SL / TP
     relative to the fill, R net of fees). When the gate cannot be consulted at the fill (engine missing, data error,
-    90 s timeout) the order still fills, flagged 'sin filtro (no disponible)', like a market order.
+    90 s timeout) the order is **cancelled**, never opened blind (`cancelled_by` 'gate', warn event, reason 'Cancelada
+    al llegar a X: no se pudo consultar el filtro (<causa>); una orden pendiente nunca se abre sin su veredicto' with
+    the cause from `PaperEngine._gate_eval`: 'el motor NEXUS no está cargado', 'no respondió en 90 s', 'error al
+    evaluarlo: …'). A market order sent while the gate is unavailable still fills, with no verdict recorded (the user
+    acts at that moment; a pending order acts later on a promise to ask the filter).
   - **Portfolio risk** (account 1 only, `risk_state(1)` = PaperRisk; settings `paper.max_open_risk_pct`,
     `paper.max_positions_per_group`, `paper.crypto_one_group`, `paper.daily_loss_limit_pct`, 0 = off): new orders and
     pending fills (manual, auto-trading, terminal) raise `PaperRiskBlocked` (409 `risk_limit`, **never forced**) when
@@ -1937,9 +1941,6 @@ Demo account (simulated, never a broker):
   closes only, so a wick through the new stop that recovers within one feed update (or during the gate latency) does
   not stop the position out. The gate at the fill runs a few seconds after the trigger, so it can see that much
   post-trigger data.
-- **Gate unavailable at the fill** (engine missing, data error, 90 s timeout): the order still fills, flagged 'sin
-  filtro (no disponible)', like a market order; after a timeout the position is dated at the trigger and the moves in
-  between are not applied to it. Cancelling or keeping it pending would be more protective (lead decision).
 - **Risk scope**: the daily limit counts realized P&L only, as a % of the day-start balance (floating losses are
   bounded by the open-risk cap and shown separately); the latch can be lifted by raising or disabling the limit. The
   group limit counts open positions only (pending orders are re-checked at the fill). The open risk at placement is the

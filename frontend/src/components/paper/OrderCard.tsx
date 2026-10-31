@@ -427,7 +427,7 @@ function OrderCard({ onOpened }: { onOpened: () => void }) {
         </Button>
         <div className="tiny muted">
           {pending
-            ? 'Orden pendiente simulada en la cuenta demo (nunca se envía a un bróker). Al ejecutarse se consulta otra vez el filtro: si dice NO TOMAR, la orden se cancela y verás el motivo.'
+            ? 'Orden pendiente simulada en la cuenta demo (nunca se envía a un bróker). Al ejecutarse se consulta otra vez el filtro: si dice NO TOMAR o no responde, la orden se cancela y verás el motivo.'
             : 'Orden simulada a mercado en la cuenta demo. Si el filtro dice NO TOMAR te pediremos confirmación.'}
         </div>
       </div>

@@ -146,7 +146,7 @@ function PendingOrdersTable({ orders, recent, cancellingId, onCancel, onOpenChar
                 </th>
                 <th>Tamaño</th>
                 <th>Validez</th>
-                <th title="Veredicto del filtro al dejar la orden; al ejecutarse se vuelve a consultar">Filtro</th>
+                <th title="Veredicto del filtro al dejar la orden; al ejecutarse se vuelve a consultar y, si dice NO TOMAR o no responde, la orden se cancela">Filtro</th>
                 <th className="num pp-sticky">Acciones</th>
               </tr>
             </thead>

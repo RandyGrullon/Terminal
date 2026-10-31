@@ -307,7 +307,7 @@ export default function PaperPage() {
             <Hourglass size={14} /> Órdenes pendientes <Badge tone={orders.length ? 'accent' : 'muted'}>{fmtInt(orders.length)}</Badge>
           </>
         }
-        sub="Límite y stop simulados: al ejecutarse se consulta otra vez el filtro y los límites de riesgo"
+        sub="Límite y stop simulados: al ejecutarse se consultan otra vez el filtro (si no responde, la orden se cancela) y los límites de riesgo"
         actions={
           orders.length > 1 ? (
             <Button size="sm" variant="ghost" onClick={() => setConfirmCancelAll(true)} disabled={cancellingId !== null}>

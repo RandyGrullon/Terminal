@@ -204,7 +204,8 @@ de cero). En «Nueva orden demo» eliges símbolo, lado, tipo, riesgo % y, si qu
 - **A mercado**: se abre al precio actual. Si el filtro dice NO TOMAR, se pide confirmación.
 - **Límite / Stop**: queda **pendiente** hasta que el precio llegue, con validez «hasta cancelarla», «durante N velas»
   o «hasta una fecha». Solo se ejecuta con precios **en vivo** (un dato con retraso nunca la ejecuta) y, al ejecutarse,
-  se vuelve a consultar el filtro: si entonces dice NO TOMAR, la orden se cancela y verás el motivo. En un mercado real,
+  se vuelve a consultar el filtro: si entonces dice NO TOMAR, o si no responde, la orden se cancela y verás el motivo
+  (nunca se abre sin su veredicto). En un mercado real,
   que el precio toque una orden límite no garantiza que se ejecute.
 - **Riesgo de cartera** (*Ajustes → Riesgo de cartera*): riesgo abierto máximo (6 % del capital), posiciones por grupo
   correlacionado (3; toda la cripto cuenta como un grupo) y pérdida diaria máxima (3 % del saldo del día, hasta las

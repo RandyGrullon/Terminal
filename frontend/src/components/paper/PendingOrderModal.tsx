@@ -163,7 +163,7 @@ function PendingOrderModal(props: Props) {
           <p className="tiny muted" style={{ margin: 0 }}>
             Orden simulada de la cuenta demo: nunca se envía a un bróker. Solo se ejecuta con precios en vivo (no con datos retrasados ni
             recuperados tras un corte del feed). Cuando el precio llegue, se consulta otra vez el filtro al precio de ejecución: si dice NO
-            TOMAR, la orden se cancela y verás el motivo. Los límites de riesgo de cartera también se comprueban entonces.
+            TOMAR o no responde, la orden se cancela y verás el motivo. Los límites de riesgo de cartera también se comprueban entonces.
             {sl === null || tp === null ? ' Sin SL u objetivo propios, se usan los niveles de NEXUS calculados desde el precio de ejecución.' : ''}
           </p>
         </div>

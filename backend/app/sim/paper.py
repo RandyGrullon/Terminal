@@ -1196,7 +1196,7 @@ class PaperEngine:
         via = ""
         if order is not None:
             via = (f" · {ORDER_LABEL.get((side, order['kind']), 'orden').lower()} #{order['id']} a "
-                   f"{fmt_price(order['price'])} ejecutada" + ("" if gate else " · sin filtro (no disponible)"))
+                   f"{fmt_price(order['price'])} ejecutada")
         data: dict[str, Any] = {"position_id": pid, "account_id": account_id, "symbol": symbol, "side": side}
         if order is not None:
             data["order_id"] = order["id"]
@@ -1215,17 +1215,29 @@ class PaperEngine:
     async def _gate_for(self, symbol: str, tf: str, side: str, *, entry: float, sl: float | None, tp: float | None,
                         origin: str) -> dict | None:
         """The Trade Gate for an idea (None when the engine is not loaded or the evaluation failed: logged)."""
+        gate, _why = await self._gate_eval(symbol, tf, side, entry=entry, sl=sl, tp=tp, origin=origin)
+        return gate
+
+    async def _gate_eval(self, symbol: str, tf: str, side: str, *, entry: float, sl: float | None,
+                         tp: float | None, origin: str) -> tuple[dict | None, str]:
+        """(GateResult, "") or (None, Spanish reason why the gate could not be consulted; failures are logged)."""
         nexus = self.rt.nexus
         if nexus is None or not hasattr(nexus, "gate"):
-            return None
+            return None, "el motor NEXUS no está cargado"
         try:
             gate = await asyncio.wait_for(nexus.gate(symbol, tf, side, entry=entry, sl=sl, tp=tp), timeout=90)
+        except asyncio.TimeoutError:
+            if self._log.should_log(f"gate:{symbol}", 60):
+                self._emit("warn", self._source(origin), f"No se pudo evaluar el filtro para {symbol}: sin respuesta en 90 s")
+            return None, "no respondió en 90 s"
         except Exception as exc:
             if self._log.should_log(f"gate:{symbol}", 60):
                 self._emit("warn", self._source(origin),
                            f"No se pudo evaluar el filtro para {symbol}: {type(exc).__name__}: {exc}")
-            return None
-        return gate if isinstance(gate, dict) else None
+            return None, f"error al evaluarlo: {exc}" if str(exc) else f"error al evaluarlo ({type(exc).__name__})"
+        if not isinstance(gate, dict):
+            return None, "respuesta no válida"
+        return gate, ""
 
     async def _choose_stop(self, symbol: str, tf: str, s: int, fill: float, sl: float | None, gate: dict | None) -> float:
         side_word = "por debajo" if s > 0 else "por encima"
@@ -1601,30 +1613,41 @@ class PaperEngine:
                 await self._end_order(order, f"No se ejecutó al llegar a {fmt_price(ref)}: {blk.message}", "risk",
                                       level="warn")
             else:
-                gate = await self._gate_for(order["symbol"], order.get("tf") or "1h", order["side"], entry=ref,
-                                            sl=order.get("sl"), tp=order.get("tp"),
-                                            origin=order.get("origin") or "manual")
-                try:
-                    await self.open_position(
-                        order["account_id"], order["symbol"], order["side"], order.get("tf"), qty=order.get("qty"),
-                        risk_pct=order.get("risk_pct"), sl=order.get("sl"), tp=order.get("tp"), force=False,
-                        origin=order.get("origin") or "manual", price=ref, gate=gate, check_gate=False,
-                        time_s=fill_time, slippage=order["kind"] == "stop", order=order,
-                    )
-                except PaperRejected as rej:
-                    summary = (rej.gate or {}).get("summary") or "el filtro desaconseja la operación"
+                gate, why = await self._gate_eval(order["symbol"], order.get("tf") or "1h", order["side"], entry=ref,
+                                                  sl=order.get("sl"), tp=order.get("tp"),
+                                                  origin=order.get("origin") or "manual")
+                if gate is None:
+                    # A pending order is a promise to ask the filter again at the fill: without its verdict (engine
+                    # missing, error, timeout) it is cancelled, never opened blind.
                     await self._end_order(
                         order,
-                        f"Cancelada al ejecutarse a {fmt_price(ref)}: el filtro dice {gate_line(rej.gate)} ({summary})",
+                        f"Cancelada al llegar a {fmt_price(ref)}: no se pudo consultar el filtro ({why}); una orden "
+                        "pendiente nunca se abre sin su veredicto",
                         "gate", level="warn")
-                except PaperRiskBlocked as blk:
-                    await self._end_order(order, f"No se ejecutó al llegar a {fmt_price(ref)}: {blk.message}", "risk",
-                                          level="warn")
-                except PaperError as exc:
-                    await self._end_order(order, f"No se ejecutó al llegar a {fmt_price(ref)}: {exc}", "levels",
-                                          level="warn")
                 else:
-                    return  # filled: open_position published the account and synced the subscriptions
+                    try:
+                        await self.open_position(
+                            order["account_id"], order["symbol"], order["side"], order.get("tf"),
+                            qty=order.get("qty"), risk_pct=order.get("risk_pct"), sl=order.get("sl"),
+                            tp=order.get("tp"), force=False, origin=order.get("origin") or "manual", price=ref,
+                            gate=gate, check_gate=False, time_s=fill_time, slippage=order["kind"] == "stop",
+                            order=order,
+                        )
+                    except PaperRejected as rej:
+                        summary = (rej.gate or {}).get("summary") or "el filtro desaconseja la operación"
+                        await self._end_order(
+                            order,
+                            f"Cancelada al ejecutarse a {fmt_price(ref)}: el filtro dice {gate_line(rej.gate)} "
+                            f"({summary})",
+                            "gate", level="warn")
+                    except PaperRiskBlocked as blk:
+                        await self._end_order(order, f"No se ejecutó al llegar a {fmt_price(ref)}: {blk.message}",
+                                              "risk", level="warn")
+                    except PaperError as exc:
+                        await self._end_order(order, f"No se ejecutó al llegar a {fmt_price(ref)}: {exc}", "levels",
+                                              level="warn")
+                    else:
+                        return  # filled: open_position published the account and synced the subscriptions
             # refused: the order left the pending list -> the page and the live subscriptions follow
             await self.publish(order["account_id"])
             if config.BACKGROUND:
