@@ -57,6 +57,8 @@ FORBIDDEN = [
     ("def f(gen):\n    return gen.gi_frame", 2),
     ("def f(e):\n    return e.tb_frame.f_globals", 2),
     ("print(__builtins__)", 1),
+    ("import numpy as np\nx = np.ndarray((8,), 'O', bytes([255] * 64))", 2),
+    ("import numpy as np\nx = np.recarray((1,), dtype=[('a', 'O')], buf=bytes(8))", 2),
 ]
 
 

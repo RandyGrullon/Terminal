@@ -16,6 +16,7 @@ import time
 from typing import Any, Callable
 
 from app.data.base import CandleSet
+from app.engine.costs import fee_pct_for
 from app.sim.common import (
     ACTION_LABEL,
     MARKER_EXIT_REASON,
@@ -52,9 +53,13 @@ class SimError(ValueError):
 
 
 def _default_nexus(cs: CandleSet, prior: Any, gate_state: dict | None = None) -> tuple[dict, Any]:
-    """NEXUS with the live settings (runs in a worker thread)."""
+    """NEXUS with the live settings (runs in a worker thread). The gate charges the commission of the market's asset
+    class (a replay of FX:EURUSD is not charged the crypto fee), like NexusService, the backtest and the paper
+    account; SIM:* markets use risk.fee_pct."""
     _, nexus_params_cls = load_engine()
-    params, _ = build_nexus_params(nexus_params_cls, current_settings(), None)
+    settings = dict(current_settings())
+    settings["risk.fee_pct"] = fee_pct_for(cs.symbol, settings)
+    params, _ = build_nexus_params(nexus_params_cls, settings, None)
     return run_engine(cs, params, prior, gate_state=gate_state)
 
 

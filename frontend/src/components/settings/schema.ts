@@ -12,6 +12,7 @@ export type FieldKind =
   | 'markets' // multi-select of scanner markets
   | 'tp3' // three ascending R multiples
   | 'symbols' // list of symbols (tags)
+  | 'fee_classes' // number per asset class (risk.fee_pct_by_class)
 
 export interface FieldDef {
   key: string
@@ -44,6 +45,19 @@ export const CRYPTO_EXCHANGES = [
   { value: 'kraken', label: 'Kraken' },
   { value: 'kucoin', label: 'KuCoin' },
 ]
+
+/** Asset classes of risk.fee_pct_by_class (backend app.engine.costs.asset_class), in display order. */
+export const FEE_CLASSES = [
+  { id: 'forex', label: 'Forex' },
+  { id: 'index', label: 'Índices' },
+  { id: 'futures', label: 'Futuros' },
+  { id: 'bond', label: 'Bonos' },
+  { id: 'commodity', label: 'Materias primas' },
+  { id: 'cfd', label: 'CFD' },
+  { id: 'stock', label: 'Acciones' },
+  { id: 'fund', label: 'Fondos y ETF' },
+]
+export const FEE_CLASS_LABEL: Record<string, string> = Object.fromEntries(FEE_CLASSES.map((c) => [c.id, c.label]))
 
 /** Used when /api/markets is not reachable. */
 export const FALLBACK_MARKETS = [
@@ -90,7 +104,18 @@ export const GROUPS: GroupDef[] = [
         max: 2,
         step: 0.01,
         unit: '%',
-        help: 'Comisión descontada en cada entrada y en cada salida.',
+        help: 'Comisión descontada en cada entrada y en cada salida para cripto y para las clases de activo sin comisión propia.',
+      },
+      {
+        key: 'risk.fee_pct_by_class',
+        label: 'Comisión por clase de activo',
+        kind: 'fee_classes',
+        min: 0,
+        max: 2,
+        step: 0.005,
+        unit: '%',
+        wide: true,
+        help: 'Comisión más diferencial típicos por lado según el tipo de activo; se usan en NEXUS, el filtro, los backtests y la cuenta demo. Son estimaciones: tu bróker real puede cobrar otra cosa.',
       },
       {
         key: 'risk.slippage_pct',
@@ -360,7 +385,7 @@ export const GROUPS: GroupDef[] = [
     title: 'Proveedores de datos',
     icon: Satellite,
     description:
-      'Solo fuentes oficiales y públicas. Las claves son opcionales, amplían el historial de acciones y forex, y se guardan únicamente en tu base de datos local.',
+      'Solo fuentes oficiales y públicas. Las claves son opcionales, amplían el historial de acciones y forex, y se guardan en tu propia base de datos: SQLite en tu equipo o, en modo nube, tu Postgres de Supabase.',
     fields: [
       {
         key: 'providers.tradingview_enabled',

@@ -1,18 +1,21 @@
 """PyChart sandbox worker: runs ONE user script in this (isolated, short-lived) process.
 
 Started by ``app.scripting.sandbox.run_script`` as ``python -I worker.py`` with a minimal environment. Protocol:
-a JSON object on stdin ``{code, time, open, high, low, close, volume, inputs, symbol, tf}``; one JSON
-``ScriptRunResult`` on stdout after ``RESULT_MARKER``.
+a JSON object on stdin ``{code, time, open, high, low, close, volume, inputs, symbol, tf, memory_mb}``; one JSON
+``ScriptRunResult`` (at most ``MAX_RESULT_BYTES``) on stdout after ``RESULT_MARKER``.
 
 Defence in depth (the AST validation of ``validator.py`` is layer 1):
 2. restricted ``__builtins__`` (safe subset, custom ``print``/``__import__``, no ``open``/``eval``/``type``...);
 3. imports limited to math / statistics / numpy, handed out as read-only module proxies that refuse private
-   names, file/system APIs and modules outside the whitelist (``statistics.sys`` ...);
+   names, file/system APIs and modules outside the whitelist (``statistics.sys``, ``numpy.random.mtrand`` ...),
+   also for ``from <module> import <name>``;
 4. a ``sys.addaudithook`` guard armed right before the script runs: every audited operation is denied except a
    few harmless ones (no file ``open``, ``os.*``, ``subprocess``, ``socket``, ``ctypes``, ``shutil``, ``winreg``,
-   non-whitelisted imports, ``compile`` or a second ``exec``);
-5. OS limits: Windows job object (memory cap, no child processes) / POSIX rlimits (address space, file size).
-The parent kills the process on timeout.
+   non-whitelisted imports, ``compile`` or a second ``exec``). Its state lives only in a closure (nothing in the
+   module globals can disarm it);
+5. OS limits (memory cap ``memory_mb``): Windows job object (memory, no child processes) / POSIX rlimits (address
+   space, file size, no child processes).
+The parent kills the process on timeout and reads its output with hard size limits.
 """
 from __future__ import annotations
 
@@ -77,6 +80,7 @@ def _warm_numpy() -> None:
         lambda: statistics.fmean([1.0, 2.0]), lambda: statistics.median([1.0, 2.0]),
         lambda: statistics.stdev([1.0, 2.0, 4.0]), lambda: statistics.correlation([1.0, 2.0, 3.0], [1.0, 2.0, 4.0]),
         lambda: statistics.linear_regression([1.0, 2.0, 3.0], [1.0, 2.0, 4.0]),
+        lambda: statistics.mode([1.0, 1.0, 2.0]),  # Counter.most_common imports heapq on first use
     )
     with warnings.catch_warnings(), np.errstate(all="ignore"):
         warnings.simplefilter("ignore")
@@ -106,10 +110,17 @@ from app.scripting.validator import (  # noqa: E402
     SCRIPT_FILENAME,
     attribute_problem,
     build_code,
+    clip_text,
     make_error,
 )
 
-MEMORY_LIMIT_MB = 1536
+DEFAULT_MEMORY_MB = 1024  # app.config.SCRIPT_MEMORY_MB, sent by the launcher as payload["memory_mb"]
+MEMORY_MB_RANGE = (128, 8192)
+# POSIX only: extra *virtual* address space over memory_mb for RLIMIT_AS (see _limit_posix for the trade-off).
+POSIX_AS_HEADROOM_MB = 512
+MAX_RESULT_BYTES = 40 * 1024 * 1024  # serialized result; below the launcher's read limit (sandbox.MAX_STDOUT_BYTES)
+MESSAGE_MAX = 2000  # characters of an exception message shown to the user
+STDERR_SINK_MAX = 4000  # characters of Python-level stderr kept while the script runs (the rest is dropped)
 
 SAFE_BUILTIN_NAMES = (
     "abs", "all", "any", "ascii", "bin", "bool", "bytes", "callable", "chr", "complex", "dict", "divmod",
@@ -130,7 +141,10 @@ SAFE_EVENTS = frozenset({"builtins.id", "random.seed", "sys.unraisablehook", "cp
 
 class SafeModule:
     """Read-only view of an allowed module: no private/dunder names, no file/system APIs, and submodules only
-    when they are themselves whitelisted (so ``statistics.sys`` or ``np.lib`` are unreachable)."""
+    when they are themselves whitelisted (so ``statistics.sys`` or ``np.lib`` are unreachable).
+
+    It must never expose ``__name__``: when ``from m import x`` fails with AttributeError, CPython falls back to
+    ``sys.modules[m.__name__ + "." + x]``, which would hand out the raw submodule."""
 
     __slots__ = ("_m", "_r")
 
@@ -182,22 +196,30 @@ _BLOCKED_NUMPY_INTERNALS = (
 
 def make_import(registry: dict[int, SafeModule]):
     def safe_import(name: str, globals: Any = None, locals: Any = None, fromlist: Any = (), level: int = 0) -> Any:
-        # numpy's own C code imports its internals lazily (PyImport_ImportModule -> __import__(name, ..., ["__doc__"]))
-        # and, when called from the script, that goes through these builtins. The AST validator never lets user
-        # code name a numpy submodule, so only numpy itself reaches this branch; serve already-loaded internals.
-        if level == 0 and fromlist and name.startswith("numpy.") and not name.startswith(_BLOCKED_NUMPY_INTERNALS):
-            internal = sys.modules.get(name)
-            if internal is not None:
-                return internal
+        if type(name) is not str:
+            raise BlockedImport("Importación no permitida.")
+        # numpy's C code imports its internals lazily (repr of a dtype, ufunc errors ...) through PyImport_Import,
+        # which calls the *calling frame's* __import__ with an empty list as fromlist, ignores the return value and
+        # then reads sys.modules itself. Import statements always pass a tuple or None, so the script never takes
+        # this branch, and it gets nothing back from it anyway.
+        if (type(fromlist) is list and not fromlist and level == 0 and name not in ALLOWED_IMPORTS
+                and name.startswith("numpy.") and not name.startswith(_BLOCKED_NUMPY_INTERNALS) and name in sys.modules):
+            return None
         if level != 0 or name not in ALLOWED_IMPORTS:
             raise BlockedImport(f"Importación no permitida: '{name}'. Solo se permiten math, statistics y numpy.")
-        for item in fromlist or ():
-            if item == "*" or attribute_problem(str(item)):
-                raise BlockedImport(f"No se puede importar '{item}' desde '{name}'.")
         target = sys.modules.get(name if fromlist else name.partition(".")[0])
         proxy = registry.get(id(target)) if target is not None else None
         if proxy is None:
             raise BlockedImport(f"El módulo '{name}' no está disponible en PyChart.")
+        for item in fromlist or ():
+            if type(item) is not str or item == "*" or attribute_problem(item):
+                raise BlockedImport(f"No se puede importar '{item}' desde '{name}'.")
+            try:  # resolved through the proxy, so `from numpy.random import mtrand` is refused like np.random.mtrand
+                getattr(proxy, item)
+            except BlockedAttribute as exc:
+                raise BlockedImport(f"No se puede importar '{item}' desde '{name}': {exc}") from None
+            except AttributeError:
+                raise ImportError(f"No se puede importar '{item}' desde '{name}': ese nombre no existe.") from None
         return proxy
 
     return safe_import
@@ -214,28 +236,40 @@ def build_builtins(registry: dict[int, SafeModule], printer: Any, input_api: Any
 # ============================================================================= audit guard
 
 
-class _Guard:
-    phase = "setup"  # setup -> user (script running) -> report (mapping errors / writing the result)
-    code: Any = None
+def make_audit_guard(code_obj: Any) -> tuple[Any, Any, list[str]]:
+    """(hook, set_phase, blocked) for one run. The phase starts as "user" (script running) and only moves to
+    "report" (mapping errors / writing the result), where reading frames from tracebacks is allowed.
+
+    Everything the hook depends on lives in this closure: once the hook is installed, the only other reference to
+    its state is ``set_phase`` in run_payload's frame, so a script that reached the worker's module globals (via
+    ``sys.modules['__main__']``) still cannot disarm it, and an unknown phase is treated as "user"."""
+    phase = "user"
     exec_budget = 1
     blocked: list[str] = []
+    safe_events, blocked_error, allowed_roots = SAFE_EVENTS, SandboxBlocked, ("math", "statistics", "numpy")
+    as_str, is_instance, size = str, isinstance, len  # bound now: replacing builtins later changes nothing here
 
+    def audit(event: str, args: tuple) -> None:
+        nonlocal exec_budget
+        if event in safe_events:
+            return
+        if event == "exec" and exec_budget > 0 and args and args[0] is code_obj:
+            exec_budget -= 1
+            return
+        if event == "object.__getattr__" and phase == "report":
+            return
+        if event == "import" and args and as_str(args[0]).partition(".")[0] in allowed_roots:
+            return  # cached already; a real load would still be stopped by the "open" rule
+        detail = f"{event} {args[0]}" if args and is_instance(args[0], str) else event
+        if size(blocked) < 20:
+            blocked.append(detail[:80])
+        raise blocked_error(f"Operación bloqueada por el sandbox de PyChart: {detail[:120]}")
 
-def _audit(event: str, args: tuple) -> None:
-    phase = _Guard.phase
-    if phase == "setup" or event in SAFE_EVENTS:
-        return
-    if event == "exec" and _Guard.exec_budget > 0 and args and args[0] is _Guard.code:
-        _Guard.exec_budget -= 1
-        return
-    if event == "object.__getattr__" and phase == "report":
-        return
-    if event == "import" and args and str(args[0]).partition(".")[0] in ("math", "statistics", "numpy"):
-        return  # cached already; a real load would still be stopped by the "open" rule
-    detail = f"{event} {args[0]}" if args and isinstance(args[0], str) else event
-    if len(_Guard.blocked) < 20:
-        _Guard.blocked.append(detail[:80])
-    raise SandboxBlocked(f"Operación bloqueada por el sandbox de PyChart: {detail[:120]}")
+    def set_phase(value: str) -> None:
+        nonlocal phase
+        phase = value
+
+    return audit, set_phase, blocked
 
 
 # --- end of section A: guards ---
@@ -246,7 +280,14 @@ def _audit(event: str, args: tuple) -> None:
 _JOB_HANDLE: Any = None  # kept open for the life of the process
 
 
-def _limit_windows() -> None:
+def memory_limit_mb(value: Any) -> int:
+    """Memory cap of this worker in MB (payload ``memory_mb``; DEFAULT_MEMORY_MB when missing or invalid)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return DEFAULT_MEMORY_MB
+    return int(min(max(value, MEMORY_MB_RANGE[0]), MEMORY_MB_RANGE[1]))
+
+
+def _limit_windows(memory_mb: int) -> None:
     """Job object: memory cap + no child processes (CreateProcess fails inside the job)."""
     global _JOB_HANDLE
     import ctypes
@@ -292,7 +333,7 @@ def _limit_windows() -> None:
     info = _Extended()
     info.BasicLimitInformation.LimitFlags = 0x100 | 0x8  # PROCESS_MEMORY | ACTIVE_PROCESS
     info.BasicLimitInformation.ActiveProcessLimit = 1
-    info.ProcessMemoryLimit = MEMORY_LIMIT_MB * 1024 * 1024
+    info.ProcessMemoryLimit = memory_mb * 1024 * 1024
     if not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
         raise OSError(ctypes.get_last_error(), "SetInformationJobObject")
     if not k32.AssignProcessToJobObject(job, k32.GetCurrentProcess()):
@@ -300,11 +341,32 @@ def _limit_windows() -> None:
     _JOB_HANDLE = job
 
 
-def _limit_posix() -> None:
+def _raise_oom_priority() -> None:
+    """Best effort (Linux): make the kernel OOM killer sacrifice THIS short-lived sandbox worker before anything else
+    (above all the server) when the VM runs out of memory. Raising one's own oom_score_adj needs no privilege; on
+    macOS / inside containers without the file, or on any error, this is a silent no-op."""
+    try:
+        with open("/proc/self/oom_score_adj", "w", encoding="ascii") as fh:
+            fh.write("1000")  # max: most killable
+    except OSError:
+        pass
+
+
+def _limit_posix(memory_mb: int) -> None:
     import resource
 
-    address_space = (MEMORY_LIMIT_MB + 1024) * 1024 * 1024  # headroom for interpreter / numpy mappings
-    for res, value in ((resource.RLIMIT_AS, address_space), (resource.RLIMIT_FSIZE, 0), (resource.RLIMIT_CORE, 0)):
+    _raise_oom_priority()
+    # RLIMIT_AS caps *virtual* address space, not resident memory. numpy / BLAS reserve large virtual mappings that are
+    # mostly non-resident, so the cap must sit well above memory_mb or legitimate vector math fails with MemoryError;
+    # yet every extra MB of cap is memory a hostile script can actually fault in, and on a small VM (e.g. Fly 1 GB with
+    # NEXUS_SCRIPT_MEMORY_MB=320) no single cap both allows numpy and stays under the VM. So the cap stays a coarse
+    # guard with enough headroom for numpy (BLAS threads are already disabled above), trimmed from +1024 to
+    # +POSIX_AS_HEADROOM_MB MB; the real protection against taking the server down is _raise_oom_priority() above.
+    address_space = (memory_mb + POSIX_AS_HEADROOM_MB) * 1024 * 1024
+    limits = [(resource.RLIMIT_AS, address_space), (resource.RLIMIT_FSIZE, 0), (resource.RLIMIT_CORE, 0)]
+    if hasattr(resource, "RLIMIT_NPROC"):  # no child processes (nor threads), like the Windows job object
+        limits.append((resource.RLIMIT_NPROC, 0))
+    for res, value in limits:
         try:
             _, hard = resource.getrlimit(res)
             new = value if hard == resource.RLIM_INFINITY else min(value, hard)
@@ -313,9 +375,9 @@ def _limit_posix() -> None:
             continue
 
 
-def harden_process() -> None:
+def harden_process(memory_mb: int = DEFAULT_MEMORY_MB) -> None:
     try:
-        _limit_windows() if os.name == "nt" else _limit_posix()
+        _limit_windows(memory_mb) if os.name == "nt" else _limit_posix(memory_mb)
     except Exception as exc:  # the run continues with the other layers
         sys.stderr.write(f"pychart worker: no se aplicaron los límites del sistema: {exc}\n")
 
@@ -344,7 +406,7 @@ _EXC_LABELS = {
     "KeyError": "Clave inexistente",
     "AttributeError": "Atributo inexistente",
     "OverflowError": "Desbordamiento numérico",
-    "ImportError": "Importación no permitida",
+    "ImportError": "Error de importación",
     "ModuleNotFoundError": "Importación no permitida",
     "PermissionError": "Operación bloqueada",
     "AssertionError": "Aserción fallida",
@@ -376,13 +438,25 @@ def user_location(exc: BaseException) -> tuple[int | None, int | None]:
     return line, col
 
 
+_NAME_ERROR = re.compile(r"name '(.+?)' is not defined")
+
+
+def _exception_text(exc: BaseException) -> str:
+    try:
+        text = str(exc)
+    except BaseException:  # noqa: BLE001 - a failing __str__ (or a script formatter) must not break the report
+        return ""
+    return clip_text(text, MESSAGE_MAX).strip()  # cut first: the script controls the size of its messages
+
+
 def exception_message(exc: BaseException) -> str:
+    """Spanish message for a script failure (at most about MESSAGE_MAX characters, whatever the script raised)."""
+    text = _exception_text(exc)
     if isinstance(exc, (ScriptRuntimeError,) + SANDBOX_ERRORS):
-        return str(exc)
+        return text or type(exc).__name__
     name = type(exc).__name__
-    text = str(exc).strip()
     if isinstance(exc, NameError) and not isinstance(exc, UnboundLocalError):
-        match = re.match(r"name '(.+?)' is not defined", text)
+        match = _NAME_ERROR.match(text)
         if match:
             ident = match.group(1)
             if ident in FORBIDDEN_NAMES or ident.startswith("__"):
@@ -452,43 +526,77 @@ def run_payload(payload: dict) -> dict[str, Any]:
         script_globals = dict(namespace)
         script_globals.update(np=registry[id(np)], math=registry[id(math)], print=printer, __name__="__pychart__")
         script_globals["__builtins__"] = build_builtins(registry, printer, namespace["input"])
+        memory_mb = memory_limit_mb(payload.get("memory_mb"))
     except Exception as exc:
         result["errors"] = [make_error("runtime", f"No se pudo preparar la ejecución del script: {exc}")]
         return result
-    harden_process()
+    harden_process(memory_mb)
     warnings.simplefilter("ignore")
     np.seterr(all="ignore")
+    real_stderr = sys.stderr
     sys.stdout = buffer  # stray Python-level writes end up in the captured output
-    _Guard.code = code_obj
-    sys.addaudithook(_audit)
-    _Guard.phase = "user"
+    sys.stderr = OutputBuffer(STDERR_SINK_MAX)  # capped (C-level stderr is capped by the launcher)
+    hook, set_phase, blocked = make_audit_guard(code_obj)
+    sys.addaudithook(hook)
+    del hook  # from here on only the interpreter holds the hook
     try:
         exec(code_obj, script_globals)
         result = collect_result(ctx)
-        if _Guard.blocked:
-            result["stdout"] += f"Aviso: el sandbox bloqueó: {', '.join(sorted(set(_Guard.blocked)))}\n"
+        if blocked:
+            result["stdout"] += f"Aviso: el sandbox bloqueó: {', '.join(sorted(set(blocked)))}\n"
     except BaseException as exc:  # noqa: BLE001 - every user failure becomes a ScriptError
-        _Guard.phase = "report"
+        # str(exc) may run script code (e.g. a numpy print formatter): build the message under the "user" rules.
+        message = exception_message(exc)
+        kind = "security" if isinstance(exc, SANDBOX_ERRORS) else "runtime"
         script_globals.clear()
+        set_phase("report")
         line, col = user_location(exc)
         result = empty_result()
         result["meta"] = dict(ctx.meta)
-        kind = "security" if isinstance(exc, SANDBOX_ERRORS) else "runtime"
-        result["errors"] = [make_error(kind, exception_message(exc), line, col)]
+        result["errors"] = [make_error(kind, message, line, col)]
         result["stdout"] = buffer.getvalue()
-    _Guard.phase = "report"
+    set_phase("report")
+    sys.stderr = real_stderr
     result["duration_ms"] = round((time.perf_counter() - started) * 1000.0, 1)
     return result
 
 
+def _fallback_json(result: dict, message: str) -> str:
+    """Error result (keeping the small ``meta`` / ``stdout`` / ``duration_ms`` of ``result``) as JSON."""
+    fallback = empty_result()
+    fallback["errors"] = [make_error("runtime", message)]
+    try:
+        if isinstance(result.get("meta"), dict):
+            fallback["meta"] = result["meta"]
+        if isinstance(result.get("stdout"), str):
+            fallback["stdout"] = clip_text(result["stdout"], 30_000)
+        if isinstance(result.get("duration_ms"), (int, float)):
+            fallback["duration_ms"] = result["duration_ms"]
+        return json.dumps(fallback, ensure_ascii=True, allow_nan=False)
+    except (TypeError, ValueError, MemoryError, RecursionError):
+        bare = empty_result()
+        bare["errors"] = [make_error("runtime", message)]
+        return json.dumps(bare, ensure_ascii=True)
+
+
 def emit(stream: Any, result: dict) -> None:
+    """Writes ``RESULT_MARKER`` + the result as JSON: an error result instead when it cannot be serialized or is
+    bigger than MAX_RESULT_BYTES (the launcher stops reading a little above that)."""
     try:
         text = json.dumps(result, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
-    except (TypeError, ValueError):
-        fallback = empty_result()
-        fallback["errors"] = [make_error("runtime", "El resultado del script no se pudo serializar.")]
-        text = json.dumps(fallback, ensure_ascii=True)
-    stream.write((RESULT_MARKER + text + "\n").encode("ascii"))
+    except (TypeError, ValueError, MemoryError, RecursionError):
+        text = _fallback_json(result, "El resultado del script no se pudo serializar.")
+    if len(text) > MAX_RESULT_BYTES:  # ASCII: characters == bytes
+        size_mb = len(text) / (1024 * 1024)
+        del text  # release it before building the replacement
+        text = _fallback_json(
+            result,
+            f"El resultado del script es demasiado grande ({size_mb:.0f} MB; el máximo es "
+            f"{MAX_RESULT_BYTES // (1024 * 1024)} MB). Reduce el número de velas, de plot() o de marcadores.",
+        )
+    stream.write(RESULT_MARKER.encode("ascii"))
+    stream.write(text.encode("ascii"))
+    stream.write(b"\n")
     stream.flush()
 
 
@@ -503,7 +611,12 @@ def main() -> int:
         bad["errors"] = [make_error("runtime", "Entrada inválida para el sandbox de PyChart.")]
         emit(out, bad)
         return 0
-    emit(out, run_payload(payload))
+    try:
+        result = run_payload(payload)
+    except BaseException as exc:  # noqa: BLE001 - run_payload never raises; report rather than exit without a result
+        result = empty_result()
+        result["errors"] = [make_error("runtime", f"Fallo interno del sandbox de PyChart ({type(exc).__name__}).")]
+    emit(out, result)
     return 0
 
 

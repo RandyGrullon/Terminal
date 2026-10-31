@@ -130,6 +130,7 @@ class NexusResult:
     prediction: dict | None
     learning: dict
     stats: dict
+    # learner state AFTER processing each snapshot bar: {"time", "state", "kind": "grid" | "last"} (see nexus_loop)
     snapshots: list[dict] = field(default_factory=list)
     state: dict | None = None
     context: Any = None  # GateContext of the last bar (lets the service re-check user entry/SL/TP ideas)
@@ -155,10 +156,15 @@ class NexusResult:
 
 
 def run_nexus(cs: Any, params: NexusParams | None = None, prior: dict | None = None, *,
-              gate_state: dict | None = None) -> NexusResult:
+              gate_state: dict | None = None, vetoed_entries: Any = None) -> NexusResult:
     """Run the engine over the candle set. `prior` = a learner snapshot state (see NexusResult.snapshots);
     `gate_state` = the global GateLearner state (model_state kind='gate'), pooled into the gate weights of the LAST
-    bar only (historical decisions use the causal prior chain + what the run learns)."""
+    bar only (historical decisions use the causal prior chain + what the run learns).
+
+    `vetoed_entries` = entries the market-conditions check (semáforo) vetoed when they were the live decision:
+    [{"time": decision bar open time, "direction": "long" | "short", "level": "red" | "amber", "detail": str}].
+    That candidate is rejected (REJECTED_* marker with the macro reason) instead of opening a position. The veto
+    was known at the close of its bar, so the run stays causal and deterministic for the same inputs."""
     from app.engine.nexus_loop import NexusRun
 
     if params is None:
@@ -168,4 +174,4 @@ def run_nexus(cs: Any, params: NexusParams | None = None, prior: dict | None = N
         params = NexusParams(**{k: v for k, v in params.items() if k in names})
     elif not isinstance(params, NexusParams):
         raise TypeError("params debe ser NexusParams")
-    return NexusRun(cs, params, prior, gate_state).run()
+    return NexusRun(cs, params, prior, gate_state, vetoed_entries).run()

@@ -5,6 +5,7 @@ import { Dices, Info, Play } from 'lucide-react'
 import type { MonteCarloResult, Timeframe } from '../../api/types'
 import { TIMEFRAMES } from '../../api/types'
 import { fmtInt, fmtNum, fmtPct, signTone, type Tone } from '../../lib/format'
+import { plural } from '../../lib/plural'
 import { useApp } from '../../store'
 import { Badge, Button, Card, Disclaimer, Empty, ErrorBox, Field, NumberInput, Select, Stat, TextInput } from '../ui'
 import { FanChart } from './FanChart'
@@ -105,7 +106,7 @@ function MonteCarloResults(props: { result: MonteCarloResult; body: MonteCarloBo
           </span>
         )}
         <span className="small text-2">
-          {fmtInt(r.paths)} trayectorias × {fmtInt(r.steps)} pasos · capital inicial {fmtNum(props.capital, 2)}
+          {plural(r.paths, 'trayectoria', 'trayectorias')} × {plural(r.steps, 'paso', 'pasos')} · capital inicial {fmtNum(props.capital, 2)}
         </span>
       </div>
 
@@ -243,20 +244,24 @@ export function MonteCarloView() {
             <Field label="Modo" style={{ gridColumn: 'span 2' }}>
               <Select<'bootstrap' | 'synthetic'> value={form.mode} onChange={(mode) => patch({ mode })} options={MODE_OPTIONS} />
             </Field>
-            <Field label="Símbolo" style={{ gridColumn: 'span 2' }}>
-              {bootstrap ? (
+            {bootstrap ? (
+              <Field label="Símbolo" style={{ gridColumn: 'span 2' }}>
                 <TextInput
                   value={form.symbol ?? appSymbol}
                   onChange={(v) => patch({ symbol: v })}
                   placeholder="btc, aapl, BINANCE:ETHUSDT…"
                   mono
                 />
-              ) : (
+              </Field>
+            ) : (
+              // Synthetic mode has no symbol to type: a caption (no <label> pointing at nothing) and static text.
+              <div className="field" style={{ gridColumn: 'span 2' }}>
+                <span className="label">Símbolo</span>
                 <div className="input mono sim-static" title="El modo sintético genera sus propios mercados">
                   SIM:NEXUS (mercados generados)
                 </div>
-              )}
-            </Field>
+              </div>
+            )}
             <Field label="Temporalidad">
               <Select<Timeframe> value={form.tf ?? appTf} onChange={(tf) => patch({ tf })} options={TF_OPTIONS} />
             </Field>
@@ -293,7 +298,7 @@ export function MonteCarloView() {
           label={
             job.attempt?.mode === 'synthetic'
               ? `Ejecutando NEXUS en ${fmtInt(Math.min(60, Math.max(5, job.attempt.paths ?? 30)))} mercados sintéticos…`
-              : `Backtest de ${job.attempt?.symbol ?? ''} y ${fmtInt(job.attempt?.paths ?? null)} remuestreos…`
+              : `Backtest de ${job.attempt?.symbol ?? ''} y ${plural(job.attempt?.paths ?? null, 'remuestreo', 'remuestreos')}…`
           }
           hint={job.attempt?.mode === 'synthetic' ? 'Cada mercado ejecuta NEXUS completo: puede tardar hasta un minuto' : undefined}
         />

@@ -12,6 +12,7 @@ DELETE /api/watchlist?symbol=                           -> {items}
 """
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -46,10 +47,12 @@ def _int_param(value: Any, name: str, default: int, lo: int, hi: int) -> int:
     if value is None or str(value).strip() == "":
         return default
     try:
-        n = int(float(str(value).strip()))
-    except ValueError:
-        raise _bad(f"El parámetro '{name}' debe ser un número entero") from None
-    return max(lo, min(hi, n))
+        x = float(str(value).strip())
+    except (ValueError, OverflowError):
+        x = math.nan
+    if not math.isfinite(x):  # 'abc', 'nan', 'inf', '1e999'
+        raise _bad(f"El parámetro '{name}' debe ser un número entero")
+    return max(lo, min(hi, int(x)))
 
 
 def _tf_param(tf: Any) -> str:
@@ -162,14 +165,17 @@ async def get_candles(symbol: str = "", tf: str = "1h", limit: str | None = None
         cs = await hub.get_candles(sym, tf_n, n)
     except ProviderError as exc:
         raise _bad(str(exc)) from None
-    return clean_json({
+    out = {
         "symbol": cs.symbol,
         "tf": cs.tf,
         "provider": cs.provider,
         "history": cs.history,
         "note": cs.note,
         "candles": cs.to_list(),
-    })
+    }
+    if getattr(cs, "stale", False):
+        out["stale"] = True  # newest bar far too old: not live data (the note says why), like Quote.stale
+    return clean_json(out)
 
 
 @router.get("/api/quotes")

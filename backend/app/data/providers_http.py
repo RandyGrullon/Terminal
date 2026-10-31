@@ -114,16 +114,19 @@ async def request_json(
     headers: dict | None = None,
     limiter: RateLimiter | None = None,
     retries: int = 2,
+    timeout: float | None = None,
 ) -> HttpResult:
     """Perform one HTTP call. Network errors, 429/418 and 5xx are retried (bounded); any other status is returned
-    to the caller, which interprets provider-specific error payloads. Raises DataProviderError (Spanish)."""
+    to the caller, which interprets provider-specific error payloads. Raises DataProviderError (Spanish).
+    `timeout` (seconds) overrides the client's timeout for this call (live polls use a short one, retries=0)."""
     ensure_online(provider)
     lim = limiter if limiter is not None else loop_limiter(provider)
+    extra: dict[str, Any] = {"timeout": float(timeout)} if timeout is not None else {}
     attempt = 0
     while True:
         try:
             async with lim:
-                resp = await client.request(method, url, params=params, json=json_body, headers=headers)
+                resp = await client.request(method, url, params=params, json=json_body, headers=headers, **extra)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             if attempt < retries:
                 attempt += 1

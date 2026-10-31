@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from typing import Any, Callable
 
 from app.config import DEFAULT_SETTINGS
@@ -11,6 +12,16 @@ from app.util import now_ms
 
 _TRUE = {"1", "true", "yes", "si", "sí", "on", "y", "s"}
 _FALSE = {"0", "false", "no", "off", "n", ""}
+
+
+def _finite(value: Any) -> float:
+    """float(value), rejecting booleans, NaN and ±inf (ValueError)."""
+    if isinstance(value, bool):
+        raise ValueError
+    out = float(str(value).strip()) if isinstance(value, str) else float(value)
+    if not math.isfinite(out):
+        raise ValueError
+    return out
 
 
 class SettingsStore:
@@ -88,9 +99,9 @@ class SettingsStore:
                     return False
                 raise ValueError
             if isinstance(default, int):
-                return int(float(value))
+                return int(_finite(value))
             if isinstance(default, float):
-                return float(value)
+                return _finite(value)
             if isinstance(default, list):
                 if isinstance(value, str):
                     s = value.strip()
@@ -101,10 +112,18 @@ class SettingsStore:
                 if not isinstance(value, (list, tuple)):
                     raise ValueError
                 if default and all(isinstance(x, (int, float)) for x in default):
-                    return [float(x) for x in value]
+                    return [_finite(x) for x in value]
                 return list(value)
+            if isinstance(default, dict):
+                # Numeric maps (e.g. risk.fee_pct_by_class): only the known keys, finite numbers; missing keys keep
+                # their default value.
+                if isinstance(value, str):
+                    value = json.loads(value.strip() or "{}")
+                if not isinstance(value, dict) or any(k not in default for k in value):
+                    raise ValueError
+                return {**default, **{str(k): _finite(v) for k, v in value.items()}}
             if isinstance(default, str):
                 return "" if value is None else str(value)
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError, OverflowError, json.JSONDecodeError):
             raise ValueError(f"Valor no válido para {key}: {value!r}") from None
         return value

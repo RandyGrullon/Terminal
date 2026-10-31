@@ -90,7 +90,7 @@ def finish_run(run: Any) -> NexusResult:
     current = build_current(run)
     prediction = build_prediction(f.close, f.time, f.tf_s, run.score, run.regime, last, float(run.prob[last]),
                                   run.h, f.warmup)
-    stats = compute_stats(trades, [c.get("won") for c in run.rejected], run.bar_ret, f.tf_s)
+    stats = compute_stats(trades, [c.get("won") for c in run.rejected], run.bar_ret, f.tf_s, f.time)
     markers = sorted(run.markers, key=lambda m: m["time"])
     return NexusResult(
         symbol=str(getattr(run.cs, "symbol", "")), tf=str(f.tf), history=str(getattr(run.cs, "history", "full")),

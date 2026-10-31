@@ -314,6 +314,10 @@
 .pp-gate.warn {
   border-color: rgba(245, 165, 36, 0.45);
 }
+/* gate TOMAR without the matching NEXUS entry signal: "Filtro favorable · sin señal NEXUS" */
+.pp-gate.info {
+  border-color: rgba(62, 166, 255, 0.45);
+}
 .pp-gate-summary {
   margin: 0;
   font-size: 12.5px;

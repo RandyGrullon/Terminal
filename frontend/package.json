@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node tests/fe-chart.run.mjs && node tests/fe-shell.run.mjs && node tests/int-fe-b.run.mjs && node --test tests/fe-trust.test.mjs tests/int-fe-a.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

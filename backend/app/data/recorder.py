@@ -2,8 +2,11 @@
 
 Assets without a free candle API (stocks, forex, indices, futures when no API key is configured) get their OHLCV
 history built locally: every `recorder.interval_s` seconds ONE batched TradingView request returns the current bar of
-1m/5m/15m/1h/4h/1d for every recorded symbol (watchlist + live subscriptions whose history is "recorder"), and the
-bars are merged into the `candles` table (source "recorder"). Other timeframes are resampled from these by the hub.
+1m/5m/15m/1d for every recorded symbol (watchlist + live subscriptions whose history is "recorder"), and the bars are
+merged into the `candles` table (source "recorder"). Other timeframes are resampled from these by the hub: TradingView's
+1h/4h bars follow each exchange's session (US stocks start at 13:30 UTC), so they are rebuilt from 15m bars to keep
+the UTC-aligned buckets of the rest of the app. Bars are stamped in market time (TradingView announces a delay of
+10-15 min for many exchanges, see tradingview_parse.row_current_bars).
 """
 from __future__ import annotations
 
@@ -11,22 +14,37 @@ import asyncio
 from typing import Any
 
 from app import config
-from app.util import RateLimitedLog, floor_time, now_ms, safe_float
+from app.util import RateLimitedLog, floor_time, now_ms, safe_float, tf_seconds
 
-RECORDER_TFS: tuple[str, ...] = ("1m", "5m", "15m", "1h", "4h", "1d")
-# timeframes not recorded directly -> recorded timeframe they are resampled from (aligned buckets)
-RECORDER_BASE: dict[str, str] = {"3m": "1m", "30m": "15m", "2h": "1h", "6h": "1h", "12h": "4h", "1w": "1d"}
+RECORDER_TFS: tuple[str, ...] = ("1m", "5m", "15m", "1d")
+# timeframes not recorded directly -> recorded timeframe they are resampled from (UTC-aligned buckets)
+RECORDER_BASE: dict[str, str] = {
+    "3m": "1m", "30m": "15m", "1h": "15m", "2h": "15m", "4h": "15m", "6h": "15m", "12h": "15m", "1w": "1d",
+}
 MIN_INTERVAL_S = 5.0
 MAX_SYMBOLS = 200
 START_DELAY_S = 3.0
+# A TradingView bar that rolls over this soon after our bucket opened is the previous bar still finishing (feed
+# jitter around the announced delay), not a session boundary.
+ROLLOVER_JITTER_S = 90.0
 
-# Snapshots of the same bar are merged: highs/lows only widen, volume only grows, open/close follow the source.
+# Snapshots of the same TradingView bar are merged: the stored open is kept, highs/lows only widen, close follows the
+# source and volume only grows. A snapshot of ANOTHER TradingView bar (different open or lower volume: TradingView
+# rolled over inside our bucket) never blends into the stored bar; CandleRecorder.collect decides whether it
+# replaces the stored bar (REPLACE_UPSERT_SQL) or is dropped.
 MERGE_UPSERT_SQL = (
     "INSERT INTO candles(symbol, tf, time, open, high, low, close, volume, source) "
     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-    "ON CONFLICT(symbol, tf, time) DO UPDATE SET open = excluded.open, "
+    "ON CONFLICT(symbol, tf, time) DO UPDATE SET "
     "high = MAX(candles.high, excluded.high), low = MIN(candles.low, excluded.low), close = excluded.close, "
-    "volume = MAX(candles.volume, excluded.volume), source = excluded.source"
+    "volume = MAX(candles.volume, excluded.volume), source = excluded.source "
+    "WHERE candles.open = excluded.open AND excluded.volume >= candles.volume"
+)
+REPLACE_UPSERT_SQL = (
+    "INSERT INTO candles(symbol, tf, time, open, high, low, close, volume, source) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+    "ON CONFLICT(symbol, tf, time) DO UPDATE SET open = excluded.open, high = excluded.high, low = excluded.low, "
+    "close = excluded.close, volume = excluded.volume, source = excluded.source"
 )
 
 Snapshot = tuple[int, tuple[float, float, float, float, float] | None]
@@ -56,8 +74,14 @@ def normalize_candle(c: Any) -> dict | None:
     }
 
 
-def _signature(c: dict) -> tuple[float, float, float, float, float]:
+def signature(c: dict) -> tuple[float, float, float, float, float]:
     return (c["open"], c["high"], c["low"], c["close"], c["volume"])
+
+
+def same_bar(stored: tuple[float, ...], new: tuple[float, ...]) -> bool:
+    """True when two snapshots belong to the same TradingView bar (its open never changes, its volume never
+    drops)."""
+    return stored[0] == new[0] and new[4] >= stored[4]
 
 
 class CandleRecorder:
@@ -72,6 +96,7 @@ class CandleRecorder:
         self.cycles = 0
         self.bars = 0
         self.skipped_stale = 0
+        self.skipped_rollover = 0
         self.last_symbols = 0
         self.last_cycle_at: int | None = None
         self.last_error: str | None = None
@@ -114,6 +139,7 @@ class CandleRecorder:
             "cycles": self.cycles,
             "bars": self.bars,
             "skipped_stale": self.skipped_stale,
+            "skipped_rollover": self.skipped_rollover,
             "last_symbols": self.last_symbols,
             "last_cycle_at": self.last_cycle_at,
             "last_error": self.last_error,
@@ -186,31 +212,54 @@ class CandleRecorder:
 
     async def collect(self, data: dict, symbols: list[str]) -> list[tuple[str, str, dict]]:
         """Rows to upsert from a current_bars() answer. Skips unchanged bars and stale snapshots (a closed market
-        repeating the last bar with a newer timestamp)."""
+        repeating the last bar with a newer timestamp). When TradingView's bar rolls over inside one of our buckets,
+        the snapshot replaces the stored bar right after the bucket opened (the stored one was the previous bar,
+        late because of feed jitter) and is dropped later on (TradingView's session starts before our bucket ends,
+        e.g. the forex day at 17:00 New York): bars of two different TradingView bars are never blended."""
         out: list[tuple[str, str, dict]] = []
         for symbol in symbols:
             bars = data.get(symbol)
             if not isinstance(bars, dict):
                 continue
             for tf in RECORDER_TFS:
-                c = normalize_candle(bars.get(tf))
+                raw = bars.get(tf)
+                c = normalize_candle(raw)
                 if c is None:
                     continue
                 c["time"] = floor_time(c["time"], tf)
                 key = (symbol, tf)
-                if key not in self._last_snap:
-                    self._last_snap[key] = await self._db_last(symbol, tf)
+                from_db = key not in self._last_snap  # first snapshot since (re)start: compared with the DB bar
+                if from_db:
+                    self._last_snap[key] = await self.last_stored(symbol, tf)
                 prev_time, prev_sig = self._last_snap[key]
-                sig = _signature(c)
+                sig = signature(c)
                 if prev_sig is not None and sig == prev_sig:
                     if c["time"] > prev_time:
                         self.skipped_stale += 1
                     continue  # nothing new (same bar unchanged, or a stale repeat of the last bar)
                 if c["time"] < prev_time:
                     continue  # out-of-order snapshot
+                if prev_sig is not None:
+                    tf_s = tf_seconds(tf)
+                    asof = safe_float(raw.get("asof"))
+                    early = asof is not None and asof - c["time"] < min(tf_s / 2.0, ROLLOVER_JITTER_S)
+                    same = same_bar(prev_sig, sig)
+                    if c["time"] == prev_time and not same:
+                        if not early:
+                            self.skipped_rollover += 1
+                            continue
+                        c["_replace"] = True
+                    elif same and c["time"] > prev_time and (early or from_db or c["time"] - prev_time > tf_s):
+                        # still the stored TradingView bar: finishing right after our bucket rolled (feed jitter),
+                        # or frozen since (restart while the market is closed) -> complete it, no new bar
+                        c["time"] = prev_time
                 self._last_snap[key] = (c["time"], sig)
                 out.append((symbol, tf, c))
         return out
+
+    async def last_stored(self, symbol: str, tf: str) -> Snapshot:
+        """(time, OHLCV signature) of the newest stored bar of (symbol, tf); (0, None) when there is none."""
+        return await self._db_last(symbol, tf)
 
     async def _db_last(self, symbol: str, tf: str) -> Snapshot:
         try:
@@ -224,13 +273,18 @@ class CandleRecorder:
         if not row:
             return (0, None)
         c = normalize_candle(row)
-        return (int(row["time"]), _signature(c)) if c else (0, None)
+        return (int(row["time"]), signature(c)) if c else (0, None)
 
     async def store(self, rows: list[tuple[str, str, dict]]) -> None:
+        """Merge snapshots into the `candles` table (rows flagged `_replace` by collect() overwrite the stored bar)."""
         if not rows:
             return
-        params = [
-            (s, tf, int(c["time"]), c["open"], c["high"], c["low"], c["close"], c["volume"], "recorder")
-            for s, tf, c in rows
-        ]
-        await self.rt.db.executemany(MERGE_UPSERT_SQL, params)
+        merge: list[tuple] = []
+        replace: list[tuple] = []
+        for s, tf, c in rows:
+            params = (s, tf, int(c["time"]), c["open"], c["high"], c["low"], c["close"], c["volume"], "recorder")
+            (replace if c.get("_replace") else merge).append(params)
+        if merge:
+            await self.rt.db.executemany(MERGE_UPSERT_SQL, merge)
+        if replace:
+            await self.rt.db.executemany(REPLACE_UPSERT_SQL, replace)

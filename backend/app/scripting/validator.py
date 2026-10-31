@@ -8,8 +8,11 @@ Security model (first of three layers; the sandbox worker adds restricted builti
 proxies and an audit hook):
 - imports: only ``math``, ``statistics`` and ``numpy`` (plus the pure numeric submodules linalg/random/fft);
 - no dunder names or attributes, no private (``_x``) attributes, no dangerous builtins (``eval``, ``open``...);
-- no attributes that lead to frames/code objects, string formatting with attribute traversal
-  (``format``/``format_map``) or numpy file/system APIs;
+- no attributes that lead to frames/code objects/module globals (including the non-dunder aliases such as the
+  Cython ``func_globals``), string formatting with attribute traversal (``format``/``format_map``) or numpy
+  file/system APIs;
+- no array constructor over a raw memory buffer (``ndarray``/``recarray`` with ``buffer``/``buf``): an object dtype
+  over arbitrary bytes dereferences them as pointers and crashes the worker;
 - no classes, ``with``, ``global``/``nonlocal``, ``async``/``await`` or generators (``yield``).
 Every violation is reported (with its line) so the user can fix them all at once.
 """
@@ -37,18 +40,24 @@ FORBIDDEN_NAMES = frozenset({
 # be read, but calling it is rejected (the file builtin never exists inside the sandbox).
 API_SERIES_NAMES = frozenset({"open"})
 
-# Attributes that lead to frames / code objects or allow attribute traversal inside format strings.
+# Attributes that lead to frames / code objects / module globals or allow attribute traversal inside format
+# strings. Some C types keep non-dunder aliases of the dunders: Cython functions (all of numpy.random) expose
+# func_globals / func_code / func_closure / func_dict / func_defaults (func_globals is the module __dict__, with the
+# real __builtins__), im_* are the Python 2 method names, cell_contents opens closures and ``obj`` hands back the
+# object behind an AttributeError or a memoryview.
 INTROSPECTION_ATTRS = frozenset({
     "format", "format_map", "mro", "gi_frame", "gi_code", "gi_yieldfrom", "f_globals", "f_locals", "f_back",
-    "f_code", "f_builtins", "f_trace", "tb_frame", "tb_next", "cr_frame", "cr_code", "cr_await", "ag_frame",
-    "ag_code", "ag_await", "co_code", "co_consts", "co_names",
+    "f_code", "f_builtins", "f_trace", "f_generator", "tb_frame", "tb_next", "cr_frame", "cr_code", "cr_await",
+    "ag_frame", "ag_code", "ag_await", "co_code", "co_consts", "co_names", "func_globals", "func_code",
+    "func_closure", "func_dict", "func_defaults", "func_kwdefaults", "func_builtins", "im_func", "im_self",
+    "im_class", "cell_contents", "obj",
 })
 
 # numpy (and generic) file / system / foreign-memory APIs.
 SYSTEM_ATTRS = frozenset({
     "load", "save", "savez", "savez_compressed", "savetxt", "loadtxt", "fromfile", "tofile", "memmap",
     "open_memmap", "genfromtxt", "lib", "ctypeslib", "f2py", "testing", "distutils", "DataSource", "frombuffer",
-    "fromregex", "ctypes", "dump", "dumps", "show_config", "show_runtime", "info",
+    "fromregex", "ctypes", "cffi", "capsule", "dump", "dumps", "show_config", "show_runtime", "info",
 })
 
 # Module objects re-exported by allowed modules (e.g. ``statistics.sys``) must never be reachable.
@@ -59,6 +68,15 @@ MODULE_ATTRS = frozenset({
 })
 
 FORBIDDEN_ATTRS = INTROSPECTION_ATTRS | SYSTEM_ATTRS | MODULE_ATTRS
+
+# Array constructors that can alias a raw memory buffer. With an object (or structured-object) dtype they treat the
+# bytes of that buffer as Python-object pointers and dereference them, which crashes the worker (and could be a
+# fake-object primitive). ``np.frombuffer`` (the normal buffer view) is already blocked via SYSTEM_ATTRS, so a buffer
+# argument to these is rejected too. The buffer is the 3rd positional argument (ndarray: shape, dtype, buffer;
+# recarray: shape, dtype, buf) or the ``buffer`` / ``buf`` keyword. A plain ``np.ndarray((3,))`` (no buffer) and
+# ``isinstance(x, np.ndarray)`` (the type is an argument, not the callee) stay allowed.
+BUFFER_ARRAY_CTORS = frozenset({"ndarray", "recarray"})
+BUFFER_KWARGS = frozenset({"buffer", "buf"})
 
 # input.*() signatures (positional order) shared by the static extractor and the runtime.
 INPUT_SIGNATURES: dict[str, tuple[str, ...]] = {
@@ -73,16 +91,25 @@ SOURCE_NAMES = ("close", "open", "high", "low", "hl2", "hlc3", "ohlc4", "volume"
 INPUT_KEY_KW = "_nexus_key"  # hidden keyword injected by the worker so overrides are matched by name
 
 DEFAULT_TITLE = "Script sin título"
+ERROR_MESSAGE_MAX = 4000  # a script must not be able to push a huge message through the API / events
 
 _compile_lock = threading.Lock()
 
 
+def clip_text(text: str, limit: int) -> str:
+    """``text`` cut to ``limit`` characters (with a Spanish note saying how much was left out)."""
+    if len(text) <= limit:
+        return text
+    more = f"{len(text) - limit:,}".replace(",", " ")
+    return f"{text[:limit]}… (mensaje truncado, {more} caracteres más)"
+
+
 def make_error(kind: str, message: str, line: int | None = None, col: int | None = None) -> dict:
-    """ScriptError dict (line and col are 1-based; None when unknown)."""
+    """ScriptError dict (line and col are 1-based; None when unknown; long messages are truncated)."""
     return {
         "line": int(line) if isinstance(line, int) and line > 0 else None,
         "col": int(col) if isinstance(col, int) and col > 0 else None,
-        "message": str(message),
+        "message": clip_text(str(message), ERROR_MESSAGE_MAX),
         "kind": kind,
     }
 
@@ -136,6 +163,15 @@ class _SecurityVisitor(ast.NodeVisitor):
             self._add(
                 node,
                 f"{func.id}() no está permitido: PyChart no puede abrir archivos ('{func.id}' es la serie de precios).",
+            )
+        ctor = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else None)
+        if ctor in BUFFER_ARRAY_CTORS and (
+            len(node.args) >= 3 or any(kw.arg in BUFFER_KWARGS for kw in node.keywords)
+        ):
+            self._add(
+                node,
+                f"No se permite crear un arreglo '{ctor}' a partir de un búfer de memoria: PyChart no puede "
+                "interpretar memoria arbitraria como arreglo.",
             )
         self.generic_visit(node)
 

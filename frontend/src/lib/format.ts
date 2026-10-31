@@ -154,11 +154,13 @@ export function fmtBytes(n: number | null | undefined): string {
 
 // ----------------------------------------------------------------------------- time
 
-/** Bar time (unix seconds) -> "30/10 14:00" (or date only for daily+ timeframes). */
-export function fmtBarTime(sec: number | null | undefined, tf?: string): string {
+/** Bar time (unix seconds) -> "30/10 14:00" in local time, or the date only for 1d / 1w bars. Those open at 00:00 UTC
+ *  (weeks on Monday), so their date is the UTC session date: in UTC-negative zones the local date would be the day
+ *  before (same rule as the charts, see lib/chart.ts `ts`). */
+export function fmtBarTime(sec: number | null | undefined, tf?: string | null): string {
   if (!isNum(sec)) return '—'
   const d = new Date(sec * 1000)
-  if (tf === '1d' || tf === '1w') return d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit' })
+  if (tf === '1d' || tf === '1w') return d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit', timeZone: 'UTC' })
   return d.toLocaleString('es-ES', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 

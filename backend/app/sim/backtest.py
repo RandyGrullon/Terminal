@@ -8,6 +8,10 @@ disabled so the user sees exactly what the "¿Tomo esta operación?" filter adds
 
 `simulate_account` / `compute_metrics` are pure and testable with hand-made trades; `run_backtest` needs the
 engine (imported lazily). CPU work: call `run_backtest` from `asyncio.to_thread` in async code.
+
+Commission: an explicit `fee_pct` wins; otherwise it is resolved from the symbol's asset class
+(`app.engine.costs.fee_pct_for`: `risk.fee_pct_by_class`, falling back to `risk.fee_pct`), and the engine's gate uses
+that same cost.
 """
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from app.data.base import CandleSet
+from app.engine.costs import asset_class, fee_pct_for
 from app.sim import metrics as M
 from app.sim.common import (
     DISCLAIMER,
@@ -24,6 +29,7 @@ from app.sim.common import (
     build_nexus_params,
     current_settings,
     finite,
+    fmt_num,
     json_dumps,
     load_engine,
     params_to_dict,
@@ -33,6 +39,11 @@ from app.util import clean_json, now_ms, tf_seconds
 
 PARTIAL_FRACTION = 1.0 / 3.0
 MIN_BARS_DEFAULT = 150
+CLASS_LABEL = {
+    "crypto": "las criptomonedas", "stock": "las acciones", "fund": "los fondos y ETF", "forex": "las divisas",
+    "commodity": "las materias primas", "index": "los índices", "futures": "los futuros", "cfd": "los CFD",
+    "bond": "los bonos", "other": "otros activos",
+}
 
 
 class BacktestError(ValueError):
@@ -311,6 +322,7 @@ def compute_metrics(cs: CandleSet, sim: dict[str, Any], initial_capital: float) 
         "fees_paid": float(sim["costs"]),
         "rejected_signals": 0,
         "rejected_would_win_rate": None,
+        "rejected_resolved": 0,  # rejected signals whose outcome is known (denominator of the rate)
         "gate_lift_pct": None,
     }
 
@@ -362,7 +374,17 @@ def _variant(
     rejected = finite(_stats_value(stats, "rejected_signals"))
     metrics["rejected_signals"] = int(rejected) if rejected is not None else 0
     metrics["rejected_would_win_rate"] = finite(_stats_value(stats, "rejected_would_win_rate"))
+    resolved = finite(_stats_value(stats, "rejected_resolved"))  # denominator of the rate (unknown on older engines)
+    if resolved is not None:
+        metrics["rejected_resolved"] = int(resolved)
+    elif metrics["rejected_would_win_rate"] is not None:
+        metrics.pop("rejected_resolved", None)
     return {"sim": sim, "metrics": metrics}
+
+
+def resolve_fee_pct(symbol: str, settings: dict, fee_pct: float | None) -> float:
+    """Commission % per side: the explicit value, else the one of the symbol's asset class."""
+    return float(fee_pct) if fee_pct is not None else float(fee_pct_for(symbol, settings))
 
 
 def run_backtest(
@@ -371,7 +393,7 @@ def run_backtest(
     *,
     initial_capital: float = 10000.0,
     risk_pct: float = 1.0,
-    fee_pct: float = 0.1,
+    fee_pct: float | None = None,
     slippage_pct: float = 0.02,
     use_gate: bool = True,
     compare_ungated: bool = True,
@@ -379,15 +401,19 @@ def run_backtest(
     settings: dict | None = None,
     include_candles: bool = True,
 ) -> dict[str, Any]:
-    """Full NEXUS backtest -> BacktestResult dict (JSON-safe). Raises BacktestError / EngineUnavailable."""
+    """Full NEXUS backtest -> BacktestResult dict (JSON-safe). Raises BacktestError / EngineUnavailable.
+
+    fee_pct None = the commission of the symbol's asset class (settings `risk.fee_pct_by_class` / `risk.fee_pct`)."""
     if initial_capital <= 0:
         raise BacktestError("El capital inicial debe ser mayor que 0")
     if not 0 < risk_pct <= 100:
         raise BacktestError("El riesgo por operación debe estar entre 0 y 100 %")
-    if fee_pct < 0 or slippage_pct < 0:
+    if (fee_pct is not None and fee_pct < 0) or slippage_pct < 0:
         raise BacktestError("Comisión y deslizamiento no pueden ser negativos")
     settings = dict(settings if settings is not None else current_settings())
-    settings["risk.fee_pct"] = float(fee_pct)  # the gate's expected value uses the same costs as the account
+    explicit_fee = fee_pct is not None
+    fee_pct = resolve_fee_pct(cs.symbol, settings, fee_pct)
+    settings["risk.fee_pct"] = fee_pct  # the gate's expected value uses the same costs as the account
     min_bars = int(settings.get("nexus.min_bars", MIN_BARS_DEFAULT) or MIN_BARS_DEFAULT)
     if len(cs) < min_bars + 20:
         raise BacktestError(
@@ -414,8 +440,13 @@ def run_backtest(
         ungated_metrics = ungated["metrics"]
         ungated_metrics["rejected_signals"] = 0
         ungated_metrics["rejected_would_win_rate"] = None
+        ungated_metrics["rejected_resolved"] = 0
         metrics["gate_lift_pct"] = metrics["total_return_pct"] - ungated_metrics["total_return_pct"]
 
+    fee_txt = fmt_num(fee_pct, 4).rstrip("0").rstrip(",")
+    cls = asset_class(cs.symbol)
+    fee_note = (f"Comisión {fee_txt} % por lado (indicada en la petición)." if explicit_fee else
+                f"Comisión {fee_txt} % por lado: la de {CLASS_LABEL.get(cls, cls)} en Ajustes.")
     result = {
         "symbol": cs.symbol,
         "tf": cs.tf,
@@ -437,6 +468,7 @@ def run_backtest(
                 "Tamaño por riesgo: % del capital al entrar / distancia al stop (apalancamiento máx. "
                 f"{max_leverage:g}×).",
                 "Los % por operación (avg_win_pct, expectancy_pct…) son sobre el capital, netos de costes.",
+                fee_note,
                 "fees_paid incluye comisiones y deslizamiento.",
                 "El filtro parte de sus pesos iniciales (no usa lo aprendido en vivo), así el resultado es fuera de "
                 "muestra.",
@@ -460,14 +492,17 @@ def equity_curve_pct(
     *,
     settings: dict | None = None,
     risk_pct: float = 1.0,
-    fee_pct: float = 0.1,
+    fee_pct: float | None = None,
     slippage_pct: float = 0.02,
 ) -> tuple[np.ndarray, list[float], dict]:
     """Gated NEXUS run -> (equity in % of initial per bar, per-trade account returns as fractions, stats).
 
-    Used by Monte Carlo (synthetic markets); no ungated comparison, no JSON conversion.
+    Used by Monte Carlo (bootstrap of a real symbol, synthetic markets); no ungated comparison, no JSON conversion.
+    fee_pct None = the commission of the symbol's asset class, used by the engine's gate as well.
     """
-    settings = settings if settings is not None else current_settings()
+    settings = dict(settings if settings is not None else current_settings())
+    fee_pct = resolve_fee_pct(cs.symbol, settings, fee_pct)
+    settings["risk.fee_pct"] = fee_pct
     _, nexus_params_cls = load_engine()
     p, _ = build_nexus_params(nexus_params_cls, settings, params)
     response, _ = run_engine(cs, p)

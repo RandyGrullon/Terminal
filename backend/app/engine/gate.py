@@ -167,11 +167,7 @@ def _param(params: Any, name: str, default: Any) -> Any:
     return default if v is None else v
 
 
-def _lower_first(text: str) -> str:
-    """Lower-case the first letter unless the first word is an acronym (ATR, EV, RSI, P(...), R:R...)."""
-    if not text or len(text) < 2 or not text[1].islower():
-        return text
-    return text[:1].lower() + text[1:]
+_lower_first = fmt.lower_first
 
 
 def _validate_user_levels(side: int, entry: float, sl: float | None, tp: float | None) -> None:

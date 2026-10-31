@@ -4,6 +4,11 @@ One pass over the bars after the vectorized precomputation. At bar i the engine 
 i − horizon (revealed by close[i]), (2) predicts bar i, (3) trains the gate learner with candidates whose outcome is
 already known, (4) executes fills decided at the previous close (at open[i]), (5) handles intrabar SL/TP (SL first)
 and (6) takes the decisions of the close of bar i.
+
+Snapshots (`NexusResult.snapshots`) hold the state AFTER processing their bar: {"time", "state", "kind"}. kind
+"grid" = the first processed bar of each absolute time bucket of SNAPSHOT_EVERY bars (the same bars whatever the
+window start, so runs over different windows snapshot the same times); "last" = the last bar when it is not one.
+A run that continues from a snapshot must process first the bar right after it (see NexusService).
 """
 from __future__ import annotations
 
@@ -24,7 +29,7 @@ from app.engine.nexus_decide import DecisionsMixin
 from app.engine.positions import Position
 from app.engine.regime import REGIMES, detect_regime, regime_name
 
-SNAPSHOT_EVERY = 100
+SNAPSHOT_EVERY = 100  # bars per snapshot bucket (absolute time grid: SNAPSHOT_EVERY · tf seconds)
 EDGE_WINDOW = 40
 EDGE_KEEP = 200
 EDGE_IN_STATE = 60
@@ -45,6 +50,23 @@ def parse_prior(prior: Any) -> dict:
     return {}
 
 
+def parse_vetoes(raw: Any) -> dict[tuple[int, int], dict]:
+    """vetoed_entries (list of {time, direction, level, detail}) -> {(bar time, side): {level, detail}}."""
+    out: dict[tuple[int, int], dict] = {}
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        side = {"long": 1, "short": -1}.get(str(item.get("direction") or "").lower())
+        try:
+            t = int(item.get("time"))
+        except (TypeError, ValueError):
+            continue
+        if side is not None:
+            out[(t, side)] = {"level": "red" if item.get("level") == "red" else "amber",
+                              "detail": str(item.get("detail") or "")}
+    return out
+
+
 def _edge_list(raw: Any) -> list[list[int]]:
     out: list[list[int]] = []
     for item in raw or []:
@@ -59,9 +81,10 @@ def _edge_list(raw: Any) -> list[list[int]]:
 
 
 class NexusRun(DecisionsMixin):
-    def __init__(self, cs: Any, params: NexusParams, prior: Any, gate_state: Any):
+    def __init__(self, cs: Any, params: NexusParams, prior: Any, gate_state: Any, vetoed: Any = None):
         self.cs = cs
         self.p = params
+        self.vetoes = parse_vetoes(vetoed)  # entries the semáforo vetoed live: rejected instead of opened
         self.f = f = compute_features(cs)
         self.n = n = f.n
         self.h = int(params.horizon)
@@ -85,6 +108,8 @@ class NexusRun(DecisionsMixin):
         self.prob = np.full(n, np.nan)
         self.raw_prob = np.full(n, np.nan)
         self.conf = np.full(n, np.nan)
+        # strategy return of each bar after the warm-up (fraction of a 1x position, commissions included; 0 when
+        # flat); NaN only during the warm-up
         self.bar_ret = np.full(n, np.nan)
         self.action: list[str] = ["WAIT"] * n
         self.lv_entry: list[float | None] = [None] * n
@@ -172,7 +197,12 @@ class NexusRun(DecisionsMixin):
         return ctx
 
     def outcome(self, i: int, side: int, sl: float, tp1: float) -> tuple[int, bool] | None:
-        """Hypothetical result of a candidate decided at the close of bar i: (bar where it is known, TP1 first?)."""
+        """Hypothetical result of a candidate decided at the close of bar i: (bar where it is known, won).
+
+        One definition shared with the global gate learner (app.sim.evaluator trains it with outcome == 'TP1'):
+        won = TP1 reached before the SL within `time_stop_bars` bars (SL first when both are touched in one bar).
+        A candidate that reaches neither by then is a loss (the trade would have been closed by the time stop),
+        whatever its close; None while the horizon is not covered yet."""
         f = self.f
         horizon = int(self.p.time_stop_bars)
         end = min(i + horizon, self.n - 1)
@@ -188,7 +218,7 @@ class NexusRun(DecisionsMixin):
         k_tp = int(np.argmax(tp_hit)) if tp_hit.any() else None
         if k_sl is None and k_tp is None:
             if end == i + horizon:
-                return end, bool(side * (f.close[end] - f.close[i]) > 0)
+                return end, False
             return None
         if k_tp is None or (k_sl is not None and k_sl <= k_tp):
             return i + 1 + int(k_sl), False
@@ -206,8 +236,10 @@ class NexusRun(DecisionsMixin):
                                       "(diferenciales o datos erróneos).")
         start = self.f.warmup
         times = self.f.time
+        bucket_s = SNAPSHOT_EVERY * max(int(self.f.tf_s), 1)
         for i in range(start, self.n):
             self.bar_info = {}
+            self.bar_ret[i] = 0.0
             if self.prev_trained is None or times[i] > self.prev_trained:
                 self.learner.memory_bars += 1
             self._learn(i)
@@ -219,8 +251,10 @@ class NexusRun(DecisionsMixin):
             self._intrabar(i)
             self._close_decisions(i)
             self._record(i)
-            if (i - start + 1) % SNAPSHOT_EVERY == 0 or i == self.n - 1:
-                self.snapshots.append({"time": int(times[i]), "state": self.state_dict()})
+            grid = int(times[i]) // bucket_s != int(times[i - 1]) // bucket_s  # i >= warm-up >= 1
+            if grid or i == self.n - 1:
+                self.snapshots.append({"time": int(times[i]), "state": self.state_dict(),
+                                       "kind": "grid" if grid else "last"})
         return finish_run(self)
 
     def _learn(self, i: int) -> None:
@@ -258,11 +292,17 @@ class NexusRun(DecisionsMixin):
             if len(hist) > EDGE_KEEP:
                 del hist[: len(hist) - EDGE_KEEP]
 
+    def _book_fee(self, i: int, notional: float) -> None:
+        """Charge the commission of a fill (`notional` as a fraction of the entry notional) to bar i's return."""
+        prev = self.bar_ret[i]
+        self.bar_ret[i] = (prev if prev == prev else 0.0) - self.p.fee_pct / 100.0 * notional
+
     def _open(self, side: int, lv: Levels, gate: dict | None, i: int, price: float, decision_idx: int) -> None:
         self.trade_seq += 1
         score = gate.get("score") if gate else None
         self.pos = Position(self.trade_seq, lv, i, int(self.f.time[i]), price, score,
                             int(self.regime[decision_idx]), decision_idx)
+        self._book_fee(i, 1.0)
 
     def _fills_at_open(self, i: int) -> None:
         o = float(self.f.open[i])
@@ -270,7 +310,9 @@ class NexusRun(DecisionsMixin):
             reason, label = self.pending_exit
             self.pending_exit = None
             prev_close = float(self.f.close[i - 1])
-            self.bar_ret[i] = self.pos.size_left * self.pos.side * (o / prev_close - 1.0)
+            left = self.pos.size_left
+            self._book_fee(i, left * o / self.pos.entry_price)
+            self.bar_ret[i] += left * self.pos.side * (o / prev_close - 1.0)
             self.pos.close_at(o)
             self._finalize(i, o, reason, label)
             self.bar_info["exit"]["at_open"] = True  # decided at the previous close
@@ -329,5 +371,6 @@ class NexusRun(DecisionsMixin):
         fills = pos.fills[nf:]
         ret = sum(fr * pos.side * (x / ref - 1.0) for fr, x in fills)
         ret += pos.size_left * pos.side * (float(f.close[i]) / ref - 1.0)
+        ret -= self.p.fee_pct / 100.0 * sum(fr * x / pos.entry_price for fr, x in fills)  # exit commissions
         prev = self.bar_ret[i]
         self.bar_ret[i] = ret + (prev if prev == prev else 0.0)

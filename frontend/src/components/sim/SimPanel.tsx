@@ -1,8 +1,9 @@
-// Side panel of the live simulator: NEXUS action + advice, Trade Gate verdicts ("¿Tomo la operación?"),
-// probabilities, regime, warnings, NEXUS' open position levels and the simulation paper account.
+// Side panel of the live simulator: NEXUS action + advice, Trade Gate verdicts ("¿Tomo la operación?"; a TOMAR
+// without the matching NEXUS signal is only "Filtro favorable"), probabilities, regime, warnings, NEXUS' open
+// position levels (close only on a real EXIT, a negative EV is a warning) and the simulation paper account.
 import { memo, type ReactNode } from 'react'
-import { CircleCheck, CircleX, Crosshair, Gauge, Info, ShieldCheck, TriangleAlert, Wallet } from 'lucide-react'
-import type { Direction, GateCheck, GateResult, NexusCurrent, NexusWarning, PositionState, SimState } from '../../api/types'
+import { CircleCheck, CircleX, Crosshair, Gauge, Info, OctagonX, ShieldCheck, TriangleAlert, Wallet } from 'lucide-react'
+import type { Direction, GateCheck, GateResult, NexusAction, NexusCurrent, NexusWarning, PositionState, SimState } from '../../api/types'
 import {
   DIRECTION_LABEL,
   fmtBarTime,
@@ -18,10 +19,16 @@ import {
   verdictTone,
   type Tone,
 } from '../../lib/format'
-import { ActionBadge, Badge, Meter, VerdictBadge } from '../ui'
-import { fmtRate, simRegimeLabel, warningTone } from './labels'
+import { ActionBadge, Badge, Meter } from '../ui'
+import { GateVerdictBadge, gateSignal, gateSummary, noSignalNote } from '../nexus/GateChecklist'
+import { EARLY_EXIT_EV, exitAdvice, fmtRate, shownWarnings, simRegimeLabel, warningTone } from './labels'
 
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+
+// A negative EV of holding is a caution; NEXUS' own early exit comes as a CERRAR signal (EXIT_*).
+const EV_HOLD_TITLE =
+  'Valor esperado de seguir dentro, en R. Negativo = aviso para vigilar la salida, no una orden: la salida anticipada llega ' +
+  `como señal CERRAR (por ejemplo, con ${fmtR(EARLY_EXIT_EV)} o menos y la puntuación en contra)`
 
 function focusDirection(c: NexusCurrent): Direction {
   switch (c.action) {
@@ -39,15 +46,18 @@ function focusDirection(c: NexusCurrent): Direction {
   }
 }
 
-/** One-line answer to "should I trade now?" built from both gate verdicts. */
-function gateHeadline(gate: NexusCurrent['gate'] | null | undefined): { text: string; tone: Tone } | null {
+/** One-line answer to "should I trade now?" built from both gate verdicts and NEXUS' action: a TOMAR is an
+ *  opportunity only with the matching NEXUS entry signal (BUY for a long, SELL for a short). */
+function gateHeadline(gate: NexusCurrent['gate'] | null | undefined, action: NexusAction | null): { text: string; tone: Tone } | null {
   if (!gate || !gate.long || !gate.short) return null
   const { long, short } = gate
-  if (long.verdict === 'TAKE' && short.verdict !== 'TAKE') return { text: `TOMAR en largo · filtro ${Math.round(long.score)}/100`, tone: 'pos' }
-  if (short.verdict === 'TAKE' && long.verdict !== 'TAKE') return { text: `TOMAR en corto · filtro ${Math.round(short.score)}/100`, tone: 'pos' }
-  if (long.verdict === 'TAKE' && short.verdict === 'TAKE') {
-    const best = long.score >= short.score ? 'largo' : 'corto'
-    return { text: `Ambas direcciones pasan el filtro; la mejor es ${best}`, tone: 'pos' }
+  const longSig = gateSignal(long, action)
+  const shortSig = gateSignal(short, action)
+  if (longSig === 'take') return { text: `TOMAR en largo: NEXUS compra · filtro ${Math.round(long.score)}/100`, tone: 'pos' }
+  if (shortSig === 'take') return { text: `TOMAR en corto: NEXUS vende · filtro ${Math.round(short.score)}/100`, tone: 'pos' }
+  if (longSig === 'favorable' || shortSig === 'favorable') {
+    const dir = longSig === 'favorable' && (shortSig !== 'favorable' || long.score >= short.score) ? 'largo' : 'corto'
+    return { text: `Filtro favorable en ${dir} · sin señal NEXUS: no es una oportunidad TOMAR`, tone: 'info' }
   }
   if (long.verdict === 'WAIT' || short.verdict === 'WAIT') {
     const dir = long.verdict === 'WAIT' && (short.verdict !== 'WAIT' || long.score >= short.score) ? 'largo' : 'corto'
@@ -72,16 +82,18 @@ function CheckDots(props: { checks: GateCheck[] | null | undefined }) {
   )
 }
 
-function GateRow(props: { dir: Direction; gate: GateResult | null | undefined; focus: boolean }) {
+function GateRow(props: { dir: Direction; gate: GateResult | null | undefined; focus: boolean; action: NexusAction; actionLabel: string }) {
   const g = props.gate
   if (!g) return null
   const against = Array.isArray(g.reasons_against) ? g.reasons_against : []
   const pro = Array.isArray(g.reasons_for) ? g.reasons_for : []
+  const favorable = gateSignal(g, props.action) === 'favorable'
+  const summary = gateSummary(g, props.action)
   return (
-    <div className={`sim-gate ${props.focus ? 'focus' : ''} ${verdictTone(g.verdict)}`}>
+    <div className={`sim-gate ${props.focus ? 'focus' : ''} ${favorable ? 'info' : verdictTone(g.verdict)}`}>
       <div className="row between">
         <span className="sim-gate-dir">{props.dir === 'long' ? 'Largo ▲' : 'Corto ▼'}</span>
-        <VerdictBadge verdict={g.verdict} score={g.score} label={g.verdict_label || undefined} />
+        <GateVerdictBadge gate={g} action={props.action} />
       </div>
       <div className="sim-gate-nums">
         <span title="Probabilidad aprendida de alcanzar TP1 antes que el SL">
@@ -95,7 +107,8 @@ function GateRow(props: { dir: Direction; gate: GateResult | null | undefined; f
         </span>
       </div>
       <CheckDots checks={g.checks} />
-      {g.summary && <div className="sim-gate-summary">{g.summary}</div>}
+      {summary && <div className="sim-gate-summary">{summary}</div>}
+      {favorable && <div className="sim-gate-summary info">{noSignalNote(g.direction, props.actionLabel)}</div>}
       {(against.length > 0 || pro.length > 0) && (
         <details className="sim-details">
           <summary>
@@ -150,9 +163,11 @@ function WarningList(props: { warnings: NexusWarning[] }) {
   )
 }
 
-function PositionBlock(props: { pos: PositionState }) {
+function PositionBlock(props: { pos: PositionState; action: NexusAction }) {
   const p = props.pos
   const hit = (n: number) => (p.tp_hits >= n ? ' ✓' : '')
+  // Close only on NEXUS' own exit (EXIT_*); a negative EV while it keeps the position is a warning.
+  const advice = exitAdvice(props.action, p.ev_hold_r)
   return (
     <>
       <div className="row between">
@@ -178,17 +193,30 @@ function PositionBlock(props: { pos: PositionState }) {
             <span className="mono warn">{fmtPrice(p.trail)}</span>
           </>
         )}
-        <span>Barras en la operación</span>
+        <span>Velas en la operación</span>
         <span className="mono">{fmtInt(p.bars_in_trade)}</span>
         <span>Tamaño abierto</span>
         <span className="mono">{fmtProb(p.size_left)}</span>
-        <span title="Valor esperado de seguir dentro, en R. Negativo = mejor cerrar antes del SL">EV de mantener</span>
+        <span title={EV_HOLD_TITLE}>EV de mantener</span>
         <span className={`mono ${signTone(p.ev_hold_r)}`}>{fmtR(p.ev_hold_r)}</span>
       </div>
-      {isNum(p.ev_hold_r) && p.ev_hold_r < 0 && (
-        <div className="sim-alert neg">
+      {advice === 'exit' && (
+        <div className="sim-alert neg" role="alert">
+          <OctagonX size={13} />
+          <span>
+            <b>CERRAR AHORA</b>: NEXUS da la señal de salida en esta vela
+            {isNum(p.ev_hold_r) ? ` (EV de mantener ${fmtR(p.ev_hold_r)})` : ''}.
+          </span>
+        </div>
+      )}
+      {advice === 'watch' && (
+        <div className="sim-alert warn">
           <TriangleAlert size={13} />
-          <span>El valor esperado de mantener es negativo: NEXUS sugiere cerrar antes de que toque el SL.</span>
+          <span>
+            <b>Vigila la salida</b> · EV de mantener {fmtR(p.ev_hold_r)}. NEXUS mantiene la posición: un EV negativo es un aviso, no
+            una orden de cerrar; si decide salir antes del SL, lo indicará con CERRAR {p.side === 'long' ? 'LARGO' : 'CORTO'} (por
+            ejemplo, con EV de {fmtR(EARLY_EXIT_EV)} o menos y la puntuación en contra).
+          </span>
         </div>
       )}
     </>
@@ -237,8 +265,11 @@ export const SimPanel = memo(function SimPanel(props: { current: NexusCurrent | 
   const c = props.current
   const gate = c?.gate ?? null
   const focus = c ? focusDirection(c) : null
-  const headline = gateHeadline(gate)
-  const warnings = Array.isArray(c?.warnings) ? c.warnings : []
+  const headline = gateHeadline(gate, c?.action ?? null)
+  const actionLabel = c ? c.action_label || c.action : ''
+  // The position block already shows a negative EV of holding while NEXUS keeps the position ("Vigila la salida").
+  const watchShown = !!c?.position && exitAdvice(c.action, c.position.ev_hold_r) === 'watch'
+  const warnings = c && Array.isArray(c.warnings) ? shownWarnings(c.warnings, c.action, watchShown) : []
   const reasons = Array.isArray(c?.reasons) ? c.reasons.slice(0, 3) : []
   const probTone: Tone = !c ? 'muted' : c.prob_up >= 0.55 ? 'pos' : c.prob_up <= 0.45 ? 'neg' : 'warn'
 
@@ -278,10 +309,10 @@ export const SimPanel = memo(function SimPanel(props: { current: NexusCurrent | 
           <ShieldCheck size={12} /> ¿Tomo la operación?
         </div>
         {headline && <div className={`sim-headline ${headline.tone}`}>{headline.text}</div>}
-        {gate ? (
+        {gate && c ? (
           <>
-            <GateRow dir="long" gate={gate.long} focus={focus === 'long'} />
-            <GateRow dir="short" gate={gate.short} focus={focus === 'short'} />
+            <GateRow dir="long" gate={gate.long} focus={focus === 'long'} action={c.action} actionLabel={actionLabel} />
+            <GateRow dir="short" gate={gate.short} focus={focus === 'short'} action={c.action} actionLabel={actionLabel} />
           </>
         ) : (
           <div className="small muted">El filtro evalúa cada posible entrada en largo y en corto con cada vela nueva.</div>
@@ -326,9 +357,9 @@ export const SimPanel = memo(function SimPanel(props: { current: NexusCurrent | 
         <section className="sim-sec">
           <div className="sim-sec-title">Posición NEXUS</div>
           {c.position ? (
-            <PositionBlock pos={c.position} />
+            <PositionBlock pos={c.position} action={c.action} />
           ) : (
-            <div className="small muted">Sin posición abierta. NEXUS solo entra cuando el filtro dice TOMAR.</div>
+            <div className="small muted">Sin posición abierta. NEXUS solo entra con su señal de compra o venta y el filtro en TOMAR.</div>
           )}
         </section>
       )}

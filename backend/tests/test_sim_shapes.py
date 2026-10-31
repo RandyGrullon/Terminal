@@ -23,11 +23,13 @@ PREDICTION_ROW = {"id", "source", "symbol", "tf", "created_at", "target_at", "pr
 PREDICTION_STATS = {"total", "resolved", "pending", "hit_rate", "brier", "by_source", "rolling"}
 LEARNING = {"scanner_model", "nexus_models", "gate", "predictions", "timeline"}
 SCANNER_MODEL = {"key", "updates", "hit_rate", "brier", "features", "calibration"}
-GATE_SUMMARY = {"decisions", "taken", "avoided", "avoided_would_lose_rate", "taken_win_rate"}
+GATE_SUMMARY = {"decisions", "taken", "avoided", "avoided_would_lose_rate", "taken_win_rate", "avoided_judged",
+                "taken_judged"}
 METRICS = {"initial_capital", "final_equity", "total_return_pct", "cagr_pct", "buy_hold_return_pct", "trades",
            "win_rate", "profit_factor", "avg_win_pct", "avg_loss_pct", "expectancy_pct", "avg_r", "max_dd_pct",
            "sharpe", "sortino", "calmar", "exposure_pct", "avg_bars_in_trade", "best_trade_pct", "worst_trade_pct",
-           "max_consecutive_losses", "fees_paid", "rejected_signals", "rejected_would_win_rate", "gate_lift_pct"}
+           "max_consecutive_losses", "fees_paid", "rejected_signals", "rejected_would_win_rate", "rejected_resolved",
+           "gate_lift_pct"}
 MONTE_CARLO = {"mode", "paths", "steps", "percentiles", "final_returns_pct", "max_drawdowns_pct", "prob_profit",
                "prob_ruin", "median_return_pct", "expected_return_pct", "var95_pct", "cvar95_pct", "sample_paths",
                "notes"}

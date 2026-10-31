@@ -42,6 +42,8 @@ export interface ActiveRun {
   progress: number // 0..1
   message: string | null
   status: 'running' | 'done' | 'error'
+  /** Launched from this page ("Escanear"); false for automatic background scans that are only followed. */
+  startedByUser: boolean
 }
 
 interface Props {

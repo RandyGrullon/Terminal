@@ -2,6 +2,7 @@
 import { memo } from 'react'
 import type { PaperAccount } from '../../api/types'
 import { fmtInt, fmtPct, signTone } from '../../lib/format'
+import { plural } from '../../lib/plural'
 import { Stat } from '../ui'
 import { fmtMoney, fmtRate, rateTone } from '../markets/opsUtils'
 
@@ -23,9 +24,9 @@ function PaperStats({ account }: { account: PaperAccount }) {
         label="P&L abierto"
         value={fmtMoney(a.unrealized_pnl, true)}
         tone={signTone(a.unrealized_pnl)}
-        hint={`${fmtInt(a.open_positions)} ${a.open_positions === 1 ? 'posición abierta' : 'posiciones abiertas'}`}
+        hint={plural(a.open_positions, 'posición abierta', 'posiciones abiertas')}
       />
-      <Stat label="Operaciones" value={fmtInt(a.trades)} hint={`${fmtInt(a.wins)} ganadas · ${fmtInt(a.losses)} perdidas`} />
+      <Stat label="Operaciones" value={fmtInt(a.trades)} hint={`${plural(a.wins, 'ganada', 'ganadas')} · ${plural(a.losses, 'perdida', 'perdidas')}`} />
       <Stat
         label="% acierto"
         value={fmtRate(a.win_rate)}

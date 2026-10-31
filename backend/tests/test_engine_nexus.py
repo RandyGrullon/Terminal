@@ -119,7 +119,8 @@ def test_response_shape_and_json_safety(cs, full):
     assert set(learning["weights"]) == {"trend_up", "trend_down", "range", "volatile"}
     stats = resp["stats"]
     assert set(stats) == {"trades", "win_rate", "profit_factor", "total_return_pct", "max_dd_pct", "sharpe", "avg_r",
-                          "expectancy_pct", "rejected_signals", "rejected_would_win_rate"}
+                          "expectancy_pct", "rejected_signals", "rejected_resolved", "rejected_would_win_rate"}
+    assert 0 <= stats["rejected_resolved"] <= stats["rejected_signals"]
 
 
 def test_markers_match_trades(full):

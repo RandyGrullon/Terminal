@@ -146,6 +146,12 @@
   background: var(--warn-bg);
   border-color: rgba(245, 165, 36, 0.45);
 }
+/* gate TOMAR without the matching NEXUS entry signal: "Filtro favorable · sin señal NEXUS" */
+.chart-gate-chip.info {
+  color: var(--info);
+  background: var(--info-bg);
+  border-color: rgba(62, 166, 255, 0.45);
+}
 .chart-gate-chip.muted {
   color: var(--muted);
 }
@@ -385,6 +391,10 @@
 }
 .chart-ind-cat {
   margin: 6px 0 2px;
+}
+.chart-ind-list-error {
+  flex: none;
+  align-items: center;
 }
 .chart-ind-row {
   display: flex;

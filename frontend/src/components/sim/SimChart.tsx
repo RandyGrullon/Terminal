@@ -41,7 +41,7 @@ export const SimChart = memo(function SimChart(props: Props) {
         }
         return
       }
-      const t = fromTs(param.time)
+      const t = fromTs(param.time, feed.model.tf)
       const markers = feed.model.markersAt(t)
       hoverTime.current = t
       setHoverBar(feed.model.candleAt(t))

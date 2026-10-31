@@ -6,6 +6,7 @@ import { api, errorMessage } from '../api/client'
 import type { LearningSummary, Timeframe } from '../api/types'
 import { socket } from '../api/ws'
 import { fmtClock, fmtInt } from '../lib/format'
+import { plural } from '../lib/plural'
 import { useApp } from '../store'
 import { Button, Card, Disclaimer, ErrorBox, Loading, Modal, Stat } from '../components/ui'
 import CalibrationChart from '../components/brain/CalibrationChart'
@@ -16,7 +17,8 @@ import NexusModelsTable from '../components/brain/NexusModelsTable'
 import PredictionsTable from '../components/brain/PredictionsTable'
 import TimelineChart from '../components/brain/TimelineChart'
 import WeightBars from '../components/brain/WeightBars'
-import { brierTone, fmtBrier, fmtRate, prettyKey, rateTone } from '../components/brain/learnFormat'
+import { MIN_EVIDENCE_N, evidenceTone, filterEvidence, fmtOf } from '../components/brain/evidence'
+import { brierTone, fmtBrier, fmtRate, prettyKey, prob01, rateTone } from '../components/brain/learnFormat'
 import '../components/brain/brain.css'
 
 const REFRESH_MS = 30000
@@ -39,6 +41,9 @@ function normalize(d: LearningSummary | null | undefined): LearningSummary {
       avoided: d?.gate?.avoided ?? 0,
       avoided_would_lose_rate: d?.gate?.avoided_would_lose_rate ?? null,
       taken_win_rate: d?.gate?.taken_win_rate ?? null,
+      // Denominators of the two rates (verified decisions); absent on older servers.
+      avoided_judged: d?.gate?.avoided_judged,
+      taken_judged: d?.gate?.taken_judged,
     },
     predictions: {
       total: p?.total ?? 0,
@@ -172,6 +177,26 @@ export default function BrainPage() {
   const p = data.predictions
   const g = data.gate
   const sm = data.scanner_model
+  // The filter's track record is only colored when it says something beyond noise (see brain/evidence.ts).
+  const avoidedLose = prob01(g.avoided_would_lose_rate)
+  const gateEvidence = filterEvidence({
+    total: g.avoided,
+    resolved: g.avoided_judged,
+    winRate: avoidedLose === null ? null : 1 - avoidedLose,
+    takenN: g.taken_judged,
+    takenWinRate: prob01(g.taken_win_rate),
+  })
+  // "x de n verificadas" (outcome known), flagged as a small sample below MIN_EVIDENCE_N.
+  const ofKnown = (t: typeof gateEvidence.taken, losses: boolean): string | null => {
+    const s = fmtOf(t, losses, ['verificada', 'verificadas'])
+    return s && t && t.n < MIN_EVIDENCE_N ? `${s} · muestra pequeña` : s
+  }
+  const takenOf = ofKnown(gateEvidence.taken, false)
+  const avoidedOf = ofKnown(gateEvidence.rejected, true)
+  const avoidedTitle =
+    'No habrían llegado a TP1 antes del stop: pérdida o cierre por tiempo (no siempre una pérdida). Solo se colorea cuando ' +
+    `hay al menos ${MIN_EVIDENCE_N} casos verificados y la diferencia con las tomadas supera el margen de error`
+  const takenTitle = `Llegaron a TP1 antes del stop. Solo se colorea con al menos ${MIN_EVIDENCE_N} casos verificados`
 
   return (
     <div className="page brain-page">
@@ -196,16 +221,18 @@ export default function BrainPage() {
           hint={`${fmtInt(g.taken)} TOMAR · ${fmtInt(g.avoided)} NO TOMAR · resto ESPERAR`}
         />
         <Stat
-          label="Evitadas que habrían perdido"
+          label="Evitadas sin llegar a TP1"
           value={fmtRate(g.avoided_would_lose_rate)}
-          tone={rateTone(g.avoided_would_lose_rate, 55, 45)}
-          hint="% de operaciones evitadas que habrían perdido"
+          tone={evidenceTone(gateEvidence)}
+          hint={avoidedOf ?? '% de las evitadas ya verificadas'}
+          title={avoidedTitle}
         />
         <Stat
           label="Acierto de las tomadas"
           value={fmtRate(g.taken_win_rate)}
-          tone={rateTone(g.taken_win_rate, 50, 40)}
-          hint="% de operaciones tomadas que ganaron"
+          tone={gateEvidence.taken && gateEvidence.taken.n >= MIN_EVIDENCE_N ? rateTone(g.taken_win_rate, 50, 40) : 'muted'}
+          hint={takenOf ?? '% de las tomadas que llegaron a TP1'}
+          title={takenTitle}
         />
       </div>
 
@@ -216,13 +243,14 @@ export default function BrainPage() {
           flush
           className="brain-main-card"
         >
-          <TimelineChart points={timeline} height={280} />
+          {/* One point per UTC day: drawn as a daily session (its UTC date), not shifted to the local clock. */}
+          <TimelineChart points={timeline} height={280} tf="1d" />
           {bySource.length > 0 && (
             <div className="brain-sources">
               {bySource.map(([src, s]) => (
                 <div key={src} className="brain-source">
                   <span className="text-2">{SOURCE_LABEL[src] ?? prettyKey(src)}</span>
-                  <span className="mono">{fmtInt(s?.resolved)} resueltas</span>
+                  <span className="mono">{plural(s?.resolved, 'resuelta', 'resueltas')}</span>
                   <span className={`mono ${rateTone(s?.hit_rate)}`}>acierto {fmtRate(s?.hit_rate)}</span>
                   <span className={`mono ${brierTone(s?.brier)}`}>Brier {fmtBrier(s?.brier)}</span>
                 </div>
@@ -262,7 +290,7 @@ export default function BrainPage() {
           }
           sub={
             sm
-              ? `${fmtInt(sm.updates)} actualizaciones · acierto ${fmtRate(sm.hit_rate)} · Brier ${fmtBrier(sm.brier)}`
+              ? `${plural(sm.updates, 'actualización', 'actualizaciones')} · acierto ${fmtRate(sm.hit_rate)} · Brier ${fmtBrier(sm.brier)}`
               : 'Pesos aprendidos de cada indicador'
           }
         >

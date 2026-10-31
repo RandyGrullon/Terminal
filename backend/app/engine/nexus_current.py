@@ -10,6 +10,7 @@ from app.engine.regime import TREND_DOWN, TREND_UP, VOLATILE, regime_detail, reg
 
 SIDE_WORD = {1: "largo", -1: "corto"}
 _SEVERITY_RANK = {"critical": 0, "warn": 1, "info": 2}
+EARLY_EV = -0.10  # EV of holding (R) at or below which the engine exits early when the score is against
 
 
 def risk_flags(f: Features, i: int, side: int, pos: Any, regime_code: int) -> set[str]:
@@ -89,9 +90,14 @@ def build_warnings(run: Any, i: int, ev: float | None) -> list[dict]:
     side = pos.side
     word = SIDE_WORD[side]
     flags = risk_flags(f, i, side, pos, int(run.regime[i]))
-    if ev is not None and ev < 0:
-        sev = "critical" if ev <= -0.10 else "warn"
-        out.append(_w("EARLY_EXIT", sev, f"El valor esperado de mantener es negativo ({fmt.rr(ev)}): vigila la salida"))
+    if ev is not None and ev < 0 and run.action[i] not in ("BUY", "SELL"):
+        # Still holding: the engine's exit rule did not fire (it exits EARLY only when the EV is <= −0.10R with
+        # the score against, see nexus_decide). A negative EV is an amber "vigila la salida", never a close
+        # instruction: EARLY_EXIT (critical) is reserved for an actual EXIT_LONG / EXIT_SHORT. (Not shown next to
+        # the entry the engine has just decided at this close.)
+        why = ", aunque el score NEXUS aún no gira en contra" if ev <= EARLY_EV else ""
+        out.append(_w("WATCH_EXIT", "warn",
+                      f"Vigila la salida: el valor esperado de mantener es negativo ({fmt.rr(ev, 2)}){why}"))
     if "NEAR_SL" in flags:
         dist_r = side * (f.close[i] - pos.stop) / pos.risk
         out.append(_w("NEAR_SL", "warn", f"Precio a {fmt.num(max(dist_r, 0.0), 1)}R de tu stop ({fmt.price(pos.stop)})"))
@@ -138,14 +144,17 @@ def build_advice(run: Any, i: int, action: str, gates: dict, warnings: list[dict
         serious = [w for w in warnings if w["severity"] == "critical" and w["code"] != "LOW_DATA"]
         cautious = [w for w in warnings if w["severity"] == "warn"]
         if serious:
-            return f"Mantener el {word} con cautela: {serious[0]['message'][:1].lower()}{serious[0]['message'][1:]}; tu stop está en {stop_txt}."
+            msg = fmt.lower_first(serious[0]["message"])
+            return f"Mantener el {word} con cautela: {msg}; tu stop está en {stop_txt}."
         if pos.tp_hits >= 2:
             return f"Mantener el {word}: stop dinámico en {stop_txt}; objetivo final {fmt.price(pos.tps[2])}."
         if pos.tp_hits == 1:
             return f"Mantener el {word}: TP1 asegurado y stop en punto de equilibrio {stop_txt}."
         if cautious:
             msg = cautious[0]["message"]
-            return f"Mantener el {word} con cautela: {msg[:1].lower()}{msg[1:]}; tu stop está en {stop_txt}."
+            if cautious[0]["code"] == "WATCH_EXIT":
+                return f"Mantener el {word} y vigilar la salida: {msg.split(': ', 1)[-1]}; tu stop está en {stop_txt}."
+            return f"Mantener el {word} con cautela: {fmt.lower_first(msg)}; tu stop está en {stop_txt}."
         return f"Mantener el {word}: tendencia intacta; tu stop está en {stop_txt}."
     if action in ("EXIT_LONG", "EXIT_SHORT"):
         ex = info.get("exit") or info.get("exit_decision") or {}
@@ -175,8 +184,7 @@ def build_advice(run: Any, i: int, action: str, gates: dict, warnings: list[dict
     rej = info.get("rejected")
     if rej is not None:
         side_txt = "compra" if rej["direction"] == "long" else "venta"
-        reason = (rej.get("reasons_against") or [rej.get("summary") or ""])[0]
-        reason = reason[:1].lower() + reason[1:]
+        reason = fmt.lower_first((rej.get("reasons_against") or [rej.get("summary") or ""])[0]).rstrip(". ")
         if rej["verdict"] == "WAIT":
             return (f"Esperar: señal de {side_txt} pendiente de confirmación (filtro ESPERAR "
                     f"{fmt.num(rej['score'], 0)}/100): {reason}.")

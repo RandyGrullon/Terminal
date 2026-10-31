@@ -157,7 +157,7 @@ def run_bootstrap(
         cs,
         settings=settings,
         risk_pct=risk,
-        fee_pct=float(settings.get("risk.fee_pct", 0.1)),
+        fee_pct=None,  # the commission of the symbol's asset class (risk.fee_pct_by_class / risk.fee_pct)
         slippage_pct=float(settings.get("risk.slippage_pct", 0.02)),
     )
     if len(returns) < MIN_BOOTSTRAP_TRADES:
@@ -211,7 +211,7 @@ def run_synthetic(
             cs,
             settings=settings,
             risk_pct=risk,
-            fee_pct=float(settings.get("risk.fee_pct", 0.1)),
+            fee_pct=None,  # SIM:* markets use the crypto-sized risk.fee_pct
             slippage_pct=float(settings.get("risk.slippage_pct", 0.02)),
         )
         curves.append(curve)

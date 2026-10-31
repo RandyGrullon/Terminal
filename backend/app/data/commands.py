@@ -169,6 +169,9 @@ async def _quote(ctx: CommandContext) -> None:
     missing = [s for s in symbols if s not in quotes]
     if missing:
         ctx.print(f"Sin cotización disponible: {', '.join(missing)}", "warn")
+    stale = [s for s in symbols if (quotes.get(s) or {}).get("stale")]
+    if stale:
+        ctx.print(f"Precio desactualizado (último dato guardado, no es un precio en vivo): {', '.join(stale)}", "warn")
 
 
 @command("candles", help="Últimas velas de un símbolo y de dónde salen los datos",
@@ -188,7 +191,7 @@ async def _candles(ctx: CommandContext) -> None:
         ctx.print(cs.note, "warn")
     candles = cs.to_list()
     ctx.data = {"symbol": symbol, "tf": tf, "provider": cs.provider, "history": cs.history, "note": cs.note,
-                "candles": candles[-n:]}
+                "stale": bool(getattr(cs, "stale", False)), "candles": candles[-n:]}
     if not candles:
         return
     rows = []
@@ -369,7 +372,7 @@ async def _recorder(ctx: CommandContext) -> None:
     ctx.print(f"Grabador local: {'activado' if st['enabled'] else 'desactivado'} · "
               f"{'en marcha' if st['running'] else 'detenido'} · cada {st['interval_s']:.0f} s", "system")
     ctx.print(f"Ciclos: {st['cycles']} · velas guardadas: {st['bars']} · instantáneas repetidas ignoradas: "
-              f"{st['skipped_stale']}")
+              f"{st['skipped_stale']} · cambios de vela de TradingView descartados: {st.get('skipped_rollover', 0)}")
     if st["recording"]:
         ctx.print("Grabando: " + ", ".join(st["recording"]))
     pending = [s for s in await rec.symbols_to_record() if s not in st["recording"]]

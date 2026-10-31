@@ -3,6 +3,7 @@ import { memo, useMemo, useState } from 'react'
 import { ArrowDown, ArrowUp, ChevronsUpDown } from 'lucide-react'
 import type { Trade } from '../../api/types'
 import { DIRECTION_LABEL, EXIT_REASON_LABEL, fmtBarTime, fmtInt, fmtNum, fmtPct, fmtPrice, fmtR, signTone } from '../../lib/format'
+import { plural, pluralWord } from '../../lib/plural'
 import { Badge, Card, Empty } from '../ui'
 
 type SortKey =
@@ -95,7 +96,7 @@ export const TradesTable = memo(function TradesTable(props: {
       title="Operaciones"
       sub={
         props.trades.length
-          ? `${fmtInt(props.trades.length)} operaciones · ${fmtInt(stats.wins)} ganadoras de ${fmtInt(stats.closed)} cerradas`
+          ? `${plural(props.trades.length, 'operación', 'operaciones')} · ${fmtInt(stats.wins)} ${pluralWord(stats.wins, 'ganadora', 'ganadoras')} de ${plural(stats.closed, 'cerrada', 'cerradas')}`
           : undefined
       }
       flush

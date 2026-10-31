@@ -31,6 +31,7 @@ export interface BacktestForm {
   limit: number | null
   initialCapital: number | null
   riskPct: number | null
+  /** null = the commission of the symbol's asset class, resolved by the server (only a typed value is sent). */
   feePct: number | null
   slippagePct: number | null
   useGate: boolean
@@ -66,7 +67,6 @@ export interface Job<B, R> {
 export interface SettingsDefaults {
   accountSize: number | null
   riskPct: number | null
-  feePct: number | null
   slippagePct: number | null
   entryThreshold: number | null
   slAtr: number | null
@@ -98,7 +98,7 @@ const DEFAULT_BT: BacktestForm = {
   limit: 2000,
   initialCapital: 10000,
   riskPct: 1,
-  feePct: 0.1,
+  feePct: null,
   slippagePct: 0.02,
   useGate: true,
   entryThreshold: null,
@@ -130,6 +130,9 @@ const emptyJob = <B, R>(): Job<B, R> => ({
 // ----------------------------------------------------------------------------- persistence
 
 const STORAGE_KEY = 'nexus.sim.ui.v1'
+// v2: the backtest commission is stored only when the user typed it. Older payloads always carried the global
+// risk.fee_pct prefilled by the form, so their commission is dropped (empty = the asset class's fee).
+const FORM_VERSION = 2
 const TABS: SimTab[] = ['live', 'backtest', 'montecarlo']
 
 type Raw = Record<string, unknown>
@@ -178,7 +181,7 @@ function readPersisted(): Persisted {
       limit: num(b.limit) ?? DEFAULT_BT.limit,
       initialCapital: num(b.initialCapital) ?? DEFAULT_BT.initialCapital,
       riskPct: num(b.riskPct) ?? DEFAULT_BT.riskPct,
-      feePct: num(b.feePct) ?? DEFAULT_BT.feePct,
+      feePct: raw.v === FORM_VERSION ? num(b.feePct) : null,
       slippagePct: num(b.slippagePct) ?? DEFAULT_BT.slippagePct,
       useGate: bool(b.useGate, true),
       entryThreshold: num(b.entryThreshold),
@@ -204,13 +207,24 @@ function readPersisted(): Persisted {
 
 const arr = <T>(v: T[] | null | undefined): T[] => (Array.isArray(v) ? v : [])
 
+/** The result notes always say which commission was used: servers that report params.fee_pct without their own
+ *  "Comisión X % por lado…" note get a plain one. */
+export function withFeeNote(params: Record<string, unknown>): Record<string, unknown> {
+  const fee = params.fee_pct
+  if (typeof fee !== 'number' || !Number.isFinite(fee)) return params
+  const notes = Array.isArray(params.notes) ? params.notes.filter((n): n is string => typeof n === 'string') : []
+  if (notes.some((n) => /^\s*comisi[oó]n\b/i.test(n))) return params
+  const txt = fee.toLocaleString('es-ES', { maximumFractionDigits: 4 })
+  return { ...params, notes: [...notes, `Comisión ${txt} % por lado.`] }
+}
+
 function normalizeBacktest(r: BacktestResult): BacktestResult {
   if (!r || typeof r !== 'object' || !r.metrics || typeof r.metrics !== 'object') {
     throw new Error('El servidor devolvió un resultado de backtest incompleto.')
   }
   return {
     ...r,
-    params: r.params && typeof r.params === 'object' ? r.params : {},
+    params: withFeeNote(r.params && typeof r.params === 'object' ? r.params : {}),
     ungated: r.ungated && typeof r.ungated === 'object' ? r.ungated : null,
     equity: arr(r.equity),
     benchmark: arr(r.benchmark),
@@ -322,7 +336,6 @@ export const useSimStore = create<SimUiState>((set, get) => ({
       const d: SettingsDefaults = {
         accountSize: setting(src, 'risk.account_size'),
         riskPct: setting(src, 'risk.per_trade_pct'),
-        feePct: setting(src, 'risk.fee_pct'),
         slippagePct: setting(src, 'risk.slippage_pct'),
         entryThreshold: setting(src, 'nexus.entry_threshold'),
         slAtr: setting(src, 'nexus.sl_atr'),
@@ -334,13 +347,14 @@ export const useSimStore = create<SimUiState>((set, get) => ({
         defaults: d,
         live:
           s.touched.live || d.speed === null ? s.live : { ...s.live, speed: clampSpeed(d.speed) },
+        // The commission stays empty (asset class's fee, resolved by the server): risk.fee_pct is only the crypto /
+        // fallback fee, prefilling it would charge it to FX or index backtests too.
         btForm: s.touched.bt
           ? s.btForm
           : {
               ...s.btForm,
               initialCapital: d.accountSize ?? s.btForm.initialCapital,
               riskPct: d.riskPct ?? s.btForm.riskPct,
-              feePct: d.feePct ?? s.btForm.feePct,
               slippagePct: d.slippagePct ?? s.btForm.slippagePct,
             },
         mcForm: s.touched.mc ? s.mcForm : { ...s.mcForm, initialCapital: d.accountSize ?? s.mcForm.initialCapital },
@@ -360,6 +374,7 @@ useSimStore.subscribe((s) => {
   const { symbol: _btSymbol, tf: _btTf, ...bt } = s.btForm
   const { symbol: _mcSymbol, tf: _mcTf, ...mc } = s.mcForm
   const payload = {
+    v: FORM_VERSION,
     tab: s.tab,
     live: s.touched.live ? live : undefined,
     bt: s.touched.bt ? bt : undefined,

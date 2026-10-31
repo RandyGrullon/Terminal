@@ -30,7 +30,14 @@ export function BacktestMetrics(props: { metrics: Metrics }) {
           label="Buy & Hold"
           value={fmtPct(m.buy_hold_return_pct)}
           tone={signTone(m.buy_hold_return_pct)}
-          hint={beatsHold === null ? undefined : beatsHold >= 0 ? `NEXUS lo supera por ${fmtPct(beatsHold, 1, false)}` : `Queda ${fmtPct(-beatsHold, 1, false)} por debajo`}
+          hint={
+            beatsHold === null
+              ? undefined
+              : beatsHold >= 0
+                ? `NEXUS lo supera por ${fmtNum(beatsHold, 1)} pp`
+                : `NEXUS queda ${fmtNum(-beatsHold, 1)} pp por debajo`
+          }
+          title="Diferencia en puntos porcentuales (pp): rendimiento de NEXUS − comprar y mantener"
         />
         <Stat label="CAGR" value={fmtPct(m.cagr_pct)} tone={signTone(m.cagr_pct)} hint="Rendimiento anualizado" />
         <Stat label="Sharpe" value={fmtNum(m.sharpe, 2)} tone={ratioTone(m.sharpe, 1, 0)} hint="Retorno / volatilidad" />

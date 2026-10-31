@@ -41,6 +41,14 @@ EXIT_LABEL = {
 }
 
 
+def lower_first(text: str) -> str:
+    """Lower-case the first letter to continue a sentence, unless the first word is an acronym or a symbol
+    (ATR, EV, RSI, FOMC, P(...), R:R...)."""
+    if not text or len(text) < 2 or not text[1].islower():
+        return text
+    return text[:1].lower() + text[1:]
+
+
 def _finite(x: Any) -> float | None:
     try:
         v = float(x)

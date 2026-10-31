@@ -10,12 +10,11 @@ import numpy as np
 from app.engine.fmt import EXIT_LABEL
 from app.engine.gate import checks_vector, evaluate_gate
 from app.engine.levels import Levels, ev_hold
-from app.engine.nexus_current import risk_flags
+from app.engine.nexus_current import EARLY_EV, risk_flags
 from app.engine.positions import Position
 
 REEVAL_BARS = 3
 COOLDOWN_BARS = 3
-EARLY_EV = -0.10
 
 
 class DecisionsMixin:
@@ -28,31 +27,41 @@ class DecisionsMixin:
         return (not self.prev_cond[side]) or (i - self.last_eval[side] >= REEVAL_BARS)
 
     def _evaluate_candidate(self, i: int, side: int) -> tuple[dict, bool]:
+        from app.engine.macro_merge import veto_gate
         from app.engine.nexus_out import rejected_marker
 
         ctx = self.gate_ctx(i)
         gate = evaluate_gate(ctx, "long" if side > 0 else "short", self.p, gate_state=self.decision_gate)
         self.last_eval[side] = i
         take = gate["verdict"] == "TAKE" or not self.p.gate_enabled
+        # the gate learner sees the same candidates and check vectors with or without a macro veto
+        sample, checks = take, checks_vector(gate["checks"])
+        veto = self.vetoes.get((int(self.f.time[i]), side)) if take and self.vetoes else None
+        if veto is not None:  # the semáforo vetoed this entry when it was live: reject it, never open it
+            gate = veto_gate(gate, veto, self.p.take_score)
+            take = False
         new_episode = not self.prev_cond[side]
         cand = None
-        if new_episode or take:
+        if new_episode or sample:
             res = self.outcome(i, side, float(gate["sl"]), float(gate["tp1"]))
             self.seq += 1
-            cand = {"idx": i, "side": side, "regime": int(self.regime[i]), "checks": checks_vector(gate["checks"]),
+            cand = {"idx": i, "side": side, "regime": int(self.regime[i]), "checks": checks,
                     "verdict": gate["verdict"], "taken": take, "won": res[1] if res else None,
                     "resolve_idx": res[0] if res else None}
             self.candidates.append(cand)
             if res is not None:
                 heapq.heappush(self.heap, (res[0], self.seq, cand))
         if not take:
+            marker = rejected_marker(int(self.f.time[i]), side, gate, float(self.f.close[i]))
             if self.rejected_in_episode[side] is None:
                 if cand is None:
                     res = self.outcome(i, side, float(gate["sl"]), float(gate["tp1"]))
                     cand = {"idx": i, "side": side, "won": res[1] if res else None}
                 self.rejected_in_episode[side] = cand
                 self.rejected.append(cand)
-                self.markers.append(rejected_marker(int(self.f.time[i]), side, gate, float(self.f.close[i])))
+                self.markers.append(marker)
+            elif veto is not None:  # the episode is already counted; the veto still gets its own marker
+                self.markers.append(marker)
             self.bar_info["rejected"] = gate
         else:
             earlier = self.rejected_in_episode[side]
@@ -82,6 +91,7 @@ class DecisionsMixin:
         r_now = pos.result(c, self.p.fee_pct)[1]
         self.markers.append(exit_marker(int(self.f.time[i]), pos.side, reason, c, r_now, detail))
         if i == self.n - 1:
+            self._book_fee(i, pos.size_left * c / pos.entry_price)
             pos.close_at(c)
             self._finalize(i, c, reason, label)
             self.bar_info["exit"]["detail"] = detail

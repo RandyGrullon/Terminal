@@ -58,7 +58,8 @@ def test_gate_outcome_tp1_before_sl_ordering():
     # missing levels -> NONE without R once the horizon is over
     assert ev.gate_outcome("long", None, 98, 102, full, t0, target, now, H) == ("NONE", None)
     assert ev.gate_won("TP1", 1.0) is True and ev.gate_won("SL", -1) is False
-    assert ev.gate_won("NONE", 0.2) is True and ev.gate_won("NONE", None) is None
+    # the engine's target: TP1 before the SL within the horizon; a time stop is not a win, whatever its close
+    assert ev.gate_won("NONE", 0.2) is False and ev.gate_won("NONE", None) is None
 
 
 class _QuoteHub:
@@ -204,7 +205,7 @@ def test_gate_log_resolution_and_learning_summary(runtime_factory, monkeypatch):
             assert await db.fetchone("SELECT 1 FROM model_state WHERE kind='gate' AND key='global'") is None
             summary = await ev.learning_summary(db, rt.settings.all())
             assert summary["gate"] == {"decisions": 3, "taken": 1, "avoided": 1, "avoided_would_lose_rate": 1.0,
-                                       "taken_win_rate": 1.0}
+                                       "taken_win_rate": 1.0, "avoided_judged": 1, "taken_judged": 1}
             assert set(summary) == {"scanner_model", "nexus_models", "gate", "predictions", "timeline"}
             assert summary["scanner_model"] is None and summary["nexus_models"] == []
 

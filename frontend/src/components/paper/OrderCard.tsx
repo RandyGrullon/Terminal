@@ -1,15 +1,16 @@
 // New demo order ticket: symbol, side, timeframe, risk % and optional SL / TP. The Trade Gate verdict is shown BEFORE
-// submitting; if the server answers 409 (filter says NO TOMAR) the user must explicitly confirm "Abrir de todos modos".
+// submitting (a TOMAR without NEXUS' own entry signal is only "Filtro favorable · sin señal NEXUS"); if the server
+// answers 409 (filter says NO TOMAR) the user must explicitly confirm "Abrir de todos modos".
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChartCandlestick, RefreshCw, ShieldCheck, ShieldX, TrendingDown, TrendingUp } from 'lucide-react'
 import { ApiError, api, errorMessage } from '../../api/client'
-import type { Direction, GateResult, Timeframe } from '../../api/types'
+import type { Direction, GateResult, NexusAction, Timeframe } from '../../api/types'
 import { TIMEFRAMES } from '../../api/types'
 import { fmtPrice, priceDecimals, splitSymbol } from '../../lib/format'
 import { useApp } from '../../store'
 import { Button, Card, Field, IconButton, Modal, NumberInput, Select, VerdictBadge } from '../ui'
 import SymbolSearch from '../SymbolSearch'
-import GateChecklist from '../nexus/GateChecklist'
+import GateChecklist, { gateSignal } from '../nexus/GateChecklist'
 import { isNum } from '../markets/opsUtils'
 import GatePreview from './GatePreview'
 import { conflictDetail, isGateResult, validateLevels } from './paperUtils'
@@ -18,6 +19,16 @@ interface Preview {
   key: string // symbol|side|tf the verdict belongs to
   gate: GateResult
 }
+
+/** NEXUS' current action for symbol|tf (null = no NEXUS reading), read when the preview says TOMAR. */
+interface SignalRead {
+  key: string
+  at: number
+  action: NexusAction | null
+  label: string | null
+}
+
+const SIGNAL_TTL_MS = 30_000
 
 interface Conflict {
   message: string
@@ -44,6 +55,7 @@ function OrderCard({ onOpened }: { onOpened: () => void }) {
   const [gateError, setGateError] = useState<string | null>(null)
   const [ordering, setOrdering] = useState(false)
   const [conflict, setConflict] = useState<Conflict | null>(null)
+  const [signal, setSignal] = useState<SignalRead | null>(null)
   const alive = useRef(true)
   const reqRef = useRef(0)
 
@@ -93,6 +105,26 @@ function OrderCard({ onOpened }: { onOpened: () => void }) {
     const t = window.setTimeout(() => void check(), PREVIEW_DEBOUNCE_MS)
     return () => window.clearTimeout(t)
   }, [symbol, side, tf, sl, tp, problem, check])
+
+  // A gate TOMAR is an opportunity only with NEXUS' own entry signal (BUY / SELL): read the current action when the
+  // preview says TOMAR (cached for 30 s per symbol and timeframe). A failed read leaves the TOMAR unconfirmed.
+  const signalKey = `${symbol}|${tf}`
+  const takeShown = preview?.key === key && preview.gate.verdict === 'TAKE'
+  useEffect(() => {
+    if (!takeShown || (signal && signal.key === signalKey && Date.now() - signal.at < SIGNAL_TTL_MS)) return
+    let cancelled = false
+    api
+      .nexus(symbol, tf)
+      .then((res) => {
+        if (cancelled || !alive.current) return
+        const cur = res && res.ok ? res.current : null
+        setSignal({ key: signalKey, at: Date.now(), action: cur ? cur.action : null, label: cur ? cur.action_label || cur.action : null })
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [takeShown, preview, signal, signalKey, symbol, tf])
 
   const changeSymbol = (s: string) => {
     const next = s.trim().toUpperCase()
@@ -151,10 +183,20 @@ function OrderCard({ onOpened }: { onOpened: () => void }) {
 
   const { exchange, ticker } = splitSymbol(symbol)
   const verdict = gate?.verdict ?? null
-  const openVariant = verdict === 'TAKE' ? 'success' : verdict === 'AVOID' ? 'danger' : 'primary'
+  // undefined = NEXUS' action not read (yet): a TOMAR stays unconfirmed.
+  const signalAction = signal && signal.key === signalKey ? signal.action : undefined
+  const signalLabel = signal && signal.key === signalKey ? signal.label : null
+  const sig = gateSignal(gate, signalAction)
+  const openVariant = sig === 'take' ? 'success' : verdict === 'AVOID' ? 'danger' : 'primary'
   const sideWord = side === 'long' ? 'largo' : 'corto'
   const openLabel =
-    verdict === 'AVOID' ? `Abrir ${sideWord} (filtro: NO TOMAR)` : verdict === 'WAIT' ? `Abrir ${sideWord} (filtro: ESPERAR)` : `Abrir ${sideWord}`
+    verdict === 'AVOID'
+      ? `Abrir ${sideWord} (filtro: NO TOMAR)`
+      : verdict === 'WAIT'
+        ? `Abrir ${sideWord} (filtro: ESPERAR)`
+        : sig === 'favorable'
+          ? `Abrir ${sideWord} (sin señal NEXUS)`
+          : `Abrir ${sideWord}`
 
   return (
     <Card
@@ -208,7 +250,15 @@ function OrderCard({ onOpened }: { onOpened: () => void }) {
           <span className="label">Veredicto del filtro</span>
           <IconButton icon={<RefreshCw size={13} />} title="Volver a consultar el filtro" size="sm" onClick={() => void check()} disabled={checking || !!problem} />
         </div>
-        <GatePreview gate={gate} loading={checking} error={gateError} onRetry={() => void check()} tf={tf} />
+        <GatePreview
+          gate={gate}
+          loading={checking}
+          error={gateError}
+          onRetry={() => void check()}
+          tf={tf}
+          action={signalAction}
+          actionLabel={signalLabel}
+        />
 
         <Button
           variant={openVariant}

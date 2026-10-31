@@ -164,7 +164,7 @@ export class SimFeed {
     this.state = st
     this.sessionKey = sessionKeyOf(st)
     this.lastBarsDone = typeof st?.bars_done === 'number' ? st.bars_done : null
-    this.model.load(Array.isArray(snap.candles) ? snap.candles : [], snap.nexus ?? null)
+    this.model.load(Array.isArray(snap.candles) ? snap.candles : [], snap.nexus ?? null, typeof st?.tf === 'string' ? st.tf : null)
     this.current = snap.nexus?.current ?? null
     const next = new Map<number, Position>()
     if (kind === 'soft') {

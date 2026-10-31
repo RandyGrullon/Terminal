@@ -1,0 +1,3 @@
+# Local development and tests (start.bat / start.ps1 / start.sh install this file). Never installed in the image.
+-r requirements.txt
+pytest>=8.3,<10

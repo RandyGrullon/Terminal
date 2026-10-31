@@ -4,7 +4,7 @@ import { memo, useEffect, useMemo, useRef } from 'react'
 import { BaselineSeries, type ISeriesApi } from 'lightweight-charts'
 import { FlaskConical } from 'lucide-react'
 import type { BacktestMetrics, BacktestResult } from '../../api/types'
-import { COLORS, LineStyle, addLine, ts, useChart } from '../../lib/chart'
+import { COLORS, LineStyle, addLine, timeScaleFor, ts, useChart } from '../../lib/chart'
 import {
   DIRECTION_LABEL,
   EXIT_REASON_LABEL,
@@ -18,6 +18,7 @@ import {
   type Tone,
 } from '../../lib/format'
 import { Badge, Disclaimer, Empty, Stat } from '../ui'
+import { evidenceText, evidenceTone, filterEvidence, fmtTally } from '../brain/evidence'
 import { ensureAscending, isFiniteNum } from './chartUtils'
 
 function EquityChart({ result }: { result: BacktestResult }) {
@@ -59,15 +60,18 @@ function EquityChart({ result }: { result: BacktestResult }) {
   useEffect(() => {
     const s = series.current
     if (!chart || !s) return
+    // Bar times: 1d / 1w runs keep their UTC session dates (see lib/chart.ts `ts`).
+    const tf = result.tf
+    chart.applyOptions({ timeScale: timeScaleFor(tf) })
     const eq = (result.equity ?? []).filter((p) => isFiniteNum(p.time) && isFiniteNum(p.equity))
-    s.equity.setData(ensureAscending(eq.map((p) => ({ time: ts(p.time), value: p.equity }))))
+    s.equity.setData(ensureAscending(eq.map((p) => ({ time: ts(p.time, tf), value: p.equity }))))
     s.dd.setData(
       ensureAscending(
-        eq.filter((p) => isFiniteNum(p.drawdown_pct)).map((p) => ({ time: ts(p.time), value: -Math.abs(p.drawdown_pct) })),
+        eq.filter((p) => isFiniteNum(p.drawdown_pct)).map((p) => ({ time: ts(p.time, tf), value: -Math.abs(p.drawdown_pct) })),
       ),
     )
     const bench = (result.benchmark ?? []).filter((p) => isFiniteNum(p.time) && isFiniteNum(p.equity))
-    s.bench.setData(ensureAscending(bench.map((p) => ({ time: ts(p.time), value: p.equity }))))
+    s.bench.setData(ensureAscending(bench.map((p) => ({ time: ts(p.time, tf), value: p.equity }))))
     chart.timeScale().fitContent()
   }, [chart, result])
 
@@ -99,6 +103,43 @@ interface MetricDef {
 const pctOrRate = (v: number | null | undefined) => {
   if (!isFiniteNum(v)) return '—'
   return Math.abs(v) <= 1 ? fmtPct(v * 100, 1, false) : fmtPct(v, 1, false)
+}
+
+/** Difference of two percentages, in percentage points: "+3,21 pp". */
+const fmtPp = (v: number) => `${v > 0 ? '+' : ''}${fmtNum(v, 2)} pp`
+
+/** Rejected signals vs the trades that were taken: "x de n" and no conclusion below 30 cases (brain/evidence.ts). */
+function RejectedSummary({ m }: { m: BacktestMetrics }) {
+  const rejected = isFiniteNum(m.rejected_signals) ? m.rejected_signals : 0
+  const e = filterEvidence({
+    total: rejected,
+    resolved: m.rejected_resolved,
+    winRate: m.rejected_would_win_rate,
+    takenN: m.trades,
+    takenWinRate: m.win_rate,
+  })
+  return (
+    <>
+      <span className="tiny muted">
+        Señales rechazadas: {fmtInt(rejected)}
+        {e.rejected && <> ({fmtInt(e.rejected.n)} con resultado conocido)</>}
+        {e.verdict !== 'none' && (
+          <>
+            {' · '}habrían ganado <span className={`mono ${evidenceTone(e)}`}>{fmtTally(e.rejected, e.rate)}</span>
+          </>
+        )}
+        {isFiniteNum(m.gate_lift_pct) && (
+          <>
+            {' · '}
+            <span title="Rendimiento con filtro − rendimiento sin filtro, en puntos porcentuales (pp)">
+              diferencia por el filtro <span className={`mono ${signTone(m.gate_lift_pct)}`}>{fmtPp(m.gate_lift_pct)}</span>
+            </span>
+          </>
+        )}
+      </span>
+      {rejected > 0 && <span className="tiny muted">{evidenceText(e, 'signals')}</span>}
+    </>
+  )
 }
 
 const METRICS: MetricDef[] = [
@@ -136,7 +177,7 @@ function StrategyPanel({ result }: { result: BacktestResult | null }) {
     )
   }
   const m = result.metrics
-  const gated = result.ungated
+  const ungated = result.ungated
   return (
     <div className="studio-strategy scroll">
       <div className="studio-strategy-head">
@@ -153,7 +194,7 @@ function StrategyPanel({ result }: { result: BacktestResult | null }) {
           <Stat key={d.label} label={d.label} value={d.value(m)} tone={d.tone?.(m)} hint={d.hint} />
         ))}
       </div>
-      {gated && (
+      {ungated && (
         <div className="studio-compare">
           <strong className="small">Con filtro “¿Tomo la operación?” vs. sin filtro</strong>
           <table className="table">
@@ -176,18 +217,14 @@ function StrategyPanel({ result }: { result: BacktestResult | null }) {
               </tr>
               <tr>
                 <td>Sin filtro</td>
-                <td className={`num ${signTone(gated.total_return_pct)}`}>{fmtPct(gated.total_return_pct)}</td>
-                <td className="num">{fmtInt(gated.trades)}</td>
-                <td className="num">{pctOrRate(gated.win_rate)}</td>
-                <td className="num neg">{fmtPct(-Math.abs(gated.max_dd_pct))}</td>
+                <td className={`num ${signTone(ungated.total_return_pct)}`}>{fmtPct(ungated.total_return_pct)}</td>
+                <td className="num">{fmtInt(ungated.trades)}</td>
+                <td className="num">{pctOrRate(ungated.win_rate)}</td>
+                <td className="num neg">{fmtPct(-Math.abs(ungated.max_dd_pct))}</td>
               </tr>
             </tbody>
           </table>
-          <span className="tiny muted">
-            Señales rechazadas: {fmtInt(m.rejected_signals)}
-            {isFiniteNum(m.rejected_would_win_rate) && <> · de ellas habrían ganado {pctOrRate(m.rejected_would_win_rate)}</>}
-            {isFiniteNum(m.gate_lift_pct) && <> · mejora del filtro {fmtPct(m.gate_lift_pct)}</>}
-          </span>
+          <RejectedSummary m={m} />
         </div>
       )}
       <div className="studio-equity-wrap">

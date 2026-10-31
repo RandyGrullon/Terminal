@@ -17,6 +17,8 @@ interface Props {
   problems: Problem[]
   warnings: string[]
   run: ScriptRunResult | null
+  /** Timeframe of `run` (alert bar times of 1d / 1w runs are shown as their UTC session date). */
+  runTf?: string | null
   runInfo: string | null
   compileError: string | null
   onGoto: (line: number, col: number | null) => void
@@ -128,7 +130,7 @@ function BottomPanel(props: Props) {
                     .slice(0, 500)
                     .map((a, i) => (
                       <tr key={`${a.time}-${i}`}>
-                        <td className="mono">{fmtBarTime(a.time)}</td>
+                        <td className="mono">{fmtBarTime(a.time, props.runTf)}</td>
                         <td>
                           <span className="row gap-1">
                             <Bell size={12} className="accent" /> {a.title}

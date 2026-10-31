@@ -26,6 +26,9 @@ RUN_TIMEOUT_S = 10.0
 MAX_CONCURRENT_RUNS = 2
 STDOUT_EVENT_LINES = 40
 STDOUT_LINE_MAX = 300
+EVENT_ERRORS_MAX = 5
+EVENT_TEXT_MAX = 300  # events are kept in memory, stored and sent to every terminal: never user-sized payloads
+ERROR_MESSAGE_MAX = 4000  # same limit as the compiler/sandbox (validator.ERROR_MESSAGE_MAX)
 COMPILE_WARN_EVERY_S = 10.0
 
 MSG_UNAVAILABLE = "Compilador PyChart no disponible todavía"
@@ -113,14 +116,28 @@ def _script_row(row: dict) -> dict:
     return out
 
 
+def _clip(text: Any, limit: int) -> str:
+    value = str(text)
+    return value if len(value) <= limit else value[:limit] + "…"
+
+
 def _error_line(errors: list[dict]) -> str:
     """'línea 12: mensaje' for the first error (Spanish one-liner for events and the terminal)."""
     if not errors:
         return "error desconocido"
     err = errors[0] if isinstance(errors[0], dict) else {"message": str(errors[0])}
     line = err.get("line")
-    msg = str(err.get("message") or "error desconocido").splitlines()[0][:200]
+    msg = (str(err.get("message") or "")[:1000].splitlines() or ["error desconocido"])[0][:200]
     return f"línea {line}: {msg}" if line else msg
+
+
+def _event_errors(errors: list) -> list[dict]:
+    """The first errors with short messages, for event data."""
+    return [
+        {**err, "message": _clip(err.get("message") or "", EVENT_TEXT_MAX)}
+        for err in errors[:EVENT_ERRORS_MAX]
+        if isinstance(err, dict)
+    ]
 
 
 def _load_compiler() -> Callable[[str], dict]:
@@ -431,14 +448,14 @@ class ScriptService:
             raw = await asyncio.to_thread(compile_script, text)
         except Exception as exc:  # a compiler bug must not become a 500
             if self._log.should_log("compile-crash", 60):
-                self._emit("error", f"PyChart: fallo interno del compilador: {type(exc).__name__}: {exc}")
+                self._emit("error", f"PyChart: fallo interno del compilador: {type(exc).__name__}: {_clip(exc, EVENT_TEXT_MAX)}")
             raw = {"ok": False, "errors": [_internal_error(f"Error interno del compilador: {type(exc).__name__}: {exc}", "syntax")]}
         result = _normalize_compile(raw)
         if not result["ok"] and self._log.should_log("compile-warn", COMPILE_WARN_EVERY_S):
             self._emit(
                 "warn",
-                f"PyChart: error de compilación en '{result['meta']['title']}' ({_error_line(result['errors'])})",
-                {"errors": result["errors"][:5]},
+                f"PyChart: error de compilación en '{_clip(result['meta']['title'], 120)}' ({_error_line(result['errors'])})",
+                {"errors": _event_errors(result["errors"])},
             )
         return result
 
@@ -482,7 +499,7 @@ class ScriptService:
                 raw = {"ok": False, "errors": [_internal_error(f"El script superó el tiempo máximo ({RUN_TIMEOUT_S:.0f} s)", "timeout")]}
             except Exception as exc:
                 if self._log.should_log("sandbox-crash", 60):
-                    self._emit("error", f"PyChart: fallo interno del sandbox: {type(exc).__name__}: {exc}")
+                    self._emit("error", f"PyChart: fallo interno del sandbox: {type(exc).__name__}: {_clip(exc, EVENT_TEXT_MAX)}")
                 raw = {"ok": False, "errors": [_internal_error(f"Error interno del sandbox: {type(exc).__name__}: {exc}", "runtime")]}
         elapsed_ms = int(round((time.perf_counter() - started) * 1000))
         result = _normalize_run(raw, candles, elapsed_ms)
@@ -527,7 +544,9 @@ class ScriptService:
     # ------------------------------------------------------------------ events
 
     def _run_events(self, result: dict, symbol: str, tf: str, name: str | None) -> None:
-        title = name or result["meta"].get("title") or "Script"
+        """Bus events of a run. Every text taken from the script result is clipped: events are kept in memory,
+        stored in the database and sent to every terminal."""
+        title = _clip(name or result["meta"].get("title") or "Script", 120)
         bars = len(result["time"])
         info = {"symbol": symbol, "tf": tf, "title": title, "bars": bars, "duration_ms": result["duration_ms"]}
         if result["ok"]:
@@ -547,7 +566,7 @@ class ScriptService:
             self._emit(
                 "warn",
                 f"PyChart ✖ '{title}' · {symbol} {tf} · {_KIND_LABELS.get(kind, kind)}: {_error_line(result['errors'])}",
-                {**info, "errors": result["errors"][:5]},
+                {**info, "errors": _event_errors(result["errors"])},
             )
         last_time = result["time"][-1] if result["time"] else None
         if last_time is not None:
@@ -562,9 +581,10 @@ class ScriptService:
                     self._alerted.clear()
                 self._alerted[key] = now_ms()
                 fired += 1
-                message = str(alert.get("message") or alert.get("title") or "Alerta").strip()
-                self._emit("signal", f"PyChart · {symbol} {tf} · {alert.get('title') or title}: {message}",
-                           {**info, "alert": alert})
+                alert_title = _clip(alert.get("title") or title, 80)
+                message = _clip(str(alert.get("message") or alert.get("title") or "Alerta").strip(), EVENT_TEXT_MAX)
+                self._emit("signal", f"PyChart · {symbol} {tf} · {alert_title}: {message}",
+                           {**info, "alert": {"time": alert.get("time"), "title": alert_title, "message": message}})
         lines = [ln.rstrip() for ln in str(result["stdout"]).splitlines() if ln.strip()]
         for ln in lines[:STDOUT_EVENT_LINES]:
             self._emit("debug", f"PyChart ▸ {ln[:STDOUT_LINE_MAX]}")
@@ -587,9 +607,10 @@ def _normalize_errors(errors: Any) -> list[dict]:
     for err in errors if isinstance(errors, list) else []:
         if isinstance(err, dict):
             kind = err.get("kind") if err.get("kind") in _KIND_LABELS else "runtime"
-            out.append({"line": err.get("line"), "col": err.get("col"), "message": str(err.get("message") or ""), "kind": kind})
+            message = _clip(err.get("message") or "", ERROR_MESSAGE_MAX)
+            out.append({"line": err.get("line"), "col": err.get("col"), "message": message, "kind": kind})
         else:
-            out.append(_internal_error(str(err), "runtime"))
+            out.append(_internal_error(_clip(err, ERROR_MESSAGE_MAX), "runtime"))
     return out
 
 

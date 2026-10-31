@@ -41,7 +41,9 @@ def test_recorder_cycle_upserts_merges_and_skips_stale(runtime_factory, monkeypa
             assert "BINANCE:BTCUSDT" not in pending and "SIM:NEXUS" not in pending
 
             res = await rec.run_once([AAPL])
-            assert res == {"symbols": 1, "bars": 6}
+            # 1h/4h are rebuilt from 15m: TradingView's own 1h/4h bars follow the exchange session (13:30 UTC)
+            assert RECORDER_TFS == ("1m", "5m", "15m", "1d")
+            assert res == {"symbols": 1, "bars": 4}
             assert tv.calls[-1] == ("current_bars", (AAPL,), RECORDER_TFS)
             rows = await rt.db.fetchall("SELECT tf, source, close FROM candles WHERE symbol = ? ORDER BY tf", (AAPL,))
             assert sorted(r["tf"] for r in rows) == sorted(RECORDER_TFS)
@@ -49,27 +51,27 @@ def test_recorder_cycle_upserts_merges_and_skips_stale(runtime_factory, monkeypa
             starts = [e for e in rt.bus.recent(50, source="recorder") if "empezando a grabar" in e["message"]]
             assert len(starts) == 1
 
-            # same bar, new snapshot: high/low only widen, volume only grows, close follows
-            tv.bars[AAPL] = _snapshot(clock(), 10.5, high=12.0, low=9.0, volume=90.0)
-            assert (await rec.run_once([AAPL]))["bars"] == 6
-            row = await rt.db.fetchone("SELECT high, low, close, volume FROM candles WHERE symbol = ? AND tf = '1d'",
+            # same TradingView bar, new snapshot: open kept, high/low only widen, volume grows, close follows
+            tv.bars[AAPL] = _snapshot(clock(), 10.5, high=12.0, low=9.0, volume=120.0)
+            assert (await rec.run_once([AAPL]))["bars"] == 4
+            row = await rt.db.fetchone("SELECT open, high, low, close, volume FROM candles WHERE symbol = ? AND tf = '1d'",
                                        (AAPL,))
-            assert row == {"high": 12.0, "low": 9.0, "close": 10.5, "volume": 100.0}
+            assert row == {"open": 10.0, "high": 12.0, "low": 9.0, "close": 10.5, "volume": 120.0}
             assert (await rec.run_once([AAPL]))["bars"] == 0  # unchanged snapshot -> nothing written
 
             # market closed: the same values stamped one minute later are a stale repeat
             clock.advance(60)
-            tv.bars[AAPL] = _snapshot(clock(), 10.5, high=12.0, low=9.0, volume=90.0)
+            tv.bars[AAPL] = _snapshot(clock(), 10.5, high=12.0, low=9.0, volume=120.0)
             assert (await rec.run_once([AAPL]))["bars"] == 0 and rec.skipped_stale >= 1
             n_1m = await rt.db.fetchval("SELECT COUNT(*) FROM candles WHERE symbol = ? AND tf = '1m'", (AAPL,))
             assert n_1m == 1
             starts = [e for e in rt.bus.recent(50, source="recorder") if "empezando a grabar" in e["message"]]
             assert len(starts) == 1  # info event only the first time
             st = rec.status()
-            assert st["cycles"] == 4 and st["bars"] == 12 and st["recording"] == [AAPL] and st["running"] is False
+            assert st["cycles"] == 4 and st["bars"] == 8 and st["recording"] == [AAPL] and st["running"] is False
 
             # the recorded history is served by get_candles (history "recorder")
-            cs = await hub.get_candles(AAPL, "1h", 50)
+            cs = await hub.get_candles(AAPL, "15m", 50)
             assert len(cs) == 1 and cs.history == "recorder"
 
     asyncio.run(scenario())

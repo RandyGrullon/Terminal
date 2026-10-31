@@ -19,6 +19,7 @@ import {
   filterRows,
   normalizeRows,
   normalizeRuns,
+  onRunFinished,
   runStatusInfo,
   sortRows,
   type ScanFilter,
@@ -48,7 +49,7 @@ export default function ScannerPage() {
   const [text, setText] = useState('')
   const [sort, setSort] = useState<SortState>({ key: 'rank', dir: 'asc' })
 
-  const [selectedId, setSelectedId] = useState<number | null>(null) // null = follow the newest run
+  const [selectedId, setSelectedState] = useState<number | null>(null) // null = follow the newest run
   const [view, setView] = useState<View | null>(null)
   const [viewLoading, setViewLoading] = useState(true)
   const [viewError, setViewError] = useState<string | null>(null)
@@ -66,11 +67,17 @@ export default function ScannerPage() {
   const alive = useRef(true)
   const activeRef = useRef<ActiveRun | null>(null)
   const viewRef = useRef<View | null>(null)
+  const selectedRef = useRef<number | null>(null)
   const resSeq = useRef(0)
   const runsSeq = useRef(0)
   const runsTimer = useRef<number | null>(null)
   const recent = useRef(new Map<number, ScannerMsg>())
   viewRef.current = view
+
+  const setSelectedId = useCallback((id: number | null) => {
+    selectedRef.current = id
+    setSelectedState(id)
+  }, [])
 
   useEffect(() => {
     alive.current = true
@@ -140,12 +147,18 @@ export default function ScannerPage() {
       const a = activeRef.current
       if (!a || a.id !== runId || a.status !== 'running') return
       updateActive((x) => (x ? { ...x, status: 'done', progress: 1, message: message || 'Completado' } : x))
-      setSelectedId(null)
-      void loadResults(runId)
+      const next = onRunFinished(a, selectedRef.current, viewRef.current?.run?.id ?? null)
+      if (next === 'offer') {
+        // A background scan never replaces the run the user picked: the banner offers the new one instead.
+        setNewer(runId)
+      } else {
+        if (next === 'show') setSelectedId(null)
+        void loadResults(runId) // 'refresh': the run on screen (picked while running) gets its final results
+      }
       scheduleRunsReload()
       setAccKey((k) => k + 1)
     },
-    [loadResults, scheduleRunsReload, updateActive],
+    [loadResults, scheduleRunsReload, setSelectedId, updateActive],
   )
 
   const failRun = useCallback(
@@ -155,9 +168,13 @@ export default function ScannerPage() {
       const msg = message || 'El escaneo falló'
       updateActive((x) => (x ? { ...x, status: 'error', message: msg } : x))
       setRunError(msg)
+      // The run on screen (picked while running, or the newest one followed) now shows its error instead of "sigue en
+      // curso"; a failed run never replaces another run on screen.
+      const ended = { id: runId, startedByUser: false, followed: false }
+      if (onRunFinished(ended, selectedRef.current, viewRef.current?.run?.id ?? null) === 'refresh') void loadResults(runId)
       scheduleRunsReload()
     },
-    [scheduleRunsReload, updateActive],
+    [loadResults, scheduleRunsReload, updateActive],
   )
 
   const applyMsg = useCallback(
@@ -187,14 +204,26 @@ export default function ScannerPage() {
       }
       if (msg.event === 'started' && (!a || a.status !== 'running')) {
         // A background (automatic) scan started: follow its progress too.
-        updateActive(() => ({ id: msg.run_id, market: '', tf: '', progress: msg.progress ?? 0, message: msg.message ?? 'En curso…', status: 'running' }))
-      } else if (msg.event === 'done' && viewRef.current?.run?.id !== msg.run_id) {
-        setNewer(msg.run_id)
+        updateActive(() => ({
+          id: msg.run_id,
+          market: '',
+          tf: '',
+          progress: msg.progress ?? 0,
+          message: msg.message ?? 'En curso…',
+          status: 'running',
+          startedByUser: false,
+        }))
+      } else if (msg.event === 'done' || msg.event === 'error') {
+        // A run this page was not following ended (e.g. one queued behind another scan): reload it when it is the run
+        // on screen, otherwise only offer it (a failed run is not offered).
+        const ended = { id: msg.run_id, startedByUser: false, followed: false }
+        if (onRunFinished(ended, selectedRef.current, viewRef.current?.run?.id ?? null) === 'refresh') void loadResults(msg.run_id)
+        else if (msg.event === 'done') setNewer(msg.run_id)
       }
       scheduleRunsReload()
     })
     return off
-  }, [applyMsg, scheduleRunsReload, updateActive])
+  }, [applyMsg, loadResults, scheduleRunsReload, updateActive])
 
   // Fill market/tf of adopted runs and detect completion when the socket is down (runs list polling).
   useEffect(() => {
@@ -204,7 +233,15 @@ export default function ScannerPage() {
       if (!a && newest?.status === 'running' && isNum(newest.started_at) && Date.now() - newest.started_at < ADOPT_MAX_AGE_MS) {
         const r = newest
         const last = recent.current.get(r.id)
-        updateActive(() => ({ id: r.id, market: r.market, tf: r.tf, progress: last?.progress ?? 0, message: last?.message ?? r.message ?? 'En curso…', status: 'running' }))
+        updateActive(() => ({
+          id: r.id,
+          market: r.market,
+          tf: r.tf,
+          progress: last?.progress ?? 0,
+          message: last?.message ?? r.message ?? 'En curso…',
+          status: 'running',
+          startedByUser: false,
+        }))
       }
       return
     }
@@ -240,7 +277,7 @@ export default function ScannerPage() {
       if (!alive.current) return
       const id = res?.run_id
       if (!isNum(id)) throw new Error('El servidor no devolvió el identificador del escaneo')
-      updateActive(() => ({ id, market: params.market, tf: params.tf, progress: 0, message: 'Iniciando…', status: 'running' }))
+      updateActive(() => ({ id, market: params.market, tf: params.tf, progress: 0, message: 'Iniciando…', status: 'running', startedByUser: true }))
       const buffered = recent.current.get(id) // the socket can be faster than the HTTP response
       if (buffered) applyMsg(buffered)
       scheduleRunsReload()
@@ -257,14 +294,14 @@ export default function ScannerPage() {
       setNewer((n) => (n === id ? null : n))
       void loadResults(id)
     },
-    [loadResults],
+    [loadResults, setSelectedId],
   )
 
   const showLatest = useCallback(() => {
     setSelectedId(null)
     setNewer(null)
     void loadResults(null)
-  }, [loadResults])
+  }, [loadResults, setSelectedId])
 
   const onSort = useCallback(
     (key: SortKey) => setSort((s) => (s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: FIRST_DIR[key] })),
@@ -373,7 +410,7 @@ export default function ScannerPage() {
                   value={filter}
                   onChange={setFilter}
                 />
-                <TextInput value={text} onChange={setText} placeholder="Filtrar símbolo…" />
+                <TextInput value={text} onChange={setText} placeholder="Filtrar símbolo…" aria-label="Filtrar resultados por símbolo" />
               </div>
               {run.status === 'error' && run.message && (
                 <div className="notice" style={{ margin: 12 }}>

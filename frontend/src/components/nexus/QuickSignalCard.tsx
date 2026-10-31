@@ -59,6 +59,8 @@ function QuickSignalCard(props: { nexus: NexusResponse; onOpenTradingView: () =>
               <span>Actualizaciones del modelo</span>
               <span className="mono">{fmtInt(q.model_updates)}</span>
               <span>Calculado</span>
+              {/* q.time is when the read was computed (wall clock), not a bar open time: local date and clock, so no
+                  tf here (with '1d' / '1w' it would print only the UTC date, the next day on evenings in UTC-4). */}
               <span className="mono">{fmtBarTime(q.time)}</span>
             </div>
             {Array.isArray(q.reasons) && q.reasons.length > 0 && (

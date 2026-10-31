@@ -60,7 +60,8 @@ class FakeProviders:
             start = max(start, floor_time(self.listing_start, tf))
         return [bar(t) for t in range(start, end + 1, tf_s)]
 
-    async def fetch_latest(self, provider: str, native: str, tf: str, *, client: Any) -> list[dict]:
+    async def fetch_latest(self, provider: str, native: str, tf: str, *, client: Any, retries: int = 2,
+                           timeout: float | None = None) -> list[dict]:
         return (await self.fetch_candles(provider, native, tf, 2, client=client))[-2:]
 
 

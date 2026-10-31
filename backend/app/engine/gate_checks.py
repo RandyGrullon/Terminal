@@ -28,6 +28,13 @@ BASE_WEIGHT: dict[str, float] = {c[0]: c[2] for c in CHECK_DEFS}
 WAITABLE: set[str] = {c[0] for c in CHECK_DEFS if c[3]}
 EDGE_MIN_N = 8
 LOSS_STREAK_LIMIT = 4
+RR_CRITICAL = 1.2  # R:R to TP2 below which the plan's own stop/target geometry is poor (critical failure)
+
+
+def fee_text(fee_pct: float) -> str:
+    """Commission per side for messages: 0.1 -> '0,1 %', 0.005 -> '0,005 %'."""
+    body = f"{max(float(fee_pct), 0.0):.4f}".rstrip("0").rstrip(".") or "0"
+    return f"{body.replace('.', ',')} %"
 
 
 @dataclass
@@ -141,14 +148,24 @@ def run_checks(ctx: GateContext, side: int, lv: Levels, plan: PlanEV, p_dir: flo
         txt = f"{word_lvl} en {fmt.price(nearest)} a {fmt.num(dist / atr, 1)} ATR ({fmt.num(room_r, 1)}R)"
         out.append(CheckOut("room_to_target", room_r >= 1.5, False, round(room_r, 3), txt))
 
-    # 5. risk / reward to TP2 after fees
+    # 5. risk / reward to TP2 after fees. Critical only when the stop/target geometry itself is poor: when the
+    # commission is what drags the R:R down (a short stop in a quiet market), the check fails without vetoing the
+    # trade on its own (the expected-value check still charges the cost).
     rr = plan.rr
+    fee = fee_text(plan.fee_pct)
     if rr >= min_rr:
         out.append(CheckOut("risk_reward", True, False, round(rr, 3),
-                            f"R:R {fmt.num(rr, 1)} hasta TP2 tras comisiones (mínimo {fmt.num(min_rr, 1)})"))
+                            f"R:R {fmt.num(rr, 1)} hasta TP2 tras comisiones (comisión {fee} por lado; "
+                            f"mínimo {fmt.num(min_rr, 1)})"))
     else:
-        out.append(CheckOut("risk_reward", False, rr < 1.2, round(rr, 3),
-                            f"R:R {fmt.num(rr, 1)} tras comisiones: insuficiente (mínimo {fmt.num(min_rr, 1)})"))
+        fee_driven = plan.fee_pct > 0 and plan.rr_gross >= RR_CRITICAL
+        if plan.fee_pct > 0 and plan.rr_gross >= min_rr:
+            detail = (f"R:R {fmt.num(rr, 1)} tras comisiones ({fmt.num(plan.rr_gross, 1)} sin ellas): la comisión de "
+                      f"{fee} por lado pesa demasiado frente a un stop tan corto (mínimo {fmt.num(min_rr, 1)})")
+        else:
+            detail = (f"R:R {fmt.num(rr, 1)} tras comisiones (comisión {fee} por lado): insuficiente "
+                      f"(mínimo {fmt.num(min_rr, 1)})")
+        out.append(CheckOut("risk_reward", False, rr < RR_CRITICAL and not fee_driven, round(rr, 3), detail))
 
     # 6. over-extension
     if not (_ok(ctx.ema_slow) and _ok(ctx.rsi)):
@@ -216,12 +233,16 @@ def run_checks(ctx: GateContext, side: int, lv: Levels, plan: PlanEV, p_dir: flo
     # 11. expected value after fees
     ev = plan.ev_r
     ev_txt = f"EV {fmt.rr(ev, 2)} tras comisiones (P(TP1) {fmt.prob(plan.p_tp1)})"
+    # name the cost when it is what removes the edge (a positive plan before commissions)
+    fee_note = f"; sin la comisión ({fee} por lado) sería {fmt.rr(ev + plan.fee_r, 2)}" \
+        if plan.fee_r > 0 and ev + plan.fee_r > 0.05 else ""
     if ev > 0.05:
         out.append(CheckOut("expected_value", True, False, round(ev, 4), ev_txt))
     elif ev > 0:
-        out.append(CheckOut("expected_value", False, False, round(ev, 4), f"{ev_txt}: ventaja mínima"))
+        out.append(CheckOut("expected_value", False, False, round(ev, 4), f"{ev_txt}: ventaja mínima{fee_note}"))
     else:
-        out.append(CheckOut("expected_value", False, True, round(ev, 4), f"{ev_txt}: valor esperado negativo"))
+        out.append(CheckOut("expected_value", False, True, round(ev, 4),
+                            f"{ev_txt}: valor esperado negativo{fee_note}"))
 
     # 12. circuit breaker on losing streaks
     if ctx.closed_trades == 0:

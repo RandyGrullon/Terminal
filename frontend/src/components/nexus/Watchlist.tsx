@@ -1,5 +1,5 @@
-// Watchlist card: quotes refreshed every 15 s (paused while the tab is hidden), click to open a symbol,
-// star to add / remove the current symbol, x to remove a row.
+// Watchlist card: quotes refreshed every 15 s (paused while the tab is hidden; a stale quote is dimmed, never shown
+// as live), click to open a symbol, star to add / remove the current symbol, x to remove a row.
 import { memo, useCallback, useEffect, useState } from 'react'
 import { ListPlus, RefreshCw, Star, X } from 'lucide-react'
 import { api, errorMessage } from '../../api/client'
@@ -128,7 +128,12 @@ function Watchlist() {
                   <span className="chart-wl-ticker ellipsis">{it.ticker || parts.ticker}</span>
                   <span className="chart-wl-ex ellipsis">{it.exchange || parts.exchange || it.type}</span>
                 </div>
-                <span className="mono chart-wl-price">{fmtPrice(q?.price)}</span>
+                <span
+                  className={`mono chart-wl-price ${q?.stale ? 'muted' : ''}`}
+                  title={q?.stale ? 'Precio desactualizado: no hay datos recientes de este activo' : undefined}
+                >
+                  {fmtPrice(q?.price)}
+                </span>
                 <span className={`mono chart-wl-chg ${tone === 'muted' ? 'muted' : tone}`}>{fmtPct(q?.change_pct)}</span>
                 <button
                   type="button"

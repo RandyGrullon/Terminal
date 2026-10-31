@@ -1,6 +1,7 @@
 """Watcher of the NexusService: on every closed bar of a watched market (watchlist at `watch.tf`, or any market
-topic with WebSocket subscribers) it recomputes NEXUS, publishes `{"type": "nexus", ...}` on `market:SYMBOL:tf`,
-records signals / predictions / gate decisions and emits Spanish events."""
+topic with WebSocket subscribers) it recomputes NEXUS on the bars up to the one that closed (the hub already holds
+the seconds-old forming bar, which must not stand in for it), publishes `{"type": "nexus", ...}` on
+`market:SYMBOL:tf`, records signals / predictions / gate decisions of that bar and emits Spanish events."""
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +11,7 @@ from typing import Any
 
 from app import config
 from app.engine import fmt
-from app.util import clean_json, normalize_tf, now_ms, tf_seconds
+from app.util import clean_json, floor_time, normalize_tf, now_ms, tf_seconds
 
 WATCH_SYNC_S = 60.0
 ACTIONABLE = ("BUY", "SELL", "EXIT_LONG", "EXIT_SHORT")
@@ -19,6 +20,14 @@ CANDIDATE_KINDS = {"BUY": "long", "SELL": "short", "REJECTED_LONG": "long", "REJ
 
 async def _maybe_await(value: Any) -> Any:
     return await value if inspect.isawaitable(value) else value
+
+
+def gate_target_ms(decision_time: int, tf: str, time_stop_bars: int) -> int:
+    """gate_log.target_at (unix ms) of a decision taken at the close of the bar containing `decision_time`: the
+    close of the `time_stop_bars`-th bar after it, the window over which the evaluator judges every source
+    (app.sim.evaluator.gate_target_s) and the engine's own candidate horizon (TP1 before the SL within the time
+    stop). One convention for the watcher, the paper account and the scanner; never the wall clock of the write."""
+    return (floor_time(int(decision_time), tf) + (int(time_stop_bars) + 1) * tf_seconds(tf)) * 1000
 
 
 def market_topic(symbol: str, tf: str) -> str:
@@ -41,6 +50,7 @@ class WatchMixin:
         self._last_bar: dict[tuple[str, str], int] = {}
         self._last_action: dict[tuple[str, str], str] = {}
         self._processing: set[tuple[str, str]] = set()
+        self._pending_bar: dict[tuple[str, str], int] = {}  # newest closed bar that arrived while processing
         self._bg_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------ lifecycle
@@ -67,6 +77,7 @@ class WatchMixin:
                 pass
         for t in list(self._bg_tasks):
             t.cancel()
+        self._pending_bar.clear()
         hub = self.rt.hub
         if hub is not None:
             for symbol, tf in list(self._watch):
@@ -145,39 +156,66 @@ class WatchMixin:
             t = int(candle.get("time") or 0)
         except (TypeError, ValueError):
             return
-        if self._last_bar.get(key, -1) >= t or key in self._processing:
+        if self._last_bar.get(key, -1) >= t:
             return
         self._last_bar[key] = t
+        if key in self._processing:  # handled right after the running one (only the newest closed bar)
+            self._pending_bar[key] = t
+            return
+        self._start_processing(key, t)
+
+    def _start_processing(self, key: tuple[str, str], t: int) -> None:
         self._processing.add(key)
-        task = asyncio.create_task(self._process_guarded(key))
+        task = asyncio.create_task(self._process_guarded(key, t))
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
-    async def _process_guarded(self, key: tuple[str, str]) -> None:
+    async def _process_guarded(self, key: tuple[str, str], t: int | None = None) -> None:
         try:
-            await self.process_closed_bar(*key)
+            await self.process_closed_bar(*key, upto=t)
         except asyncio.CancelledError:
+            self._pending_bar.pop(key, None)
             raise
         except Exception as exc:
             if self._log.should_log(f"watch:{key}", 300):
                 self._emit("error", f"NEXUS {key[0]} {key[1]}: fallo al recalcular ({type(exc).__name__}: {exc})")
         finally:
             self._processing.discard(key)
+        nxt = self._pending_bar.pop(key, None)
+        if nxt is not None and (t is None or nxt > t) and config.BACKGROUND:
+            self._start_processing(key, nxt)
 
-    async def process_closed_bar(self, symbol: str, tf: str) -> dict | None:
-        """Recompute after a closed bar, publish it and persist signals / predictions / gate decisions."""
-        entry = await self._compute(symbol, tf, force=True)
-        resp = await self._with_macro(entry.resp)  # semáforo: event windows / extreme volatility
+    async def process_closed_bar(self, symbol: str, tf: str, upto: int | None = None) -> dict | None:
+        """Recompute after a closed bar, publish it and persist signals / predictions / gate decisions.
+
+        `upto` = open time of the bar that closed: the engine runs on the bars up to it, so the returned `current`,
+        the markers, signals, predictions, gate_log rows and events describe the decision taken at its close
+        (None = latest bars). The chart's message stays the live view (forming bar included, like /api/nexus),
+        computed after that decision and any semáforo veto of it are known."""
+        resp = await self._resolve(symbol, tf, force=True, upto=upto)  # + semáforo (event windows / volatility)
         if not resp.get("ok") or not resp.get("current"):
             return None
         symbol, tf = resp["symbol"], resp["tf"]
         cur = resp["current"]
         if self.rt.ws is not None:
+            view = (await self._live_view(symbol, tf) if upto is not None else None) or resp
             self.rt.ws.publish(market_topic(symbol, tf), {"type": "nexus", "symbol": symbol, "tf": tf,
-                                                          "current": cur, "markers": resp.get("markers") or []})
+                                                          "current": view["current"],
+                                                          "markers": view.get("markers") or []})
         markers_now = [m for m in resp.get("markers") or [] if m.get("time") == cur["time"]]
         await self._record(symbol, tf, resp, markers_now)
         return resp
+
+    async def _live_view(self, symbol: str, tf: str) -> dict | None:
+        """Live NexusResponse for the chart's WebSocket topic; None when no chart listens (a publish without
+        subscribers reaches nobody, so it is not computed) or it is not usable."""
+        if not self._ws_listeners(symbol, tf):
+            return None
+        try:
+            live = await self._resolve(symbol, tf)
+        except Exception:
+            return None
+        return live if live.get("ok") and live.get("current") else None
 
     # ------------------------------------------------------------------ persistence + events
 
@@ -197,7 +235,7 @@ class WatchMixin:
                 await self._write_signal(symbol, tf, cur, gates, now)
             await self._write_prediction(symbol, tf, cur, int(params.get("horizon") or 5), now, tf_ms)
             await self._write_gate_log(symbol, tf, cur, gates, markers_now, now,
-                                       int(params.get("time_stop_bars") or 48) * tf_ms)
+                                       gate_target_ms(int(cur["time"]), tf, int(params.get("time_stop_bars") or 48)))
         self._events(symbol, tf, cur, gates, markers_now, action != prev)
 
     async def _write_signal(self, symbol: str, tf: str, cur: dict, gates: dict, now: int) -> None:
@@ -241,7 +279,7 @@ class WatchMixin:
                 self._emit("warn", f"No se pudo guardar la predicción de {symbol}: {exc}")
 
     async def _write_gate_log(self, symbol: str, tf: str, cur: dict, gates: dict, markers_now: list[dict],
-                              now: int, horizon_ms: int) -> None:
+                              now: int, target_at: int) -> None:
         seen: set[str] = set()
         for m in markers_now:
             direction = CANDIDATE_KINDS.get(str(m.get("kind")))
@@ -259,7 +297,7 @@ class WatchMixin:
                     (symbol, tf, int(cur["time"]), direction, gate.get("verdict"), float(gate.get("score") or 0.0),
                      gate.get("win_prob"), gate.get("entry"), gate.get("sl"), gate.get("tp1"), gate.get("tp2"),
                      json.dumps(clean_json(checks)), 1 if str(m.get("kind")) in ("BUY", "SELL") else 0, now,
-                     now + horizon_ms),
+                     target_at),
                 )
             except Exception as exc:
                 if self._log.should_log("gate-write", 300):

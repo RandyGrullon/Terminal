@@ -62,7 +62,8 @@ export interface Quote {
   high: number | null
   low: number | null
   open: number | null
-  ts: number
+  ts: number // real time of this price (ms), not the time of the request
+  stale?: boolean // true when the price is older than ~2 min: never show or use it as a live price
 }
 
 export interface MarketInfo {
@@ -104,6 +105,7 @@ export interface CandlesResponse {
   history: HistoryKind
   note: string | null
   candles: Candle[]
+  stale?: boolean // newest bar clearly older than it should be (the Spanish reason is in `note`)
 }
 
 export interface WatchItem extends SymbolInfo {
@@ -186,11 +188,16 @@ export interface PositionState {
   unrealized_pct: number
   r_multiple: number
   bars_in_trade: number
-  ev_hold_r: number // expected value of holding, in R (negative => better to close)
+  // Expected value of holding, in R. NEXUS exits early (action EXIT_*) only when it is <= -0.10 R with the score
+  // against (or negative with a concrete risk flag); a negative value while the action is HOLD_* is a warning
+  // ("Vigila la salida"), not an order to close.
+  ev_hold_r: number
 }
 
 export interface NexusWarning {
-  code: string // EARLY_EXIT | NEAR_SL | DIVERGENCE | VOL_SPIKE | TIME_STOP | COUNTER_TREND | REGIME_CHANGE | LOW_DATA | ...
+  // EARLY_EXIT (an actual early exit, action EXIT_*) | WATCH_EXIT (negative EV of holding while NEXUS keeps the
+  // position: "vigila la salida") | NEAR_SL | DIVERGENCE | VOL_SPIKE | TIME_STOP | COUNTER_TREND | REGIME_CHANGE | LOW_DATA | ...
+  code: string
   severity: 'info' | 'warn' | 'critical'
   message: string
 }
@@ -287,7 +294,8 @@ export interface NexusStats {
   avg_r: number | null
   expectancy_pct: number | null
   rejected_signals: number
-  rejected_would_win_rate: number | null // of the signals the gate rejected, % that would have won
+  rejected_would_win_rate: number | null // of the rejected signals whose outcome is known, fraction that would have won
+  rejected_resolved?: number // rejected signals whose outcome is known (denominator of rejected_would_win_rate)
 }
 
 export interface NexusLearning {
@@ -311,7 +319,8 @@ export interface QuickSignal {
   price: number | null
   reasons: string[]
   model_updates: number
-  time: number
+  time: number // unix s when the read was computed (wall clock), not a bar time
+  stale?: boolean // read computed from outdated candles (the first reason says so); present only when true
 }
 
 export interface NexusResponse {
@@ -345,7 +354,7 @@ export interface NexusModel {
   tf: string
   learning: NexusLearning
   calibration: CalibrationBin[]
-  rolling: { time: number; hit_rate: number; brier: number }[]
+  rolling: { time: number; hit_rate: number; brier: number }[] // time = bar time of the model's timeframe
   experts: { id: string; label: string; description: string }[]
 }
 
@@ -430,7 +439,8 @@ export interface BacktestMetrics {
   fees_paid: number
   rejected_signals: number
   rejected_would_win_rate: number | null
-  gate_lift_pct: number | null // return improvement of gated vs ungated run
+  rejected_resolved?: number // rejected signals whose outcome is known (denominator of rejected_would_win_rate)
+  gate_lift_pct: number | null // gated − ungated total_return_pct, in percentage points
 }
 
 export interface BacktestResult {
@@ -530,7 +540,9 @@ export interface Position {
   origin: 'manual' | 'auto' | 'sim' | 'script'
   gate_verdict: Verdict | null
   gate_score: number | null
-  advice: string | null // live NEXUS advice for this position ("Cerrar ya: EV negativo")
+  // Live NEXUS advice for this position: "Cerrar ya: …" only when NEXUS itself leaves this side (EXIT_* or the opposite
+  // entry); a negative EV of holding is "Vigila la salida: …", a warning, not an order to close.
+  advice: string | null
   warnings: NexusWarning[]
 }
 
@@ -604,6 +616,12 @@ export interface ScanRow {
   tp2: number | null
   expected_move_pct: number | null
   reasons: string[]
+  // Deep rows: NEXUS' own action at the last bar (`action` above is the quick model's) and whether the gate TOMAR is a
+  // real opportunity (TOMAR plus BUY for a long / SELL for a short). A TOMAR without it is "Filtro favorable · sin
+  // señal NEXUS" and is not counted as TOMAR. null on rows stored before these fields existed, absent on older
+  // servers: those runs did not check NEXUS' signal (the UI then falls back to the gate verdict).
+  nexus_action?: NexusAction | null
+  opportunity?: boolean | null
 }
 
 export interface PredictionRow {
@@ -654,11 +672,14 @@ export interface LearningSummary {
     decisions: number
     taken: number
     avoided: number
-    avoided_would_lose_rate: number | null // % of AVOID verdicts that would indeed have lost
-    taken_win_rate: number | null
+    // of the judged AVOID verdicts, fraction that would NOT have reached TP1 before the SL (a loss or a time stop)
+    avoided_would_lose_rate: number | null
+    taken_win_rate: number | null // of the judged TAKE verdicts, fraction that reached TP1 before the SL
+    avoided_judged?: number // AVOID verdicts whose outcome is known (denominator of avoided_would_lose_rate)
+    taken_judged?: number // TAKE verdicts whose outcome is known (denominator of taken_win_rate)
   }
   predictions: PredictionStats
-  timeline: { time: number; hit_rate: number; brier: number; n: number }[]
+  timeline: { time: number; hit_rate: number; brier: number; n: number }[] // one point per UTC day (time = 00:00 UTC)
 }
 
 // ----------------------------------------------------------------------------- PyChart scripting
@@ -776,7 +797,11 @@ export interface Health {
   uptime_s: number
   server_time: number
   db: { path: string; size_bytes: number; dialect?: 'sqlite' | 'postgres' }
-  auth?: 'none' | 'supabase'
+  // 'required' only in the anonymous liveness answer of cloud mode ({ok, version, auth, role, server_time}).
+  auth?: 'none' | 'supabase' | 'required'
+  // single = the only instance · leader = the active instance on a shared PostgreSQL · standby = waiting for the
+  // active one to stop (its services do not run and the rest of the API answers 503 with Retry-After).
+  role?: 'single' | 'leader' | 'standby'
   services: Record<string, Record<string, unknown>>
   load_errors: string[]
 }

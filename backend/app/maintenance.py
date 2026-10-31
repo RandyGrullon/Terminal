@@ -1,12 +1,18 @@
 """Data retention. Keeps the database lean (essential on Supabase's free 500 MB tier, nice to have locally):
-fine-grained candles, old events and resolved learning records are pruned periodically."""
+fine-grained candles, old events and resolved learning records are pruned periodically.
+
+The scanner writes one prediction per scanned asset and run (~16 k rows a day with the default background scan), so
+its resolved rows are kept for a month only: totals, hit rates, calibration and the daily charts come from the
+`prediction_daily` aggregates (app.sim.evaluator), which are kept much longer. Scan results are kept for the latest
+runs only, and NEXUS memories of symbols nobody has analysed for months are dropped (re-learned from history if the
+symbol is opened again)."""
 from __future__ import annotations
 
 import asyncio
 from typing import Any
 
 from app import config
-from app.util import now_ms, now_s
+from app.util import now_ms
 
 DAY = 86400
 # Candle retention per timeframe (days). Higher timeframes are kept forever.
@@ -14,7 +20,11 @@ CANDLE_RETENTION_DAYS = {"1m": 10, "3m": 30, "5m": 45, "15m": 120, "30m": 180, "
 SIM_CANDLE_DAYS = 7  # SIM:* bars are regenerated on demand
 EVENT_DAYS = 60
 RESOLVED_DAYS = 365
-SCAN_DAYS = 45
+SCANNER_RESOLVED_DAYS = 30  # resolved scanner predictions (their daily aggregates stay)
+DAILY_AGG_DAYS = 730  # prediction_daily rows
+SCAN_DAYS = 45  # scan_runs (one small row per run)
+SCAN_RESULT_RUNS = 100  # scan_results are kept for the newest runs only (≈ 1 day of background scans)
+NEXUS_MODEL_DAYS = 90  # model_state kind='nexus' not updated for this long
 
 
 class Maintenance:
@@ -52,19 +62,48 @@ class Maintenance:
                     self.rt.bus.emit("warn", "system", f"Mantenimiento de la base de datos falló: {exc}")
             await asyncio.sleep(6 * 3600)
 
-    async def run_once(self) -> None:
+    async def run_once(self, now: int | None = None) -> None:
         db = self.rt.db
-        s, ms = now_s(), now_ms()
+        ms = int(now) if now is not None else now_ms()
+        s = ms // 1000
         for tf, days in CANDLE_RETENTION_DAYS.items():
             await db.execute("DELETE FROM candles WHERE tf = ? AND time < ?", (tf, s - days * DAY))
         await db.execute("DELETE FROM candles WHERE symbol LIKE 'SIM:%' AND time < ?", (s - SIM_CANDLE_DAYS * DAY,))
         await db.execute("DELETE FROM events WHERE ts < ?", (ms - EVENT_DAYS * DAY * 1000,))
-        await db.execute("DELETE FROM predictions WHERE resolved = 1 AND created_at < ?", (ms - RESOLVED_DAYS * DAY * 1000,))
+        await self._prune_predictions(ms)
         await db.execute("DELETE FROM gate_log WHERE resolved = 1 AND created_at < ?", (ms - RESOLVED_DAYS * DAY * 1000,))
         old_runs = "SELECT id FROM scan_runs WHERE started_at < ?"
         cutoff = ms - SCAN_DAYS * DAY * 1000
         await db.execute(f"DELETE FROM scan_results WHERE run_id IN ({old_runs})", (cutoff,))
         await db.execute("DELETE FROM scan_runs WHERE started_at < ?", (cutoff,))
+        keep_from = await db.fetchval(
+            "SELECT id FROM scan_runs ORDER BY id DESC LIMIT 1 OFFSET ?", (SCAN_RESULT_RUNS - 1,)
+        )
+        if keep_from is not None:  # results of older runs (the run rows themselves stay, with their summary)
+            await db.execute("DELETE FROM scan_results WHERE run_id < ?", (int(keep_from),))
+        await db.execute("DELETE FROM model_state WHERE kind = 'nexus' AND updated_at < ?",
+                         (ms - NEXUS_MODEL_DAYS * DAY * 1000,))
         self.last_run = ms
         if self.rt.bus is not None:
             self.rt.bus.emit("debug", "system", "Mantenimiento de datos completado (retención aplicada)")
+
+    async def _prune_predictions(self, ms: int) -> None:
+        """Resolved predictions: a year in general, a month for the scanner's high-volume rows. The month rule only
+        runs once the daily aggregates exist (they keep the history of totals, hit rates and charts)."""
+        db = self.rt.db
+        try:
+            from app.sim.evaluator import ensure_daily_aggregates
+
+            await ensure_daily_aggregates(db)
+            aggregated = True
+        except Exception as exc:  # evaluator module missing or failing: keep the rows (only the yearly rule applies)
+            aggregated = False
+            if self.rt.bus is not None:
+                self.rt.bus.emit("warn", "system", f"Retención de predicciones del escáner aplazada: {exc}")
+        await db.execute("DELETE FROM predictions WHERE resolved = 1 AND created_at < ?",
+                         (ms - RESOLVED_DAYS * DAY * 1000,))
+        if not aggregated:
+            return
+        await db.execute("DELETE FROM predictions WHERE source = 'scanner' AND resolved = 1 AND created_at < ?",
+                         (ms - SCANNER_RESOLVED_DAYS * DAY * 1000,))
+        await db.execute("DELETE FROM prediction_daily WHERE day < ?", (ms // 1000 - DAILY_AGG_DAYS * DAY,))

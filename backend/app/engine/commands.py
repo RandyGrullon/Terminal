@@ -57,8 +57,27 @@ async def _analysis(ctx: CommandContext) -> tuple[str, str, dict]:
             for r in (quick.get("reasons") or [])[:5]:
                 ctx.print(f"  · {r}", "muted")
         ctx.data = resp
-        ctx.fail("NEXUS necesita más historial para este activo")
+        ctx.fail("Datos desactualizados: NEXUS no analiza este activo hasta que lleguen velas nuevas"
+                 if _is_stale(resp) else "NEXUS necesita más historial para este activo")
     return sym, tf, resp
+
+
+def _is_stale(resp: dict) -> bool:
+    """ok=false because the candles are stale (see NexusService._stale), not because history is short."""
+    return "desactualizad" in str(resp.get("message") or "").lower()
+
+
+def _rejected_text(st: dict) -> str:
+    """Rejected signals with the size of the sample behind the rate (it is computed over the resolved ones only)."""
+    n = int(st.get("rejected_signals") or 0)
+    resolved = int(st.get("rejected_resolved") or 0)
+    if not n:
+        return "0"
+    if not resolved:
+        return f"{n} (ninguna resuelta todavía)"
+    small = "; muestra pequeña, sin evidencia suficiente" if resolved < 30 else ""
+    return (f"{n} (resueltas {resolved}: el {fmt.prob(st.get('rejected_would_win_rate'))} habría alcanzado TP1 "
+            f"antes del stop{small})")
 
 
 def _print_warnings(ctx: CommandContext, cur: dict) -> None:
@@ -88,8 +107,7 @@ async def _signal(ctx: CommandContext) -> None:
     _print_warnings(ctx, cur)
     st = resp.get("stats") or {}
     ctx.print(f"Histórico: {st.get('trades', 0)} operaciones · acierto {fmt.prob(st.get('win_rate'))} · "
-              f"rechazadas por el filtro {st.get('rejected_signals', 0)} (habrían ganado "
-              f"{fmt.prob(st.get('rejected_would_win_rate'))})", "muted")
+              f"rechazadas por el filtro {_rejected_text(st)}", "muted")
     ctx.action("open_chart", symbol=sym, tf=tf)
     ctx.data = cur
 
@@ -242,7 +260,7 @@ async def _watchlist_signals(ctx: CommandContext) -> None:
             except Exception as exc:
                 return sym, None, type(exc).__name__
         if not resp.get("ok"):
-            return sym, None, "historial insuficiente"
+            return sym, None, "datos desactualizados" if _is_stale(resp) else "historial insuficiente"
         return sym, resp["current"], None
 
     results = await asyncio.gather(*(one(s) for s in symbols))

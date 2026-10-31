@@ -25,7 +25,7 @@ function AboutCard({ version }: { version: string | null }) {
         <p className="small text-2 set-p">
           Terminal de investigación local: gráficos de cualquier activo de TradingView, el motor autoadaptativo NEXUS con niveles «hasta
           aquí» y salidas anticipadas, y el filtro <strong>«¿Tomo la operación?»</strong>, que te dice cuándo NO entrar y cuándo sí. Todo se
-          guarda en una base de datos en tu equipo.
+          guarda en tu propia base de datos: SQLite en tu equipo o, en modo nube, tu Postgres de Supabase.
         </p>
         <div className="col gap-1">
           <h4 className="row gap-1">

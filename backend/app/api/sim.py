@@ -36,7 +36,7 @@ class BacktestRequest(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     initial_capital: float = 10000.0
     risk_pct: float = 1.0
-    fee_pct: float = 0.1
+    fee_pct: float | None = None  # % per side; None = the asset class's cost (settings risk.fee_pct_by_class)
     slippage_pct: float = 0.02
     use_gate: bool = True
 
@@ -187,7 +187,7 @@ async def backtest(req: BacktestRequest) -> dict:
             req.params or None,
             initial_capital=float(req.initial_capital),
             risk_pct=float(req.risk_pct),
-            fee_pct=float(req.fee_pct),
+            fee_pct=float(req.fee_pct) if req.fee_pct is not None else None,
             slippage_pct=float(req.slippage_pct),
             use_gate=bool(req.use_gate),
         )

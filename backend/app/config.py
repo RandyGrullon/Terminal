@@ -33,6 +33,23 @@ ALLOWED_EMAILS = [e.strip().lower() for e in os.environ.get("NEXUS_ALLOWED_EMAIL
 # Browser origins allowed to call the API and open the WebSocket (e.g. https://nexus-terminal.vercel.app).
 CORS_ORIGINS = [o.strip().rstrip("/") for o in os.environ.get("NEXUS_CORS_ORIGINS", "").split(",") if o.strip()]
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+# Explicit opt-ins for risky cloud setups (the server refuses to start without them):
+# - any account of the Supabase project may sign in (no NEXUS_ALLOWED_EMAILS allowlist);
+# - a public server keeps its data in the container's local SQLite file (only safe with a mounted volume).
+ALLOW_ANY_SUPABASE_USER = os.environ.get("NEXUS_ALLOW_ANY_SUPABASE_USER", "0") == "1"
+ALLOW_LOCAL_DB = os.environ.get("NEXUS_ALLOW_LOCAL_DB", "0") == "1"
+
+
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        value = int(os.environ.get(name, "") or default)
+    except ValueError:
+        value = default
+    return min(max(value, lo), hi)
+
+
+# Memory cap of each PyChart sandbox process (keep it well below the host/VM memory; 2 scripts may run at once).
+SCRIPT_MEMORY_MB = _env_int("NEXUS_SCRIPT_MEMORY_MB", 1024, 128, 8192)
 
 # Honest identification for every outbound request (never impersonate a browser).
 USER_AGENT = f"NexusTerminal/{VERSION} (+local research tool)"
@@ -54,7 +71,19 @@ DEFAULT_SETTINGS: dict = {
     # Risk / account
     "risk.account_size": 10000.0,
     "risk.per_trade_pct": 1.0,
-    "risk.fee_pct": 0.1,
+    "risk.fee_pct": 0.1,  # % per side for crypto and any asset class missing from risk.fee_pct_by_class
+    # Typical round-trip cost per side (commission + spread) by asset class (app.data.symbols.asset_class_of):
+    # a single crypto-sized fee would make the gate veto every low-volatility market (forex, indices...).
+    "risk.fee_pct_by_class": {
+        "forex": 0.005,
+        "index": 0.01,
+        "futures": 0.01,
+        "bond": 0.01,
+        "commodity": 0.02,
+        "cfd": 0.02,
+        "stock": 0.02,
+        "fund": 0.02,
+    },
     "risk.slippage_pct": 0.02,
     # NEXUS engine
     # Calibrated on real 1h crypto data: |score| p90 ≈ 0.21-0.24, p99 ≈ 0.35-0.53. 0.20 yields ~30 candidates per

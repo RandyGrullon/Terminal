@@ -21,6 +21,7 @@ import {
   fromTs,
   outputData,
   positionLevels,
+  timeScaleFor,
   toCandleData,
   toHistogramData,
   toLineData,
@@ -38,6 +39,7 @@ import {
   candleIndexAt,
   cleanBars,
   cleanCandles,
+  clipBarsFrom,
   createEmitter,
   groupMarkersByTime,
   isFiniteNumber,
@@ -71,6 +73,8 @@ export interface NexusChartHandle {
 interface Props {
   /** `${symbol}|${tf}`: the view (zoom) is reset only when this changes. */
   viewKey: string
+  /** Timeframe of the data: 1d / 1w bars are drawn with their UTC session date, intraday bars in local time. */
+  tf: string
   candles: Candle[] | null
   nexus: NexusResponse | null
   indicators: ResolvedIndicator[]
@@ -167,11 +171,13 @@ function removeStructure(chart: IChartApi, s: Structure): void {
 }
 
 const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props, ref) {
-  const { viewKey, candles, nexus, indicators, toggles, preview, entryThreshold } = props
-  const { ref: boxRef, chart } = useChart()
+  const { viewKey, tf, candles, nexus, indicators, toggles, preview, entryThreshold } = props
+  const { ref: boxRef, chart } = useChart({ timeScale: timeScaleFor(tf) })
   const baseRef = useRef<BaseSeries | null>(null)
   const structRef = useRef<Structure | null>(null)
   const candleArrRef = useRef<Candle[]>([])
+  /** Timeframe of the candles on screen (live updates and the crosshair convert times with it). */
+  const drawnTfRef = useRef<string>(tf)
   const viewKeyRef = useRef<string | null>(null)
   const coneViewKeyRef = useRef<string | null>(null)
   const userMovedRef = useRef(false)
@@ -193,9 +199,17 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
   }, [])
 
   const ok = !!nexus?.ok
-  const bars = useMemo(() => (ok && nexus ? cleanBars(nexus.bars) : null), [ok, nexus?.bars]) // eslint-disable-line react-hooks/exhaustive-deps
+  // The NEXUS window may start before the first loaded candle (anchored learning window): draw it from there on.
+  const firstCandle = candles && candles.length ? candles[0].time : null
+  const bars = useMemo(
+    () => (ok && nexus ? clipBarsFrom(cleanBars(nexus.bars, tf), firstCandle) : null),
+    [ok, nexus?.bars, tf, firstCandle], // eslint-disable-line react-hooks/exhaustive-deps
+  )
   const current = ok ? (nexus?.current ?? null) : null
-  const markers = ok ? (nexus?.markers ?? null) : null
+  const markers = useMemo(() => {
+    const list = ok ? (nexus?.markers ?? null) : null
+    return list && firstCandle !== null ? list.filter((m) => m.time >= firstCandle) : list
+  }, [ok, nexus?.markers, firstCandle]) // eslint-disable-line react-hooks/exhaustive-deps
   const prediction = ok ? (nexus?.prediction ?? null) : null
 
   const resetView = useCallback(() => {
@@ -208,7 +222,7 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
         scale.fitContent()
         return
       }
-      const lastIdx = scale.timeToIndex(ts(arr[arr.length - 1].time), true) ?? arr.length - 1
+      const lastIdx = scale.timeToIndex(ts(arr[arr.length - 1].time, drawnTfRef.current), true) ?? arr.length - 1
       scale.setVisibleLogicalRange({ from: lastIdx - RECENT_BARS, to: lastIdx + coneLenRef.current + 4 })
     } catch (err) {
       console.warn('[NexusChart] no se pudo ajustar la vista', err)
@@ -266,7 +280,7 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
         return
       }
       hoveringRef.current = true
-      const t = fromTs(param.time)
+      const t = fromTs(param.time, drawnTfRef.current)
       hoverBus.emit(t)
       let list: ChartMarker[] | undefined
       if (param.paneIndex === undefined || param.paneIndex === 0) {
@@ -320,15 +334,22 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
     }
   }, [chart, boxRef, hoverBus, tipBus])
 
+  // ------------------------------------------------------------------ time axis (1d / 1w: dates without a clock)
+  useEffect(() => {
+    if (!chart) return
+    guard('eje de tiempo', () => chart.applyOptions({ timeScale: timeScaleFor(tf) }))
+  }, [chart, tf, guard])
+
   // ------------------------------------------------------------------ candles + volume
   useEffect(() => {
     const b = baseRef.current
     if (!chart || !b) return
     guard('velas', () => {
-      const arr = cleanCandles(candles)
+      const arr = cleanCandles(candles, tf)
       candleArrRef.current = arr
-      b.candles.setData(toCandleData(arr))
-      b.volume.setData(toVolumeData(arr))
+      drawnTfRef.current = tf
+      b.candles.setData(toCandleData(arr, tf))
+      b.volume.setData(toVolumeData(arr, tf))
       if (arr.length) {
         const d = priceDecimals(arr[arr.length - 1].close)
         pricePrecisionRef.current = d
@@ -342,7 +363,7 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
       }
       if (!hoveringRef.current) hoverBus.emit(null)
     })
-  }, [chart, candles, viewKey, guard, resetView, hoverBus])
+  }, [chart, candles, tf, viewKey, guard, resetView, hoverBus])
 
   // ------------------------------------------------------------------ NEXUS EMAs
   useEffect(() => {
@@ -355,11 +376,11 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
         b.emaTrend.setData([])
         return
       }
-      b.emaFast.setData(toLineData(bars.time, bars.ema_fast))
-      b.emaSlow.setData(toLineData(bars.time, bars.ema_slow))
-      b.emaTrend.setData(toLineData(bars.time, bars.ema_trend))
+      b.emaFast.setData(toLineData(bars.time, bars.ema_fast, tf))
+      b.emaSlow.setData(toLineData(bars.time, bars.ema_slow, tf))
+      b.emaTrend.setData(toLineData(bars.time, bars.ema_trend, tf))
     })
-  }, [chart, bars, toggles.ema, guard])
+  }, [chart, bars, tf, toggles.ema, guard])
 
   // ------------------------------------------------------------------ markers
   const visibleMarkers = useMemo(
@@ -370,18 +391,18 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
     const b = baseRef.current
     if (!chart || !b) return
     markersByTimeRef.current = groupMarkersByTime(visibleMarkers)
-    guard('marcadores', () => b.markers.set(visibleMarkers))
-  }, [chart, visibleMarkers, guard])
+    guard('marcadores', () => b.markers.set(visibleMarkers, tf))
+  }, [chart, visibleMarkers, tf, guard])
 
   // ------------------------------------------------------------------ historical SL/TP step lines
   useEffect(() => {
     const b = baseRef.current
     if (!chart || !b) return
     guard('niveles históricos', () => {
-      if (bars && toggles.levels) b.trade.set(bars)
+      if (bars && toggles.levels) b.trade.set(bars, tf)
       else b.trade.clear()
     })
-  }, [chart, bars, toggles.levels, guard])
+  }, [chart, bars, tf, toggles.levels, guard])
 
   // ------------------------------------------------------------------ open position / proposed entry lines
   const position = current?.position ?? null
@@ -438,13 +459,13 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
             isFiniteNumber(p.p90),
         )
         .sort((a, c) => a.time - c.time)
-      const clean = pick(pts, ascendingIndices(pts.map((p) => p.time)))
-      if (clean.length === 0 || (anchor && ts(clean[0].time) <= ts(anchor.time))) {
+      const clean = pick(pts, ascendingIndices(pts.map((p) => p.time), tf))
+      if (clean.length === 0 || (anchor && ts(clean[0].time, tf) <= ts(anchor.time, tf))) {
         b.cone.clear()
         coneLenRef.current = 0
         return
       }
-      b.cone.set(clean, anchor ?? undefined)
+      b.cone.set(clean, anchor ?? undefined, tf)
       coneLenRef.current = clean.length
       if (coneViewKeyRef.current !== viewKey && viewKeyRef.current === viewKey && !userMovedRef.current) {
         coneViewKeyRef.current = viewKey
@@ -453,7 +474,7 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
     })
     // current is represented by its time/price (the cone only needs the anchor)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chart, prediction, toggles.cone, anchorTime, anchorPrice, viewKey, guard, resetView])
+  }, [chart, prediction, toggles.cone, anchorTime, anchorPrice, viewKey, tf, guard, resetView])
 
   // ------------------------------------------------------------------ volume visibility
   useEffect(() => {
@@ -546,15 +567,15 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
         score.guides.clear()
         return
       }
-      score.hist.setData(toHistogramData(bars.time, bars.score, withAlpha(COLORS.pos, 0.6), withAlpha(COLORS.neg, 0.6)))
-      score.prob.setData(toLineData(bars.time, bars.prob_up.map((p) => (isFiniteNumber(p) ? p * 2 - 1 : null))))
+      score.hist.setData(toHistogramData(bars.time, bars.score, tf, withAlpha(COLORS.pos, 0.6), withAlpha(COLORS.neg, 0.6)))
+      score.prob.setData(toLineData(bars.time, bars.prob_up.map((p) => (isFiniteNumber(p) ? p * 2 - 1 : null)), tf))
       score.guides.set([
         { price: entryThreshold, color: COLORS.pos, title: 'UMBRAL COMPRA', style: LineStyle.Dashed },
         { price: -entryThreshold, color: COLORS.neg, title: 'UMBRAL VENTA', style: LineStyle.Dashed },
         { price: 0, color: COLORS.muted, title: '', style: LineStyle.Dotted, axisLabel: false },
       ])
     })
-  }, [chart, structure.key, bars, entryThreshold, guard])
+  }, [chart, structure.key, bars, tf, entryThreshold, guard])
 
   // indicator data
   useEffect(() => {
@@ -570,7 +591,7 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
           s.levels?.clear()
           continue
         }
-        const idx = ascendingIndices(r.time)
+        const idx = ascendingIndices(r.time, tf)
         const time = pick(r.time, idx)
         const first = s.outputs[0] ? r.outputs[s.outputs[0].output.key] : undefined
         const fmt = priceFormat(s.spec.overlay ? pricePrecisionRef.current : precisionFor(first))
@@ -580,7 +601,7 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
             o.series.setData([])
             continue
           }
-          o.series.setData(outputData(o.output, time, pick(values, idx)))
+          o.series.setData(outputData(o.output, time, pick(values, idx), tf))
           o.series.applyOptions({ priceFormat: fmt })
         }
         s.levels?.set(
@@ -590,7 +611,7 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
         )
       }
     })
-  }, [chart, structure.key, indicators, guard])
+  }, [chart, structure.key, indicators, tf, guard])
 
   // ------------------------------------------------------------------ imperative API
   useImperativeHandle(
@@ -603,9 +624,10 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
         const last = arr.length ? arr[arr.length - 1] : null
         if (!last || c.time < last.time) return
         const volume = isFiniteNumber(c.volume) ? c.volume : 0
+        const t = ts(c.time, drawnTfRef.current)
         try {
-          b.candles.update({ time: ts(c.time), open: c.open, high: c.high, low: c.low, close: c.close })
-          b.volume.update({ time: ts(c.time), value: volume, color: c.close >= c.open ? COLORS.upVol : COLORS.downVol })
+          b.candles.update({ time: t, open: c.open, high: c.high, low: c.low, close: c.close })
+          b.volume.update({ time: t, value: volume, color: c.close >= c.open ? COLORS.upVol : COLORS.downVol })
         } catch (err) {
           console.warn('[NexusChart] vela en vivo descartada', err)
           return

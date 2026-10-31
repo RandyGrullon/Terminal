@@ -1,7 +1,8 @@
 // Hero card of the chart workspace: what NEXUS says right now and — above all — whether to take a trade.
-// Action + advice, "¿Comprar ahora?" / "¿Vender ahora?" gate verdicts (click for the full checklist),
-// probability / score / confidence meters, regime, warnings (early exit highlighted), the open position with its
-// "hasta aquí" stop and the EV of holding, expert contributions, prediction, learning and honest statistics.
+// Action + advice, "¿Comprar ahora?" / "¿Vender ahora?" gate verdicts (click for the full checklist; a TOMAR without
+// the matching NEXUS signal is only "Filtro favorable"), probability / score / confidence meters, regime, warnings
+// (a real early exit highlighted), the open position with its "hasta aquí" stop and the EV of holding, expert
+// contributions, prediction, learning and honest statistics ("x de n", never a small sample sold as proof).
 import { memo, useMemo, useState, type ReactNode } from 'react'
 import {
   Activity,
@@ -18,7 +19,17 @@ import {
   Target,
   TriangleAlert,
 } from 'lucide-react'
-import type { Contribution, GateResult, NexusCurrent, NexusResponse, NexusWarning, PositionState, Prediction, Timeframe } from '../../api/types'
+import type {
+  Contribution,
+  GateResult,
+  NexusAction,
+  NexusCurrent,
+  NexusResponse,
+  NexusWarning,
+  PositionState,
+  Prediction,
+  Timeframe,
+} from '../../api/types'
 import {
   REGIME_LABEL,
   fmtAgo,
@@ -35,9 +46,12 @@ import {
   toneColor,
   verdictTone,
 } from '../../lib/format'
+import { plural } from '../../lib/plural'
 import { ActionBadge, Badge, Card, Disclaimer, Empty, ErrorBox, IconButton, Loading, Meter, Spinner, VerdictBadge } from '../ui'
 import { asFraction, isFiniteNumber } from '../chart/chartUtils'
-import GateChecklist from './GateChecklist'
+import { evidenceText, evidenceTone, filterEvidence, fmtTally } from '../brain/evidence'
+import { EARLY_EXIT_EV, exitAdvice, isExitAction, shownWarnings } from '../sim/labels'
+import GateChecklist, { GateVerdictBadge, gateSignal, gateSummary, noSignalNote } from './GateChecklist'
 import QuickSignalCard from './QuickSignalCard'
 import './nexus.css'
 
@@ -83,7 +97,14 @@ function MeterRow(props: { label: string; value: string; tone: string; title?: s
 
 // ----------------------------------------------------------------------------- gate rows
 
-function GateRow(props: { question: string; gate: GateResult | undefined; open: boolean; onToggle: () => void }) {
+function GateRow(props: {
+  question: string
+  gate: GateResult | undefined
+  action: NexusAction
+  actionLabel: string
+  open: boolean
+  onToggle: () => void
+}) {
   const { gate } = props
   if (!gate) {
     return (
@@ -95,20 +116,27 @@ function GateRow(props: { question: string; gate: GateResult | undefined; open: 
       </div>
     )
   }
-  const tone = verdictTone(gate.verdict)
+  // A gate TOMAR is an opportunity only with NEXUS' own entry signal in that direction.
+  const favorable = gateSignal(gate, props.action) === 'favorable'
+  const tone = favorable ? 'info' : verdictTone(gate.verdict)
+  const summary = gateSummary(gate, props.action)
+  const title = favorable
+    ? `Filtro de operaciones: ${gate.verdict_label} ${Math.round(gate.score)}/100, pero NEXUS no da señal de entrada en esta dirección`
+    : `Filtro de operaciones: ${gate.verdict_label}. Puntuación ${Math.round(gate.score)}/100`
   return (
     <div className={`chart-gate-wrap ${props.open ? 'open' : ''}`}>
       <button type="button" className={`chart-gate-row ${tone}`} onClick={props.onToggle} aria-expanded={props.open}>
         <div className="row between gap-2">
           <span className="chart-gate-q">{props.question}</span>
           <span className="row gap-1">
-            <span title={`Filtro de operaciones: ${gate.verdict_label}. Puntuación ${Math.round(gate.score)}/100`}>
-              <VerdictBadge verdict={gate.verdict} score={gate.score} label={gate.verdict_label || undefined} />
+            <span title={title}>
+              <GateVerdictBadge gate={gate} action={props.action} />
             </span>
             {props.open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
           </span>
         </div>
-        {gate.summary && <div className="chart-gate-summary">{gate.summary}</div>}
+        {summary && <div className="chart-gate-summary">{summary}</div>}
+        {favorable && <div className="chart-gate-nosignal">{noSignalNote(gate.direction, props.actionLabel)}</div>}
       </button>
       {props.open && <GateChecklist gate={gate} />}
     </div>
@@ -117,23 +145,31 @@ function GateRow(props: { question: string; gate: GateResult | undefined; open: 
 
 // ----------------------------------------------------------------------------- warnings
 
-function Warnings({ warnings }: { warnings: NexusWarning[] }) {
+/** `exiting`: NEXUS closes the position on this bar. Only then is EARLY_EXIT the red "Salida anticipada" alert. */
+function Warnings({ warnings, exiting }: { warnings: NexusWarning[]; exiting: boolean }) {
+  const isEarly = (w: NexusWarning) => exiting && w.code === 'EARLY_EXIT'
   const list = [...warnings].sort((a, b) => {
-    const ea = a.code === 'EARLY_EXIT' ? -1 : 0
-    const eb = b.code === 'EARLY_EXIT' ? -1 : 0
+    const ea = isEarly(a) ? -1 : 0
+    const eb = isEarly(b) ? -1 : 0
     return ea - eb || (SEVERITY_RANK[a.severity] ?? 3) - (SEVERITY_RANK[b.severity] ?? 3)
   })
   return (
     <div className="col gap-1">
       {list.map((w, i) => {
-        const early = w.code === 'EARLY_EXIT'
+        const early = isEarly(w)
         const Icon = early ? Siren : w.severity === 'info' ? Info : TriangleAlert
+        // While NEXUS keeps the position its EARLY_EXIT message already says "vigila la salida": no exit label.
+        const label = w.code === 'EARLY_EXIT' && !early ? null : WARNING_LABEL[w.code]
+        // A message that already opens with the label ("Salida anticipada: …") is not prefixed twice.
+        const raw = String(w.message ?? '').trim()
+        const dup = !!label && raw.toLowerCase().startsWith(label.toLowerCase()) && /^($|[\s:])/.test(raw.slice(label.length))
+        const message = dup && label ? raw.slice(label.length).replace(/^\s*:?\s*/, '') : raw
         return (
           <div key={`${w.code}-${i}`} className={`chart-warn ${w.severity} ${early ? 'early' : ''}`}>
             <Icon size={early ? 16 : 14} style={{ flex: 'none', marginTop: 1 }} />
             <div className="grow">
-              {WARNING_LABEL[w.code] && <b>{WARNING_LABEL[w.code]}: </b>}
-              {w.message}
+              {label && <b>{label}: </b>}
+              {message}
             </div>
           </div>
         )
@@ -149,10 +185,11 @@ function distLabel(level: number | null | undefined, price: number): string {
   return fmtPct(((level - price) / price) * 100, 2)
 }
 
-function PositionBlock({ pos, price }: { pos: PositionState; price: number }) {
+function PositionBlock({ pos, price, action }: { pos: PositionState; price: number; action: NexusAction }) {
   const long = pos.side === 'long'
   const ev = pos.ev_hold_r
-  const closeNow = isFiniteNumber(ev) && ev < 0
+  // "CERRAR AHORA" only when NEXUS itself exits (EXIT_*); a negative EV while it holds is a warning.
+  const advice = exitAdvice(action, ev)
   const hit = (n: number) => pos.tp_hits >= n
   return (
     <div className={`chart-pos ${long ? 'long' : 'short'}`}>
@@ -161,16 +198,28 @@ function PositionBlock({ pos, price }: { pos: PositionState; price: number }) {
           <Badge tone={long ? 'pos' : 'neg'}>{long ? 'LARGO' : 'CORTO'}</Badge>
           <b className="small">Posición NEXUS abierta</b>
         </span>
-        <span className="tiny muted">{fmtInt(pos.bars_in_trade)} velas</span>
+        <span className="tiny muted">{plural(pos.bars_in_trade, 'vela', 'velas')}</span>
       </div>
 
-      {closeNow ? (
+      {advice === 'exit' ? (
         <div className="chart-close-now" role="alert">
           <OctagonX size={20} style={{ flex: 'none' }} />
           <div>
             <div className="chart-close-now-title">CERRAR AHORA</div>
             <div className="small">
-              El valor esperado de mantener es <b>{fmtR(ev)}</b>: la operación se volvió mala y seguir dentro resta.
+              NEXUS da la señal de salida en esta vela{isFiniteNumber(ev) && <> · EV de mantener <b>{fmtR(ev)}</b></>}.
+            </div>
+          </div>
+        </div>
+      ) : advice === 'watch' ? (
+        <div className="chart-watch-exit" role="status">
+          <TriangleAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
+          <div>
+            <b>Vigila la salida</b> · EV de mantener <b className="mono">{fmtR(ev)}</b>
+            <div className="tiny">
+              NEXUS mantiene la posición: un EV negativo es un aviso, no una orden de cerrar. Si decide salir antes del stop, lo
+              indicará con CERRAR {long ? 'LARGO' : 'CORTO'} (por ejemplo, con un EV de {fmtR(EARLY_EXIT_EV)} o menos y la
+              puntuación en contra).
             </div>
           </div>
         </div>
@@ -251,7 +300,7 @@ function PredictionBlock({ pred, price }: { pred: Prediction; price: number }) {
   return (
     <div className="kv">
       <span>Horizonte</span>
-      <span className="mono">{fmtInt(pred.horizon_bars)} velas</span>
+      <span className="mono">{plural(pred.horizon_bars, 'vela', 'velas')}</span>
       <span>Probabilidad de subida</span>
       <span className="mono" style={{ color: toneColor(pred.prob_up >= 0.5 ? 'pos' : 'neg') }}>
         {fmtProb(pred.prob_up)}
@@ -337,11 +386,23 @@ function SignalPanel(props: Props) {
 
   const stats = nexus.stats
   const learning = nexus.learning
-  const rejectedWin = asFraction(stats?.rejected_would_win_rate)
-  const rejectedLose = rejectedWin === null ? null : 1 - rejectedWin
-  const winRate = asFraction(stats?.win_rate)
+  // Rejected signals compared with the trades NEXUS did take (not with a fixed 50 %), always as "x de n".
+  const evidence = stats
+    ? filterEvidence({
+        total: stats.rejected_signals,
+        resolved: stats.rejected_resolved,
+        winRate: stats.rejected_would_win_rate,
+        takenN: stats.trades,
+        takenWinRate: stats.win_rate,
+      })
+    : null
   const hitRate = asFraction(learning?.hit_rate)
   const regimeLabel = cur.regime_label || REGIME_LABEL[cur.regime] || cur.regime
+  const actionLabel = cur.action_label || cur.action
+  const exiting = isExitAction(cur.action)
+  // While NEXUS keeps a position with a negative EV of holding, the position block already shows it ("Vigila la salida").
+  const watchShown = !!cur.position && exitAdvice(cur.action, cur.position.ev_hold_r) === 'watch'
+  const warnings = shownWarnings(Array.isArray(cur.warnings) ? cur.warnings : [], cur.action, watchShown)
   const toggle = (side: 'long' | 'short') => setOpen((o) => (o === side ? null : side))
 
   return (
@@ -375,13 +436,27 @@ function SignalPanel(props: Props) {
           <div className="chart-gate-head">
             <ShieldCheck size={13} /> Filtro de operaciones · ¿la tomo?
           </div>
-          <GateRow question="¿Comprar ahora?" gate={cur.gate?.long} open={open === 'long'} onToggle={() => toggle('long')} />
-          <GateRow question="¿Vender ahora?" gate={cur.gate?.short} open={open === 'short'} onToggle={() => toggle('short')} />
+          <GateRow
+            question="¿Comprar ahora?"
+            gate={cur.gate?.long}
+            action={cur.action}
+            actionLabel={actionLabel}
+            open={open === 'long'}
+            onToggle={() => toggle('long')}
+          />
+          <GateRow
+            question="¿Vender ahora?"
+            gate={cur.gate?.short}
+            action={cur.action}
+            actionLabel={actionLabel}
+            open={open === 'short'}
+            onToggle={() => toggle('short')}
+          />
         </div>
 
-        {Array.isArray(cur.warnings) && cur.warnings.length > 0 && <Warnings warnings={cur.warnings} />}
+        {warnings.length > 0 && <Warnings warnings={warnings} exiting={exiting} />}
 
-        {cur.position && <PositionBlock pos={cur.position} price={cur.price} />}
+        {cur.position && <PositionBlock pos={cur.position} price={cur.price} action={cur.action} />}
 
         {/* meters */}
         <div className="col gap-2">
@@ -445,7 +520,7 @@ function SignalPanel(props: Props) {
               <span title="Error cuadrático de las probabilidades: menor es mejor (0,25 = azar)">Brier</span>
               <span className="mono">{isFiniteNumber(learning.brier) ? fmtNum(learning.brier, 3) : '—'}</span>
               <span>Memoria</span>
-              <span className="mono">{fmtInt(learning.memory_bars)} velas</span>
+              <span className="mono">{plural(learning.memory_bars, 'vela', 'velas')}</span>
               {isFiniteNumber(learning.trained_until) && (
                 <>
                   <span>Entrenado hasta</span>
@@ -456,13 +531,13 @@ function SignalPanel(props: Props) {
           </Section>
         )}
 
-        {stats && (
+        {stats && evidence && (
           <Section title="Resultados de las señales" icon={<BookOpen size={13} />} open>
             <div className="kv">
               <span>Operaciones</span>
               <span className="mono">{fmtInt(stats.trades)}</span>
-              <span>% ganadoras</span>
-              <span className="mono">{fmtProb(winRate, 1)}</span>
+              <span title="Operaciones cerradas con beneficio">Ganadoras</span>
+              <span className="mono">{fmtTally(evidence.taken, evidence.takenRate)}</span>
               <span>Factor de beneficio</span>
               <span className="mono">{isFiniteNumber(stats.profit_factor) ? fmtNum(stats.profit_factor, 2) : '—'}</span>
               <span>Retorno total</span>
@@ -473,16 +548,14 @@ function SignalPanel(props: Props) {
               <span className="mono neg">{fmtPct(-Math.abs(stats.max_dd_pct ?? 0))}</span>
               <span>Señales rechazadas</span>
               <span className="mono">{fmtInt(stats.rejected_signals)}</span>
-              <span className="bold">% de rechazadas que habrían perdido</span>
-              <span className="mono bold" style={{ color: toneColor(rejectedLose !== null && rejectedLose >= 0.5 ? 'pos' : 'warn') }}>
-                {fmtProb(rejectedLose, 1)}
+              <span className="bold" title="Solo las rechazadas cuyo resultado ya se conoce (¿TP1 antes que el stop?)">
+                Rechazadas que habrían ganado
+              </span>
+              <span className="mono bold" style={{ color: toneColor(evidenceTone(evidence)) }}>
+                {fmtTally(evidence.rejected, evidence.rate)}
               </span>
             </div>
-            <p className="tiny muted chart-proof">
-              {rejectedLose === null
-                ? 'Aún no hay suficientes señales rechazadas para medir el filtro.'
-                : `De las señales que el filtro NO dejó tomar, el ${fmtProb(rejectedLose, 0)} habría terminado en pérdida: esa es la prueba de que el filtro te protege${rejectedLose < 0.5 ? ' (por ahora no lo está demostrando en este activo)' : ''}.`}
-            </p>
+            <p className="tiny muted chart-proof">{evidenceText(evidence, 'signals')}</p>
           </Section>
         )}
 

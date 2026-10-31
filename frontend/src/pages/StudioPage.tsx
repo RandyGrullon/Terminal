@@ -16,6 +16,7 @@ import InputsPanel from '../components/studio/InputsPanel'
 import PreviewChart from '../components/studio/PreviewChart'
 import ReferencePanel from '../components/studio/ReferencePanel'
 import ScriptList from '../components/studio/ScriptList'
+import { cleanScriptName, sameScriptName } from '../components/studio/scriptNames'
 import StrategyPanel from '../components/studio/StrategyPanel'
 import { warmReference } from '../components/studio/reference'
 import { idOf, keyOf, newKey, useStudio, type RunCache, type StudioState } from '../components/studio/studioStore'
@@ -394,7 +395,8 @@ export default function StudioPage() {
     const key = st.active
     const buf = bufferOf(st, key)
     if (!key || !buf || savingRef.current) return
-    const nm = buf.name.trim()
+    // Normalized like the backend stores it (repeated / odd whitespace collapsed).
+    const nm = cleanScriptName(buf.name)
     if (!nm) {
       notify('El nombre del script no puede estar vacío', 'warn')
       return
@@ -431,7 +433,8 @@ export default function StudioPage() {
           const s2 = useStudio.getState()
           s2.putSaved(updated)
           const cur = s2.drafts[key]
-          if (cur && cur.code === updated.code && cur.name.trim() === updated.name) s2.dropDraft(key)
+          // The server collapses whitespace in names: compare the same way or the draft never goes away.
+          if (cur && cur.code === updated.code && sameScriptName(cur.name, updated.name)) s2.dropDraft(key)
           notify('Script guardado', 'success')
         } catch (e) {
           if (e instanceof ApiError && e.status === 404) {
@@ -453,7 +456,7 @@ export default function StudioPage() {
     const key = st.active
     const buf = bufferOf(st, key)
     if (!key || !buf || savingRef.current) return
-    const nm = uniqueName(`${buf.name.trim() || 'Script'} (copia)`, existingNames(st))
+    const nm = uniqueName(`${cleanScriptName(buf.name) || 'Script'} (copia)`, existingNames(st))
     if (buf.isNew) {
       const nk = newKey()
       st.putDraft(nk, { name: nm, code: buf.code, description: buf.description, isNew: true, updatedAt: Date.now() })
@@ -853,6 +856,7 @@ export default function StudioPage() {
             problems={problems}
             warnings={warnings}
             run={runForActive?.result ?? null}
+            runTf={runForActive?.tf ?? null}
             runInfo={runInfo}
             compileError={compileError}
             onGoto={onGoto}

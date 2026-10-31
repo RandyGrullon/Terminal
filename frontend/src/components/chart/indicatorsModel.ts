@@ -1,14 +1,18 @@
 // User indicators on the main chart: catalog (cached for the session), the active list persisted in the
 // settings key "ui.chart_indicators", parameter normalization and incremental computation.
+// The saved list is only overwritten after it was read successfully: a failed read is retried (backoff, socket
+// reconnect, browser back online, "Reintentar"), never treated as an empty list (see indicatorList.ts).
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, errorMessage } from '../../api/client'
 import type { IndicatorParam, IndicatorRequestItem, IndicatorSpec, Timeframe } from '../../api/types'
+import { socket } from '../../api/ws'
 import { useApp } from '../../store'
 import { isAbortError, type ParamMap, type ParamValue } from './chartUtils'
+import { MAX_INDICATORS, mergeStoredList, newUid, startListLoader, type ActiveIndicator, type ListLoader } from './indicatorList'
+
+export { MAX_INDICATORS, newUid, type ActiveIndicator }
 
 export const SETTINGS_KEY = 'ui.chart_indicators'
-/** Generous cap: every catalog indicator can be added (several times), but the chart must stay usable. */
-export const MAX_INDICATORS = 40
 
 export const CATEGORY_ORDER = ['Tendencia', 'Momento', 'Volatilidad', 'Volumen', 'Soportes/Resistencias', 'Estadística', 'NEXUS']
 
@@ -23,12 +27,6 @@ export const SOURCE_LABEL: Record<string, string> = {
   ohlc4: '(A + Máx + Mín + C) / 4',
   hlcc4: '(Máx + Mín + 2·Cierre) / 4',
   volume: 'Volumen',
-}
-
-export interface ActiveIndicator {
-  uid: string
-  id: string
-  params: ParamMap
 }
 
 export interface IndicatorResultEntry {
@@ -92,10 +90,6 @@ export function loadCatalog(force = false): Promise<IndicatorSpec[]> {
 }
 
 // ----------------------------------------------------------------------------- params
-
-export function newUid(): string {
-  return `i${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`
-}
 
 export function paramOptions(p: IndicatorParam): string[] {
   if (Array.isArray(p.options) && p.options.length) return p.options.map(String)
@@ -163,37 +157,18 @@ export function paramsSummary(spec: IndicatorSpec | null, params: ParamMap): str
     .join(' ')
 }
 
-function parseStored(value: unknown): ActiveIndicator[] {
-  if (!Array.isArray(value)) return []
-  const out: ActiveIndicator[] = []
-  const seen = new Set<string>()
-  for (const raw of value) {
-    if (!raw || typeof raw !== 'object') continue
-    const o = raw as Record<string, unknown>
-    if (typeof o.id !== 'string' || !o.id) continue
-    let uid = typeof o.uid === 'string' && o.uid ? o.uid : newUid()
-    if (seen.has(uid)) uid = newUid()
-    seen.add(uid)
-    const params: ParamMap = {}
-    if (o.params && typeof o.params === 'object') {
-      for (const [k, v] of Object.entries(o.params as Record<string, unknown>)) {
-        if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string') params[k] = v
-      }
-    }
-    out.push({ uid, id: o.id, params })
-    if (out.length >= MAX_INDICATORS) break
-  }
-  return out
-}
-
 // ----------------------------------------------------------------------------- hook
 
 export interface IndicatorsState {
   catalog: IndicatorSpec[] | null
   catalogError: unknown
   reloadCatalog: () => void
-  /** Settings loaded (or failed): the list is authoritative from now on. */
+  /** Saved list read: the list is authoritative and edits are saved from now on (never before). */
   loaded: boolean
+  /** Last failure reading the saved list (retried automatically); null once loaded. */
+  listError: unknown
+  /** Retry reading the saved list now. */
+  retryList: () => void
   items: ResolvedIndicator[]
   computing: boolean
   add: (spec: IndicatorSpec) => void
@@ -219,6 +194,7 @@ export function useIndicators(scope: {
   const [catalogNonce, setCatalogNonce] = useState(0)
   const [active, setActive] = useState<ActiveIndicator[]>([])
   const [loaded, setLoaded] = useState(false)
+  const [listError, setListError] = useState<unknown>(null)
   const [results, setResults] = useState<Record<string, IndicatorResultEntry>>({})
   const [computing, setComputing] = useState(false)
   const [retryNonce, setRetryNonce] = useState(0)
@@ -231,6 +207,7 @@ export function useIndicators(scope: {
   const activeRef = useRef(active)
   activeRef.current = active
   const runSeqRef = useRef(0)
+  const listLoaderRef = useRef<ListLoader | null>(null)
 
   // --- catalog
   useEffect(() => {
@@ -248,28 +225,35 @@ export function useIndicators(scope: {
     }
   }, [catalogNonce])
 
-  // --- stored list
+  // --- stored list: read until it succeeds (edits made meanwhile stay local and are merged, never saved alone)
   useEffect(() => {
-    let alive = true
-    api.settings
-      .get()
-      .then(({ settings }) => {
-        if (!alive) return
-        const stored = parseStored(settings?.[SETTINGS_KEY])
-        setActive((cur) => {
-          if (!dirtyRef.current) return stored
-          const have = new Set(cur.map((c) => c.uid))
-          return [...stored.filter((s) => !have.has(s.uid)), ...cur].slice(0, MAX_INDICATORS)
-        })
-      })
-      .catch(() => {
-        /* backend unavailable: start with an empty list, saving resumes on the next change */
-      })
-      .finally(() => {
-        if (alive) setLoaded(true)
-      })
+    const loader = startListLoader({
+      get: async () => {
+        const res = await api.settings.get()
+        if (!res || typeof res.settings !== 'object' || res.settings === null) throw new Error('Respuesta de ajustes no válida')
+        return res.settings[SETTINGS_KEY]
+      },
+      onLoaded: (stored) => {
+        setActive((cur) => mergeStoredList(stored, cur, dirtyRef.current))
+        setListError(null)
+        setLoaded(true)
+      },
+      onError: (err) => setListError(err),
+    })
+    listLoaderRef.current = loader
+    const retry = () => loader.retryNow()
+    // Connection back: retry at once instead of waiting for the backoff.
+    let prev: string | null = null
+    const offStatus = socket.onStatus((s) => {
+      if (s === 'open' && prev !== null && prev !== 'open') retry()
+      prev = s
+    })
+    window.addEventListener('online', retry)
     return () => {
-      alive = false
+      loader.stop()
+      listLoaderRef.current = null
+      offStatus()
+      window.removeEventListener('online', retry)
     }
   }, [])
 
@@ -465,6 +449,22 @@ export function useIndicators(scope: {
   }, [])
 
   const reloadCatalog = useCallback(() => setCatalogNonce((n) => n + 1), [])
+  const retryList = useCallback(() => listLoaderRef.current?.retryNow(), [])
 
-  return { catalog, catalogError, reloadCatalog, loaded, items, computing, add, update, reset, remove, clear, retry }
+  return {
+    catalog,
+    catalogError,
+    reloadCatalog,
+    loaded,
+    listError,
+    retryList,
+    items,
+    computing,
+    add,
+    update,
+    reset,
+    remove,
+    clear,
+    retry,
+  }
 }

@@ -2,7 +2,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ChartLine, TriangleAlert } from 'lucide-react'
 import type { BacktestResult } from '../../api/types'
-import { fmtBarTime, fmtInt } from '../../lib/format'
+import { fmtBarTime } from '../../lib/format'
+import { plural } from '../../lib/plural'
 import { useApp } from '../../store'
 import { Badge, Card, Disclaimer, Empty, ErrorBox } from '../ui'
 import { BacktestForm, buildBacktestBody } from './BacktestForm'
@@ -82,7 +83,7 @@ function BacktestResults(props: { result: BacktestResult; body: BacktestBody | n
         <span className="mono bold">{result.symbol}</span>
         <Badge tone="info">{result.tf}</Badge>
         <span className="small text-2">
-          {fmtInt(result.bars)} velas · {fmtBarTime(result.start_time, result.tf)} → {fmtBarTime(result.end_time, result.tf)}
+          {plural(result.bars, 'vela', 'velas')} · {fmtBarTime(result.start_time, result.tf)} → {fmtBarTime(result.end_time, result.tf)}
           {info.provider && ` · datos ${info.provider}${info.history ? ` (${info.history})` : ''}`}
         </span>
         <Badge tone={usedGate ? 'accent' : 'muted'}>{usedGate ? 'Con filtro (solo TOMAR)' : 'Sin filtro'}</Badge>
@@ -185,7 +186,7 @@ export function BacktestView() {
       {!job.result && !job.loading && !job.error && (
         <Card>
           <Empty icon={<ChartLine size={28} />} title="Todavía no hay resultados">
-            Elige símbolo y temporalidad y pulsa «Ejecutar backtest». Con «Usar filtro (gate)» verás cuánto mejora el resultado al
+            Elige símbolo y temporalidad y pulsa «Ejecutar backtest». Con «Usar filtro (gate)» verás cómo cambia el resultado al
             decir NO a las operaciones dudosas.
           </Empty>
         </Card>

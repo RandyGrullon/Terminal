@@ -213,7 +213,7 @@ export default function SettingsPage() {
       <SettingsIcon size={20} className="accent" />
       <div className="col gap-0">
         <h1>Ajustes</h1>
-        <span className="sub">Se guardan en tu base de datos local y se aplican al momento en todos los módulos.</span>
+        <span className="sub">Se guardan en tu base de datos y se aplican al momento en todos los módulos.</span>
       </div>
       <div className="grow" />
       <Button

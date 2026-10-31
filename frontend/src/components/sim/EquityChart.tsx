@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { HistogramSeries, type ISeriesApi, type MouseEventParams, type Time } from 'lightweight-charts'
 import type { BacktestResult } from '../../api/types'
-import { COLORS, LineStyle, addLine, fromTs, ts, useChart } from '../../lib/chart'
+import { COLORS, LineStyle, addLine, fromTs, timeScaleFor, ts, useChart } from '../../lib/chart'
 import { fmtBarTime, fmtNum, fmtPct } from '../../lib/format'
 import { Card } from '../ui'
 import { ddValue } from './labels'
@@ -31,8 +31,12 @@ function valueOf(param: MouseEventParams<Time>, s: ISeriesApi<'Line'> | ISeriesA
 
 export function EquityChart(props: { result: BacktestResult }) {
   const { result } = props
-  const { ref, chart } = useChart({ rightPriceScale: { scaleMargins: { top: 0.1, bottom: 0.08 } } })
+  // Points carry bar times: 1d / 1w runs keep their UTC session dates (see lib/chart.ts `ts`).
+  const tf = result.tf
+  const { ref, chart } = useChart({ rightPriceScale: { scaleMargins: { top: 0.1, bottom: 0.08 } }, timeScale: timeScaleFor(tf) })
   const layers = useRef<Layers | null>(null)
+  const tfRef = useRef(tf)
+  tfRef.current = tf
   const [hover, setHover] = useState<Point | null>(null)
 
   const data = useMemo(() => {
@@ -75,7 +79,7 @@ export function EquityChart(props: { result: BacktestResult }) {
         setHover(null)
         return
       }
-      setHover({ time: fromTs(param.time), equity: valueOf(param, l.equity), bench: valueOf(param, l.bench), dd: valueOf(param, l.dd) })
+      setHover({ time: fromTs(param.time, tfRef.current), equity: valueOf(param, l.equity), bench: valueOf(param, l.bench), dd: valueOf(param, l.dd) })
     }
     chart.subscribeCrosshairMove(onMove)
     return () => {
@@ -92,14 +96,15 @@ export function EquityChart(props: { result: BacktestResult }) {
     const l = layers.current
     if (!chart || !l) return
     try {
-      l.equity.setData(data.eq.map((p) => ({ time: ts(p.time), value: p.equity })))
-      l.bench.setData(data.bench.map((p) => ({ time: ts(p.time), value: p.equity })))
-      l.dd.setData(data.eq.map((p) => ({ time: ts(p.time), value: ddValue(p.drawdown_pct) ?? 0 })))
+      chart.applyOptions({ timeScale: timeScaleFor(tf) })
+      l.equity.setData(data.eq.map((p) => ({ time: ts(p.time, tf), value: p.equity })))
+      l.bench.setData(data.bench.map((p) => ({ time: ts(p.time, tf), value: p.equity })))
+      l.dd.setData(data.eq.map((p) => ({ time: ts(p.time, tf), value: ddValue(p.drawdown_pct) ?? 0 })))
       chart.timeScale().fitContent()
     } catch (err) {
       console.error('No se pudo dibujar la curva de capital', err)
     }
-  }, [chart, data])
+  }, [chart, data, tf])
 
   const shown = hover ?? last
   const initial = result.metrics.initial_capital

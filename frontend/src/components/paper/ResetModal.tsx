@@ -3,6 +3,8 @@ import { memo, useEffect, useState } from 'react'
 import { RotateCcw, TriangleAlert } from 'lucide-react'
 import { api, errorMessage } from '../../api/client'
 import type { PaperSnapshot } from '../../api/types'
+import { fmtInt } from '../../lib/format'
+import { isOne } from '../../lib/plural'
 import { Button, ErrorBox, Field, Modal, NumberInput } from '../ui'
 import { fmtMoney, isNum } from '../markets/opsUtils'
 import { normalizeSnapshot } from './paperUtils'
@@ -73,8 +75,12 @@ function ResetModal({ open, currentInitial, openPositions, onClose, onDone }: Pr
         <div className="notice">
           <TriangleAlert size={15} style={{ flex: 'none', marginTop: 1 }} />
           <span>
-            Se cerrarán {openPositions > 0 ? `las ${openPositions} posiciones abiertas` : 'todas las posiciones'} y se borrará el historial de la
-            cuenta demo. El aprendizaje de NEXUS y del filtro no se pierde.
+            {openPositions <= 0
+              ? 'Se cerrarán todas las posiciones'
+              : isOne(openPositions)
+                ? 'Se cerrará la posición abierta'
+                : `Se cerrarán las ${fmtInt(openPositions)} posiciones abiertas`}{' '}
+            y se borrará el historial de la cuenta demo. El aprendizaje de NEXUS y del filtro no se pierde.
           </span>
         </div>
         <Field label="Balance inicial ($)" hint={`Entre ${fmtMoney(MIN_BALANCE)} y ${fmtMoney(MAX_BALANCE)}`}>

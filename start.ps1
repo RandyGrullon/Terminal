@@ -22,9 +22,13 @@
   Fuerza la recompilación de la interfaz.
 
 .EXAMPLE
-  .\start.ps1
-  .\start.ps1 -Dev
-  .\start.ps1 -Port 9000 -NoBrowser
+  .\start.bat
+  .\start.bat -Dev
+  .\start.bat -Port 9000 -NoBrowser
+  powershell -ExecutionPolicy Bypass -File .\start.ps1 -Dev
+
+  start.bat pasa los argumentos a este script con -ExecutionPolicy Bypass: la política predeterminada de Windows
+  (Restricted) no deja ejecutar .\start.ps1 directamente.
 #>
 param(
   [switch]$Dev,
@@ -78,24 +82,26 @@ if (-not (Test-Path $Py)) {
   if (-not (Test-Path $Py)) { Fail 'No se pudo crear el entorno virtual de Python.' }
 }
 
+# requirements-dev.txt = dependencias del servidor (requirements.txt) + herramientas de pruebas (pytest)
 $Req = Join-Path $Backend 'requirements.txt'
+$ReqDev = Join-Path $Backend 'requirements-dev.txt'
 $ReqHashFile = Join-Path $Venv '.req-hash'
-$ReqHash = (Get-FileHash $Req -Algorithm SHA256).Hash
+$ReqHash = Get-TextHash ((Get-FileHash $Req -Algorithm SHA256).Hash + (Get-FileHash $ReqDev -Algorithm SHA256).Hash)
 $Installed = if (Test-Path $ReqHashFile) { (Get-Content $ReqHashFile -Raw).Trim() } else { '' }
 if ($Installed -ne $ReqHash) {
   Step 'Instalando dependencias de Python (solo cuando cambian)'
   $ok = $false
   if ($Uv) {
     # --system-certs usa el almacén de certificados de Windows (necesario detrás de proxies corporativos)
-    & uv pip install --system-certs --python $Py -r $Req
+    & uv pip install --system-certs --python $Py -r $ReqDev
     if ($LASTEXITCODE -eq 0) { $ok = $true }
     else {
-      & uv pip install --native-tls --python $Py -r $Req
+      & uv pip install --native-tls --python $Py -r $ReqDev
       if ($LASTEXITCODE -eq 0) { $ok = $true }
     }
   }
   if (-not $ok) {
-    & $Py -m pip install --disable-pip-version-check -r $Req
+    & $Py -m pip install --disable-pip-version-check -r $ReqDev
     if ($LASTEXITCODE -eq 0) { $ok = $true }
   }
   if (-not $ok) { Fail 'Falló la instalación de dependencias de Python.' }

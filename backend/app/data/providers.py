@@ -4,7 +4,7 @@ Public API (consumed by the hub):
     CEX_PROVIDERS = ("binance", "okx", "coinbase", "kraken", "kucoin")
     supports(provider, tf) -> bool
     await fetch_candles(provider, native, tf, limit, *, client, end_time=None) -> list[Candle dict]
-    await fetch_latest(provider, native, tf, *, client) -> list[Candle dict]      # last 2 bars (live polling)
+    await fetch_latest(provider, native, tf, *, client, retries=2, timeout=None) -> list[Candle dict]  # last 2 bars
 Extras: plan(provider, tf) -> (base_tf, factor), history_limit(provider, tf), to_native(provider, text),
         native_symbol(provider, base, quote) (same as Venue.native),
         await fetch_venues(venues, tf, limit, *, client, end_time=None) -> (candles, venue)  # first venue that works
@@ -94,7 +94,7 @@ def to_native(provider: str, text: str) -> str:
 
 
 async def _fetch_native(spec: ExchangeSpec, native: str, base_tf: str, need: int, end_time: int | None,
-                        client: httpx.AsyncClient) -> list[dict]:
+                        client: httpx.AsyncClient, retries: int = 2, timeout: float | None = None) -> list[dict]:
     """Page backwards from `end_time` (inclusive bar open time; None = now) until `need` bars are collected."""
     code = spec.intervals[base_tf]
     tf_sec = TF_SECONDS[base_tf]
@@ -104,7 +104,8 @@ async def _fetch_native(spec: ExchangeSpec, native: str, base_tf: str, need: int
     max_pages = 1 if spec.single_page else min(MAX_PAGES, need // max(1, min(spec.page_size, 100)) + 3)
     while len(rows) < need and page < max_pages:
         url, params, requested = spec.request(native, code, tf_sec, max(2, need - len(rows)), cursor, page)
-        result = await request_json(client, "GET", url, provider=spec.provider, label=spec.label, params=params)
+        result = await request_json(client, "GET", url, provider=spec.provider, label=spec.label, params=params,
+                                    retries=retries, timeout=timeout)
         batch = spec.parse(result, native)
         page += 1
         if cursor is not None:
@@ -163,15 +164,17 @@ async def fetch_candles(provider: str, native: str, tf: str, limit: int, *, clie
     return rows[-limit:]
 
 
-async def fetch_latest(provider: str, native: str, tf: str, *, client: httpx.AsyncClient) -> list[dict]:
-    """The last 2 bars (previous closed bar + the one forming) for live polling."""
+async def fetch_latest(provider: str, native: str, tf: str, *, client: httpx.AsyncClient, retries: int = 2,
+                       timeout: float | None = None) -> list[dict]:
+    """The last 2 bars (previous closed bar + the one forming) for live polling. The live feed passes retries=0 and
+    a short `timeout` so one slow exchange cannot hold the poll of a symbol for long."""
     spec = _spec(provider)
     ensure_online(spec.provider)
     tf = _norm_tf(tf, spec.provider)
     sym = spec.to_native(native)
     base_tf, factor = plan(spec.provider, tf)
     need = 2 if factor == 1 else 3 * factor
-    rows = await _fetch_native(spec, sym, base_tf, need, None, client)
+    rows = await _fetch_native(spec, sym, base_tf, need, None, client, retries=retries, timeout=timeout)
     if factor > 1:
         rows = resample_rows(rows, base_tf, tf)
     return rows[-2:]

@@ -1,13 +1,79 @@
 // Trade Gate detail ("¿Tomo esta operación?"): key numbers, levels, the checklist (✓ / ✗ / –) with the learned
-// weight of each check, and the concrete reasons for and against.
+// weight of each check, and the concrete reasons for and against. Also how a verdict is presented next to NEXUS'
+// own signal: a TOMAR without the matching entry signal is "Filtro favorable · sin señal NEXUS".
 import { memo } from 'react'
-import { CircleCheck, CircleMinus, CircleX, ThumbsDown, ThumbsUp } from 'lucide-react'
-import type { GateCheck, GateResult } from '../../api/types'
+import { CircleCheck, CircleMinus, CircleX, ShieldCheck, ThumbsDown, ThumbsUp } from 'lucide-react'
+import type { Direction, GateCheck, GateResult, NexusAction } from '../../api/types'
 import { fmtNum, fmtPct, fmtPrice, fmtProb, fmtR, signTone, toneColor, verdictTone } from '../../lib/format'
-import { Meter } from '../ui'
+import { Meter, VerdictBadge } from '../ui'
 import './nexus.css'
 
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+
+// ----------------------------------------------------------------------------- verdict vs NEXUS signal
+
+/** NEXUS action that makes a gate TOMAR a real opportunity in each direction. */
+const ENTRY_ACTION: Record<Direction, NexusAction> = { long: 'BUY', short: 'SELL' }
+
+export const FAVORABLE_LABEL = 'Filtro favorable · sin señal NEXUS'
+
+/**
+ * take = TOMAR confirmed by NEXUS (BUY for a long, SELL for a short); favorable = TOMAR while NEXUS gives no entry
+ * signal in that direction (shown as "Filtro favorable · sin señal NEXUS", never as TOMAR); unconfirmed = TOMAR with
+ * no NEXUS reading at hand (`action` undefined).
+ */
+export type GateSignal = 'take' | 'favorable' | 'unconfirmed' | 'wait' | 'avoid' | 'none'
+
+export function gateSignal(
+  gate: Pick<GateResult, 'verdict' | 'direction'> | null | undefined,
+  action?: NexusAction | string | null,
+): GateSignal {
+  if (!gate) return 'none'
+  if (gate.verdict === 'TAKE') {
+    if (action === undefined) return 'unconfirmed'
+    return action === ENTRY_ACTION[gate.direction] ? 'take' : 'favorable'
+  }
+  return gate.verdict === 'WAIT' ? 'wait' : gate.verdict === 'AVOID' ? 'avoid' : 'none'
+}
+
+/** The gate's one-line summary, re-labelled when its TOMAR is not backed by a NEXUS signal. */
+export function gateSummary(gate: GateResult, action?: NexusAction | string | null): string {
+  const s = gate.summary || ''
+  if (gateSignal(gate, action) !== 'favorable') return s
+  return s.replace(/^\s*TOMAR\s*:\s*/i, 'Filtro favorable: ')
+}
+
+/** Why a favorable gate is not an opportunity: NEXUS gives no entry signal in that direction right now. */
+export function noSignalNote(direction: Direction, actionLabel?: string | null): string {
+  const what = direction === 'long' ? 'compra' : 'venta'
+  const side = direction === 'long' ? 'el largo' : 'el corto'
+  const now = actionLabel ? ` (dice ${actionLabel})` : ''
+  return `NEXUS no da señal de ${what} en esta vela${now}: el filtro aprueba ${side}, pero no es una oportunidad TOMAR.`
+}
+
+/** Short verdict text for tables and summaries ("TOMAR 72/100"), with the same rule as GateVerdictBadge. */
+export function gateVerdictText(gate: GateResult, action?: NexusAction | string | null): string {
+  const label = gateSignal(gate, action) === 'favorable' ? FAVORABLE_LABEL : gate.verdict_label || gate.verdict
+  return isNum(gate.score) ? `${label} ${Math.round(gate.score)}/100` : label
+}
+
+/** Verdict chip that respects NEXUS' signal (see gateSignal). */
+export function GateVerdictBadge(props: { gate: GateResult; action?: NexusAction | string | null; large?: boolean; hideScore?: boolean }) {
+  const { gate } = props
+  const score = props.hideScore ? undefined : gate.score
+  if (gateSignal(gate, props.action) === 'favorable') {
+    return (
+      <span className={`verdict info ${props.large ? 'lg' : ''}`} style={{ color: 'var(--info)' }}>
+        <ShieldCheck size={props.large ? 20 : 15} />
+        {FAVORABLE_LABEL}
+        {isNum(score) && <span className="mono" style={{ opacity: 0.85 }}>{Math.round(score)}/100</span>}
+      </span>
+    )
+  }
+  return <VerdictBadge verdict={gate.verdict} score={score} label={gate.verdict_label || undefined} large={props.large} />
+}
+
+// ----------------------------------------------------------------------------- detail
 
 function checkRank(c: GateCheck): number {
   if (c.passed === false) return c.critical ? 0 : 1

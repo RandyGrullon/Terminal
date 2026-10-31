@@ -6,6 +6,7 @@ import asyncio
 import pytest
 
 from app import config as nexus_config
+from app.engine.levels import ev_hold
 from app.sim import paper as pp
 from tests.test_sim_fakes import FakeHub, FakeNexus, make_current
 
@@ -68,15 +69,30 @@ def test_process_bar_short_single_target_and_no_partials():
 
 
 def test_assess_position_early_exit_and_hold():
-    hold = pp.assess_position("long", 101.0, 98.0, 102.0, 2.0, make_current("HOLD_LONG", prob_up=0.8, score=0.3))
-    assert not hold["early_exit"] and hold["advice"].startswith("Mantener") and hold["ev_r"] == pytest.approx(0.1)
-    # EV < 0 alone does not force an exit while NEXUS still agrees with the position
-    meh = pp.assess_position("long", 101.0, 98.0, 102.0, 2.0, make_current("HOLD_LONG", prob_up=0.6, score=0.3))
-    assert meh["ev_r"] == pytest.approx(-0.3) and not meh["early_exit"]
-    bad = pp.assess_position("long", 101.0, 98.0, 102.0, 2.0, make_current("EXIT_LONG", prob_up=0.3, score=-0.4))
+    kw = {"sigma": 0.8, "horizon": 5}
+    hold = pp.assess_position("long", 101.0, 98.0, 102.0, 2.0, make_current("HOLD_LONG", prob_up=0.8, score=0.3), **kw)
+    ev, p = ev_hold(1, 101.0, 98.0, 102.0, 2.0, 0.8, 0.8, 5)  # the engine's first-passage EV
+    assert not hold["early_exit"] and hold["advice"].startswith("Mantener") and hold["warnings"] == []
+    assert hold["ev_r"] == pytest.approx(ev) and hold["p_hit"] == pytest.approx(p) and ev > 0
+    # a negative EV is an amber warning, never a close, unless the engine's own exit rule holds (I7): EV <= −0.10R
+    # with the score against
+    meh = pp.assess_position("long", 101.0, 98.0, 102.0, 2.0, make_current("HOLD_LONG", prob_up=0.46, score=-0.3), **kw)
+    assert -0.1 < meh["ev_r"] < 0 and not meh["early_exit"] and meh["exit_by"] is None
+    assert meh["warnings"][0]["code"] == "WATCH_EXIT" and meh["warnings"][0]["severity"] == "warn"
+    assert meh["advice"].startswith("Vigila la salida") and "score NEXUS va en contra" in meh["advice"]
+    low = pp.assess_position("long", 101.0, 98.0, 102.0, 2.0, make_current("HOLD_LONG", prob_up=0.3, score=0.1), **kw)
+    assert low["ev_r"] < -0.1 and not low["early_exit"] and low["warnings"][0]["code"] == "WATCH_EXIT"
+    assert low["advice"].endswith(", aunque el score NEXUS aún no gira en contra")
+    rule = pp.assess_position("long", 101.0, 98.0, 102.0, 2.0, make_current("HOLD_LONG", prob_up=0.3, score=-0.4), **kw)
+    assert rule["early_exit"] and rule["exit_by"] == "ev" and rule["warnings"][0]["code"] == "EARLY_EXIT"
+    assert rule["advice"] == ("Cerrar ya: valor esperado de mantener negativo (−0,48R) con el score NEXUS en contra "
+                              "(−0,40)")
+    bad = pp.assess_position("long", 101.0, 98.0, 102.0, 2.0, make_current("EXIT_LONG", prob_up=0.3, score=-0.4), **kw)
     assert bad["early_exit"] and bad["warnings"][0]["code"] == "EARLY_EXIT" and bad["ev_r"] < 0
-    assert "Cerrar ya" in bad["advice"]
-    short_ok = pp.assess_position("short", 99.0, 102.0, 98.0, 2.0, make_current("SELL", prob_up=0.35, score=-0.5))
+    assert bad["advice"] == "Cerrar ya: NEXUS recomienda cerrar el largo (CERRAR LARGO)" and bad["exit_by"] == "signal"
+    rev = pp.assess_position("long", 101.0, 98.0, 102.0, 2.0, make_current("SELL", prob_up=0.4, score=-0.5), **kw)
+    assert rev["early_exit"] and "(VENDER)" in rev["advice"]
+    short_ok = pp.assess_position("short", 99.0, 102.0, 98.0, 2.0, make_current("SELL", prob_up=0.35, score=-0.5), **kw)
     assert not short_ok["early_exit"]
     assert pp.assess_position("long", 100.0, 98.0, None, 0.0, None)["advice"] is None
 
@@ -138,7 +154,7 @@ def test_paper_lifecycle_tp1_be_tp2_trail_and_accounting(runtime_factory, no_bac
             gross = 50 / 3 * 2 + 50 / 3 * 4 + 50 / 3 * (stop - 100)
             fees = entry_fee + (50 / 3 * 102 + 50 / 3 * 104 + 50 / 3 * stop) * 0.001
             assert closed["pnl"] == pytest.approx(gross - fees, abs=0.02)
-            assert closed["r_multiple"] == pytest.approx(gross / (50 * 2), abs=1e-3)
+            assert closed["r_multiple"] == pytest.approx((gross - fees) / (50 * 2), abs=1e-3)  # net, like the engine
             acct = await engine.account(1)
             assert acct["balance"] == pytest.approx(10000 + gross - fees, abs=0.02)
             assert acct["trades"] == 1 and acct["wins"] == 1 and acct["win_rate"] == 1.0
@@ -214,33 +230,45 @@ def test_avoid_is_rejected_unless_forced_and_validation(runtime_factory, no_back
     asyncio.run(scenario())
 
 
-def test_advice_early_exit_warns_manual_and_closes_auto(runtime_factory, no_background):
+def test_advice_warns_and_the_auto_trader_exits_on_closed_bars(runtime_factory, no_background):
+    eth = "BINANCE:ETHUSDT"
+
     async def scenario():
         async with runtime_factory() as rt:
-            rt.hub = FakeHub(prices={SYM: 100.0, "BINANCE:ETHUSDT": 100.0})
+            rt.hub = FakeHub(prices={SYM: 100.0, eth: 100.0})
             rt.nexus = FakeNexus("TAKE")
             engine = pp.PaperEngine(rt)
             await engine.start()
+            await engine.set_auto(True, [eth], "1h")
             manual = (await engine.open_position(1, SYM, "long", "1h"))["position"]
-            auto = (await engine.open_position(1, "BINANCE:ETHUSDT", "long", "1h", origin="auto"))["position"]
+            auto = (await engine.open_position(1, eth, "long", "1h", origin="auto"))["position"]
             rt.nexus.current_value = make_current("HOLD_LONG", prob_up=0.6, score=0.3)
             assert await engine.refresh_advice(force=True) == 0
             p = engine.open_positions(1)[0]
             assert p["advice"].startswith("Mantener") and p["warnings"] == []
+            # live (forming-bar) advice never closes anything: the manual one is warned, the auto one waits for
+            # the auto-trader's decision at the bar close
             rt.nexus.current_value = make_current("EXIT_LONG", prob_up=0.3, score=-0.5)
-            closed = await engine.refresh_advice(force=True)
-            assert closed == 1
-            remaining = engine.open_positions(1)
-            assert [r["id"] for r in remaining] == [manual["id"]]
-            assert remaining[0]["warnings"][0]["code"] == "EARLY_EXIT"
+            assert await engine.refresh_advice(force=True) == 2
+            remaining = {r["id"]: r for r in engine.open_positions(1)}
+            assert set(remaining) == {manual["id"], auto["id"]}
+            assert remaining[manual["id"]]["warnings"][0]["code"] == "EARLY_EXIT"
+            assert remaining[auto["id"]]["advice"].endswith("el auto-trading decide al cierre de la vela")
             warns = [e["message"] for e in rt.bus.recent(level="warn")]
-            assert any(m.startswith(f"⚠ {SYM}: NEXUS recomienda CERRAR el largo") for m in warns)
-            hist = await engine.history(1)
-            assert hist[0]["id"] == auto["id"] and hist[0]["exit_reason"] == "EARLY"
-            assert hist[0]["exit_label"] == "Cierre anticipado"
+            assert [m for m in warns if "NEXUS recomienda CERRAR" in m] == [
+                f"⚠ {SYM}: NEXUS recomienda CERRAR el largo (CERRAR LARGO)"]
             n_warn = len(warns)
             await engine.refresh_advice(force=True)  # repeated advice does not spam warnings
             assert len([e for e in rt.bus.recent(level="warn")]) == n_warn
+            # the closed bar confirms NEXUS's exit: the auto-trader closes its own position, not the manual one
+            t = 1_760_000_000
+            await engine._on_candle(eth, "1h", _candle(t, 100, 101, 99, 100), True)
+            await asyncio.gather(*list(engine._tasks))
+            assert rt.nexus.upto_calls[-1] == t
+            assert [r["id"] for r in engine.open_positions(1)] == [manual["id"]]
+            hist = await engine.history(1)
+            assert hist[0]["id"] == auto["id"] and hist[0]["exit_reason"] == "EARLY"
+            assert hist[0]["exit_label"] == "Cierre anticipado"
             await engine.stop()
 
     asyncio.run(scenario())
@@ -255,12 +283,14 @@ def test_auto_trading_opens_only_take_signals(runtime_factory, no_background):
             await engine.start()
             auto = await engine.set_auto(True, [SYM.lower()], "1h")
             assert auto == {"enabled": True, "symbols": [SYM], "tf": "1h"}
-            candle = _candle(1_760_000_000, 100, 101, 99, 100)
-            await engine._on_candle(SYM, "1h", candle, True)
+            t0 = 1_760_000_000
+            await engine._on_candle(SYM, "1h", _candle(t0, 100, 101, 99, 100), True)
             await asyncio.gather(*list(engine._tasks))
             assert engine.open_positions(1) == []  # BUY but the gate said WAIT
             assert any("descartado por el filtro" in e["message"] for e in rt.bus.recent(level="info"))
+            assert rt.nexus.upto_calls == [t0]  # NEXUS decides on the bar that just closed
             rt.nexus.current_value = make_current("BUY", long_verdict="TAKE")
+            candle = _candle(t0 + 3600, 100, 101, 99, 100)
             await engine._on_candle(SYM, "1h", candle, False)  # not a closed bar: nothing
             await engine._on_candle(SYM, "4h", candle, True)  # other timeframe: nothing
             assert not engine._tasks and engine.open_positions(1) == []
@@ -268,8 +298,11 @@ def test_auto_trading_opens_only_take_signals(runtime_factory, no_background):
             await asyncio.gather(*list(engine._tasks))
             pos = engine.open_positions(1)
             assert len(pos) == 1 and pos[0]["origin"] == "auto" and pos[0]["gate_verdict"] == "TAKE"
-            await engine._on_candle(SYM, "1h", candle, True)  # already in a position: no pyramiding
-            await asyncio.gather(*list(engine._tasks))
+            assert rt.nexus.upto_calls == [t0, t0 + 3600]
+            await engine._on_candle(SYM, "1h", candle, True)  # the same closed bar again: decided once
+            assert not engine._tasks
+            await engine._on_candle(SYM, "1h", _candle(t0 + 7200, 100, 101, 99, 100), True)
+            await asyncio.gather(*list(engine._tasks))  # already in a position: no pyramiding
             assert len(engine.open_positions(1)) == 1
             acct = await engine.account(1)
             assert acct["auto_trade"] is True and acct["auto_symbols"] == [SYM]

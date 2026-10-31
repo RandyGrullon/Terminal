@@ -3,7 +3,8 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { CircleCheck, CircleX, Clock } from 'lucide-react'
 import { api } from '../../api/client'
 import type { PredictionRow } from '../../api/types'
-import { fmtDateTime, fmtInt, fmtPct, fmtPrice, signTone } from '../../lib/format'
+import { fmtDateTime, fmtPct, fmtPrice, signTone } from '../../lib/format'
+import { plural } from '../../lib/plural'
 import { useApp } from '../../store'
 import { Empty, ErrorBox, Select, Spinner } from '../ui'
 import { fmtIn, prob01, toMs } from './learnFormat'
@@ -116,7 +117,7 @@ function PredictionsTable({ refreshTick }: { refreshTick: number }) {
         />
         {loading && <Spinner />}
         <div className="grow" />
-        {rows && <span className="tiny muted">{fmtInt(rows.length)} filas</span>}
+        {rows && <span className="tiny muted">{plural(rows.length, 'fila', 'filas')}</span>}
       </div>
       {error !== null && <ErrorBox error={error} onRetry={() => void load()} />}
       {rows === null && error === null ? (

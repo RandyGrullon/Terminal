@@ -99,7 +99,7 @@ function AutoTradeCard({ account, onChanged }: { account: PaperAccount; onChange
           <Bot size={14} /> Auto-trading
         </>
       }
-      sub="Solo abre operaciones que el filtro aprueba (TOMAR)"
+      sub="Solo abre operaciones con señal NEXUS y el filtro en TOMAR"
       actions={saving ? <Spinner /> : undefined}
     >
       <div className="col gap-3">
@@ -139,8 +139,9 @@ function AutoTradeCard({ account, onChanged }: { account: PaperAccount; onChange
         {draft.enabled && draft.symbols.length === 0 && <div className="tiny warn">Activado pero sin símbolos: añade al menos uno para que opere.</div>}
         {error && <div className="tiny neg">{error}</div>}
         <p className="tiny muted" style={{ margin: 0 }}>
-          En cada vela cerrada NEXUS evalúa los símbolos; solo se abre la operación si el filtro dice TOMAR. El motor gestiona el SL «hasta
-          aquí», las salidas parciales en TP1/TP2, el stop dinámico y la salida anticipada. Riesgo por operación según Ajustes.
+          En cada vela cerrada NEXUS evalúa los símbolos; solo se abre la operación si NEXUS da señal de compra o venta y el filtro dice
+          TOMAR en esa dirección. El motor gestiona el SL «hasta aquí», las salidas parciales en TP1/TP2, el stop dinámico y la salida
+          anticipada. Riesgo por operación según Ajustes.
         </p>
       </div>
     </Card>

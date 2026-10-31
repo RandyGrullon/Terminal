@@ -7,6 +7,7 @@ import { api, errorMessage } from '../api/client'
 import type { PaperSnapshot, Position } from '../api/types'
 import { socket } from '../api/ws'
 import { fmtAgo, fmtInt, fmtR, splitSymbol } from '../lib/format'
+import { isOne, plural } from '../lib/plural'
 import { useApp } from '../store'
 import { Badge, Button, Card, Disclaimer, Empty, ErrorBox, Loading, Modal } from '../components/ui'
 import { asTimeframe, fmtMoney, useInterval } from '../components/markets/opsUtils'
@@ -138,7 +139,7 @@ export default function PaperPage() {
       const res = await api.paper.close({ all: true })
       const closed = normalizePositions(res?.closed)
       const pnl = closed.reduce((acc, p) => acc + (Number.isFinite(p.pnl) ? p.pnl : 0), 0)
-      notify(`${fmtInt(closed.length)} ${closed.length === 1 ? 'posición cerrada' : 'posiciones cerradas'} · ${fmtMoney(pnl, true)}`, 'trade')
+      notify(`${plural(closed.length, 'posición cerrada', 'posiciones cerradas')} · ${fmtMoney(pnl, true)}`, 'trade')
       if (alive.current) setConfirmAll(false)
     } catch (err) {
       notify(`No se pudieron cerrar las posiciones: ${errorMessage(err)}`, 'error')
@@ -311,7 +312,9 @@ export default function PaperPage() {
         }
       >
         <p className="small" style={{ margin: 0 }}>
-          Se cerrarán a precio de mercado las {fmtInt(positions.length)} posiciones abiertas de la cuenta demo (operación simulada).
+          {isOne(positions.length)
+            ? 'Se cerrará a precio de mercado la posición abierta de la cuenta demo (operación simulada).'
+            : `Se cerrarán a precio de mercado las ${fmtInt(positions.length)} posiciones abiertas de la cuenta demo (operación simulada).`}
         </p>
       </Modal>
     </div>

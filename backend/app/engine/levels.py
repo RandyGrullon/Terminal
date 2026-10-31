@@ -90,13 +90,15 @@ class PlanEV:
     ev_r: float
     rr: float
     fee_r: float
+    rr_gross: float = 0.0  # R:R to TP2 before fees (the geometry of the plan alone)
+    fee_pct: float = 0.0  # commission used, % per side
 
 
 def plan_ev(lv: Levels, p_win: float, k: float, atr: float, trail_atr: float, fee_pct: float) -> PlanEV:
     """Expected value (R, after fees) of the 1/3-1/3-1/3 plan given P(TP1 before SL) = p_win and drift k."""
     b = lv.risk
     if b <= 0:
-        return PlanEV(0.0, 0.0, 0.0, -1.0, 0.0, 0.0)
+        return PlanEV(0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, fee_pct)
     a1 = max(lv.side * (lv.tp1 - lv.entry), 0.0)
     a2 = max(lv.side * (lv.tp2 - lv.entry), a1)
     a3 = max(lv.side * (lv.tp3 - lv.entry), a2)
@@ -108,7 +110,7 @@ def plan_ev(lv: Levels, p_win: float, k: float, atr: float, trail_atr: float, fe
     fee_cost = 2.0 * fee_pct / 100.0 * abs(lv.entry)
     fee_r = fee_cost / b
     rr = (a2 - fee_cost) / (b + fee_cost)
-    return PlanEV(p_win, p_win * p2, p_win * p2 * p3, gross - fee_r, rr, fee_r)
+    return PlanEV(p_win, p_win * p2, p_win * p2 * p3, gross - fee_r, rr, fee_r, a2 / b, fee_pct)
 
 
 def ev_hold(side: int, price: float, stop: float, next_tp: float | None, risk: float, p_dir: float,

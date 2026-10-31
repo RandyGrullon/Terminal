@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
 );
 
 CREATE TABLE IF NOT EXISTS model_state (
-  kind          TEXT NOT NULL,         -- nexus | scanner | gate
+  kind          TEXT NOT NULL,         -- nexus | scanner | gate | nexus_veto
   key           TEXT NOT NULL,         -- "SYMBOL|tf" | "market|tf|horizon" | "global"
   state         TEXT NOT NULL,         -- JSON
   updates       INTEGER NOT NULL DEFAULT 0,
@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS model_state (
   updated_at    INTEGER NOT NULL,
   PRIMARY KEY (kind, key)
 );
+-- kind='nexus_veto' (key "SYMBOL|tf"): entries the market-conditions semáforo vetoed, so the engine rejects them on
+-- later runs instead of opening a position. state = {version, entries:[{time, direction, level, detail, at}]}
+-- (time = bar open unix s; direction = long|short; level = red|amber; at = unix ms when recorded; newest 200 kept).
 
 CREATE TABLE IF NOT EXISTS signals (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,6 +103,24 @@ CREATE TABLE IF NOT EXISTS predictions (
 );
 CREATE INDEX IF NOT EXISTS idx_pred_due ON predictions (resolved, target_at);
 CREATE INDEX IF NOT EXISTS idx_pred_sym ON predictions (symbol, created_at);
+CREATE INDEX IF NOT EXISTS idx_pred_source ON predictions (source, resolved, target_at);
+CREATE INDEX IF NOT EXISTS idx_pred_model ON predictions (model_key, resolved, target_at);
+
+-- Daily aggregates of resolved predictions, written in the same transaction that resolves each row. Totals, hit
+-- rates, Brier, calibration and the daily charts read them, so they survive the pruning of old rows.
+CREATE TABLE IF NOT EXISTS prediction_daily (
+  day       INTEGER NOT NULL,          -- UTC day of target_at, unix s
+  source    TEXT    NOT NULL,          -- nexus | scanner
+  model_key TEXT    NOT NULL,          -- scanner "market|tf|horizon_s" | NEXUS "SYMBOL|tf"
+  bin       INTEGER NOT NULL,          -- calibration bin of prob_up (0..9)
+  n         INTEGER NOT NULL DEFAULT 0, -- resolved rows (with or without verdict)
+  scored    INTEGER NOT NULL DEFAULT 0, -- rows with a verdict (correct 0/1)
+  correct   INTEGER NOT NULL DEFAULT 0,
+  up        INTEGER NOT NULL DEFAULT 0, -- scored rows whose return was > 0
+  prob_sum  REAL    NOT NULL DEFAULT 0, -- sum of prob_up over scored rows
+  brier_sum REAL    NOT NULL DEFAULT 0, -- sum of (prob_up - up)^2 over scored rows
+  PRIMARY KEY (day, source, model_key, bin)
+);
 
 CREATE TABLE IF NOT EXISTS gate_log (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -1,6 +1,8 @@
 // lightweight-charts v5 helpers shared by every chart in the app (main chart, simulator, backtest, studio).
-// IMPORTANT: always convert bar times with `ts()` (it shifts UTC -> local clock so the axis shows local time),
-// and convert back with `fromTs()` when reading times from the chart.
+// IMPORTANT: always convert bar times with `ts(sec, tf)` and convert back with `fromTs(t, tf)`, passing the
+// timeframe of the data: intraday bars are shifted UTC -> local clock (the axis shows local time), 1d / 1w bars keep
+// their UTC session date (a daily bar opens at 00:00 UTC, so shifting it would label it with the previous day in
+// UTC-negative zones). Every mapper / layer below takes the same `tf`; use `timeScaleFor(tf)` for the axis.
 import { useEffect, useRef, useState } from 'react'
 import {
   AreaSeries,
@@ -67,13 +69,29 @@ function localOffsetSec(sec: number): number {
   return off
 }
 
-/** Bar time (unix s, UTC) -> chart time (shifted to the local clock). */
-export const ts = (sec: number): UTCTimestamp => (sec + localOffsetSec(sec)) as UTCTimestamp
+/** Timeframe of the bars being drawn (`undefined` / `null` = intraday-like data: local clock). */
+export type ChartTf = string | null | undefined
 
-/** Chart time -> unix seconds UTC. */
-export const fromTs = (t: Time): number => {
+/** 1d / 1w bars are whole UTC sessions (00:00 UTC, weeks on Monday): they are labeled with their UTC date, like the
+ *  exchanges and TradingView, instead of the local clock. */
+export function isSessionTf(tf: ChartTf): boolean {
+  return tf === '1d' || tf === '1w'
+}
+
+/** Bar time (unix s, UTC) -> chart time: shifted to the local clock for intraday bars, unchanged (UTC session date)
+ *  for 1d / 1w bars. */
+export const ts = (sec: number, tf?: ChartTf): UTCTimestamp =>
+  (isSessionTf(tf) ? sec : sec + localOffsetSec(sec)) as UTCTimestamp
+
+/** Chart time -> unix seconds UTC (inverse of `ts` for the same timeframe). */
+export const fromTs = (t: Time, tf?: ChartTf): number => {
   const n = typeof t === 'number' ? t : 0
-  return n - localOffsetSec(n)
+  return isSessionTf(tf) ? n : n - localOffsetSec(n)
+}
+
+/** Time-scale options for the timeframe on screen: 1d / 1w bars are dates, so the axis and crosshair show no clock. */
+export function timeScaleFor(tf: ChartTf): { timeVisible: boolean; secondsVisible: boolean } {
+  return { timeVisible: !isSessionTf(tf), secondsVisible: false }
 }
 
 // ----------------------------------------------------------------------------- chart creation
@@ -131,20 +149,23 @@ export function useChart(opts: DeepPartial<ChartOptions> = {}) {
 
 // ----------------------------------------------------------------------------- data mappers
 
-export function toCandleData(candles: Candle[]): CandlestickData<Time>[] {
-  return candles.map((c) => ({ time: ts(c.time), open: c.open, high: c.high, low: c.low, close: c.close }))
+// Every mapper takes the timeframe of its data (see `ts`); it is required so no caller can forget it.
+
+export function toCandleData(candles: Candle[], tf: ChartTf): CandlestickData<Time>[] {
+  return candles.map((c) => ({ time: ts(c.time, tf), open: c.open, high: c.high, low: c.low, close: c.close }))
 }
 
-export function toVolumeData(candles: Candle[]): HistogramData<Time>[] {
-  return candles.map((c) => ({ time: ts(c.time), value: c.volume, color: c.close >= c.open ? COLORS.upVol : COLORS.downVol }))
+export function toVolumeData(candles: Candle[], tf: ChartTf): HistogramData<Time>[] {
+  return candles.map((c) => ({ time: ts(c.time, tf), value: c.volume, color: c.close >= c.open ? COLORS.upVol : COLORS.downVol }))
 }
 
 /** Aligned arrays -> line data with whitespace (gaps) where the value is null. */
-export function toLineData(time: number[], values: (number | null)[]): (LineData<Time> | WhitespaceData<Time>)[] {
+export function toLineData(time: number[], values: (number | null)[], tf: ChartTf): (LineData<Time> | WhitespaceData<Time>)[] {
   const out: (LineData<Time> | WhitespaceData<Time>)[] = new Array(time.length)
   for (let i = 0; i < time.length; i++) {
     const v = values[i]
-    out[i] = v === null || v === undefined || !Number.isFinite(v) ? { time: ts(time[i]) } : { time: ts(time[i]), value: v }
+    const t = ts(time[i], tf)
+    out[i] = v === null || v === undefined || !Number.isFinite(v) ? { time: t } : { time: t, value: v }
   }
   return out
 }
@@ -152,21 +173,22 @@ export function toLineData(time: number[], values: (number | null)[]): (LineData
 export function toHistogramData(
   time: number[],
   values: (number | null)[],
+  tf: ChartTf,
   posColor: string = COLORS.upVol,
   negColor: string = COLORS.downVol,
 ): (HistogramData<Time> | WhitespaceData<Time>)[] {
   return time.map((t, i) => {
     const v = values[i]
-    if (v === null || v === undefined || !Number.isFinite(v)) return { time: ts(t) }
-    return { time: ts(t), value: v, color: v >= 0 ? posColor : negColor }
+    if (v === null || v === undefined || !Number.isFinite(v)) return { time: ts(t, tf) }
+    return { time: ts(t, tf), value: v, color: v >= 0 ? posColor : negColor }
   })
 }
 
-export function toMarkers(markers: ChartMarker[]): SeriesMarker<Time>[] {
+export function toMarkers(markers: ChartMarker[], tf: ChartTf): SeriesMarker<Time>[] {
   return [...markers]
     .sort((a, b) => a.time - b.time)
     .map((m) => ({
-      time: ts(m.time),
+      time: ts(m.time, tf),
       position: m.position,
       shape: m.shape,
       color: m.color,
@@ -270,15 +292,15 @@ export function addSeriesForOutput(chart: IChartApi, output: IndicatorOutput, pa
 }
 
 /** Data for an indicator output, matching addSeriesForOutput's series type. */
-export function outputData(output: IndicatorOutput, time: number[], values: (number | null)[]) {
+export function outputData(output: IndicatorOutput, time: number[], values: (number | null)[], tf: ChartTf) {
   if (output.type === 'histogram') {
     return time.map((t, i) => {
       const v = values[i]
-      if (v === null || v === undefined || !Number.isFinite(v)) return { time: ts(t) }
-      return { time: ts(t), value: v, color: v >= 0 ? `${output.color}cc` : `${COLORS.neg}cc` }
+      if (v === null || v === undefined || !Number.isFinite(v)) return { time: ts(t, tf) }
+      return { time: ts(t, tf), value: v, color: v >= 0 ? `${output.color}cc` : `${COLORS.neg}cc` }
     })
   }
-  return toLineData(time, values)
+  return toLineData(time, values, tf)
 }
 
 // ----------------------------------------------------------------------------- overlays
@@ -288,8 +310,8 @@ export class MarkerLayer {
   constructor(series: ISeriesApi<SeriesType>) {
     this.plugin = createSeriesMarkers(series, [])
   }
-  set(markers: ChartMarker[]): void {
-    this.plugin.setMarkers(toMarkers(markers))
+  set(markers: ChartMarker[], tf: ChartTf): void {
+    this.plugin.setMarkers(toMarkers(markers, tf))
   }
   clear(): void {
     this.plugin.setMarkers([])
@@ -370,12 +392,12 @@ export class TradeLevelsLayer {
     this.tp2 = mk(COLORS.tp2, LineStyle.Dashed, 1)
     this.tp3 = mk(COLORS.tp3, LineStyle.Dashed, 1)
   }
-  set(bars: NexusBars): void {
-    this.entry.setData(toLineData(bars.time, bars.pos_entry))
-    this.sl.setData(toLineData(bars.time, bars.pos_sl))
-    this.tp1.setData(toLineData(bars.time, bars.pos_tp1))
-    this.tp2.setData(toLineData(bars.time, bars.pos_tp2))
-    this.tp3.setData(toLineData(bars.time, bars.pos_tp3))
+  set(bars: NexusBars, tf: ChartTf): void {
+    this.entry.setData(toLineData(bars.time, bars.pos_entry, tf))
+    this.sl.setData(toLineData(bars.time, bars.pos_sl, tf))
+    this.tp1.setData(toLineData(bars.time, bars.pos_tp1, tf))
+    this.tp2.setData(toLineData(bars.time, bars.pos_tp2, tf))
+    this.tp3.setData(toLineData(bars.time, bars.pos_tp3, tf))
   }
   clear(): void {
     for (const s of [this.entry, this.sl, this.tp1, this.tp2, this.tp3]) s.setData([])
@@ -405,11 +427,11 @@ export class ConeLayer {
       addLine(chart, { color: outer, style: LineStyle.Dashed, pane, autoscale: false }),
     ]
   }
-  set(cone: ConePoint[], anchor?: { time: number; price: number }): void {
+  set(cone: ConePoint[], anchor: { time: number; price: number } | undefined, tf: ChartTf): void {
     const keys: (keyof ConePoint)[] = ['p90', 'p75', 'p50', 'p25', 'p10']
     keys.forEach((k, i) => {
-      const pts = cone.map((p) => ({ time: ts(p.time), value: p[k] as number }))
-      if (anchor) pts.unshift({ time: ts(anchor.time), value: anchor.price })
+      const pts = cone.map((p) => ({ time: ts(p.time, tf), value: p[k] as number }))
+      if (anchor) pts.unshift({ time: ts(anchor.time, tf), value: anchor.price })
       this.series[i].setData(pts)
     })
   }

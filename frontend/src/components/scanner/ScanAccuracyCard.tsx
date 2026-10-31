@@ -124,7 +124,8 @@ export const ScanHelpCard = memo(function ScanHelpCard() {
         </li>
         <li>
           <b>Modo profundo.</b> Los mejores candidatos pasan por NEXUS completo y por el filtro (Trade Gate), que decide TOMAR, ESPERAR o NO
-          TOMAR y propone el SL «hasta aquí» y los objetivos.
+          TOMAR y propone el SL «hasta aquí» y los objetivos. Un TOMAR solo cuenta como oportunidad cuando NEXUS también da la señal de
+          entrada en esa dirección; si no, aparece como «Filtro favorable · sin señal NEXUS».
         </li>
       </ol>
       <p className="tiny muted" style={{ margin: '8px 0 0' }}>

@@ -6,6 +6,7 @@ import math
 import numpy as np
 
 from app.engine import fmt
+from app.sim.metrics import periods_per_year, sharpe_ratio
 
 GREEN = "#16c784"
 RED = "#ea3943"
@@ -83,7 +84,8 @@ def _round(x: float | None, d: int = 4) -> float | None:
 
 
 def compute_stats(trades: list[dict], rejected_outcomes: list[bool | None], bar_returns: np.ndarray,
-                  tf_s: int) -> dict:
+                  tf_s: int, times: np.ndarray | None = None) -> dict:
+    """NexusStats. `bar_returns` = per-bar strategy returns (NaN during the warm-up), `times` = their bar times."""
     closed = [t for t in trades if t.get("exit_time") is not None and t.get("pnl_pct") is not None]
     n = len(closed)
     pnls = np.array([float(t["pnl_pct"]) for t in closed]) if n else np.zeros(0)
@@ -97,13 +99,17 @@ def compute_stats(trades: list[dict], rejected_outcomes: list[bool | None], bar_
     curve = np.concatenate([[1.0], equity])
     peak = np.maximum.accumulate(curve)
     max_dd = float(np.max((peak - curve) / peak) * 100.0) if len(curve) else 0.0
-    active = bar_returns[np.isfinite(bar_returns)]
+    # Sharpe of the strategy's per-bar returns: EVERY bar after the warm-up counts (flat bars are 0, so a strategy
+    # that is rarely in the market is not scored as if always invested), the commissions are charged on the bars
+    # of the fills (net of fees, like total_return_pct and the R multiples), and it is annualised like the
+    # backtests (app.sim.metrics: sample std, bars per year from the bar times; fewer than 365 days of bars for
+    # markets with sessions).
+    fin = np.isfinite(bar_returns)
+    rets = bar_returns[fin]
     sharpe = None
-    if len(active) >= 10 and np.count_nonzero(active) >= 5:
-        sd = float(np.std(active))
-        if sd > 1e-12:
-            ppy = 365.0 * 86400.0 / max(tf_s, 1)
-            sharpe = float(np.mean(active)) / sd * math.sqrt(ppy)
+    if len(rets) >= 10 and np.count_nonzero(rets) >= 5:
+        t_fin = np.asarray(times)[fin] if times is not None and len(times) == len(bar_returns) else np.zeros(0)
+        sharpe = sharpe_ratio(rets, periods_per_year(t_fin, tf_s))
     known = [o for o in rejected_outcomes if o is not None]
     return {
         "trades": n,
@@ -115,6 +121,9 @@ def compute_stats(trades: list[dict], rejected_outcomes: list[bool | None], bar_
         "avg_r": _round(float(rs.mean()) if len(rs) else None),
         "expectancy_pct": _round(float(pnls.mean()) if n else None),
         "rejected_signals": len(rejected_outcomes),
+        # outcome = TP1 reached before the SL within the time stop (NexusRun.outcome); the rate is over the
+        # rejected signals whose outcome is already known (`rejected_resolved`), not over `rejected_signals`
+        "rejected_resolved": len(known),
         "rejected_would_win_rate": _round(sum(1 for o in known if o) / len(known) if known else None),
     }
 

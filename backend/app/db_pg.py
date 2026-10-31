@@ -15,10 +15,14 @@ The application SQL is written in the SQLite dialect; `translate()` rewrites it 
 INSERTs into identity tables get `RETURNING id` so execute() returns the new id like sqlite's lastrowid.
 Parameters are coerced to the types the server reports (SQLite is lenient, PostgreSQL is not), NaN is stored as
 NULL (like sqlite3) and NUMERIC results come back as float.
+
+`AdvisoryLock` (one per schema) elects the single instance that runs the background services when several
+instances share the database (deploy overlaps, a second machine): see app.main.Leadership.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import os
 import re
@@ -44,6 +48,7 @@ TABLE_PKS: dict[str, tuple[str, ...]] = {
     "model_state": ("kind", "key"),
     "signals": ("id",),
     "predictions": ("id",),
+    "prediction_daily": ("day", "source", "model_key", "bin"),
     "gate_log": ("id",),
     "scan_runs": ("id",),
     "scan_results": ("run_id", "symbol"),
@@ -322,6 +327,111 @@ def _ssl_option(dsn: str) -> Any:
     return "require"
 
 
+# ============================================================================= single active instance
+
+# A lock session silent for this long is ended by PostgreSQL (see AdvisoryLock). Far above the probe interval and the
+# slowest service start-up (the election loop does not probe while services start).
+LOCK_IDLE_TIMEOUT_S = 300.0
+
+
+def advisory_lock_key(schema: str, name: str = "leader") -> int:
+    """Signed 64-bit key for pg_advisory_lock, distinct per NEXUS schema (separate schemas never contend)."""
+    digest = hashlib.sha256(f"nexus-terminal:{name}:{schema}".encode()).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
+
+
+class AdvisoryLock:
+    """Session-level advisory lock held on a dedicated connection outside the pool. The lock lives exactly as long
+    as that session, so an instance that stops, crashes or loses its connection releases it automatically.
+    Needs a real session: a direct connection or Supabase's *Session pooler* (never the transaction pooler).
+
+    A holder that vanishes without closing its TCP connection (host crash, network cut) leaves a session that
+    PostgreSQL only notices through TCP keepalive (about two hours with Linux defaults), and no instance could take
+    over meanwhile. So the session also gets idle_session_timeout (PostgreSQL 14+): the holder probes every few
+    seconds (app.main.LEADER_CHECK_S), and a silent session is ended, freeing the lock, after `idle_timeout_s`."""
+
+    # pg_locks shows a bigint key as classid (high half) + objid (low half) with objsubid = 1
+    _HELD_SQL = (
+        "SELECT COUNT(*) FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid() "
+        "AND classid::bigint = $1 AND objid::bigint = $2 AND objsubid = 1"
+    )
+
+    def __init__(self, dsn: str, key: int, timeout: float = 10.0, idle_timeout_s: float = LOCK_IDLE_TIMEOUT_S):
+        self.dsn = dsn
+        self.key = key
+        self.timeout = timeout
+        self.idle_timeout_s = idle_timeout_s
+        self.held = False
+        self._conn: asyncpg.Connection | None = None
+
+    async def try_acquire(self) -> bool:
+        """Non-blocking attempt; True when this session holds the lock. Connection errors propagate."""
+        if self.held and await self.alive():
+            return True
+        fresh = self._conn is None or self._conn.is_closed()
+        if fresh:
+            self._conn = await asyncpg.connect(
+                self.dsn,
+                ssl=_ssl_option(self.dsn),
+                timeout=self.timeout,
+                statement_cache_size=0,
+                server_settings={"application_name": "nexus-terminal-leader"},
+            )
+        try:
+            if fresh:
+                await self._limit_idle()
+            got = await asyncio.wait_for(self._conn.fetchval("SELECT pg_try_advisory_lock($1)", self.key), self.timeout)
+        except BaseException:
+            self._drop()
+            raise
+        self.held = bool(got)
+        return self.held
+
+    async def alive(self) -> bool:
+        """Whether this session still holds the lock (False when the connection broke or the probe failed)."""
+        if not self.held or self._conn is None or self._conn.is_closed():
+            self.held = False
+            return False
+        try:
+            count = await asyncio.wait_for(
+                self._conn.fetchval(self._HELD_SQL, (self.key >> 32) & 0xFFFFFFFF, self.key & 0xFFFFFFFF), self.timeout
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._drop()
+            return False
+        self.held = bool(count)
+        return self.held
+
+    async def release(self) -> None:
+        """Unlock and close the dedicated connection (closing it alone would also release the lock)."""
+        conn, self._conn = self._conn, None
+        held, self.held = self.held, False
+        if conn is None or conn.is_closed():
+            return
+        try:
+            if held:
+                await asyncio.wait_for(conn.execute("SELECT pg_advisory_unlock_all()"), self.timeout)
+            await asyncio.wait_for(conn.close(), self.timeout)
+        except Exception:
+            conn.terminate()
+
+    async def _limit_idle(self) -> None:
+        try:
+            await asyncio.wait_for(
+                self._conn.execute(f"SET idle_session_timeout = {max(1, int(self.idle_timeout_s * 1000))}"), self.timeout
+            )
+        except asyncpg.PostgresError:
+            pass  # PostgreSQL < 14 has no idle_session_timeout: the lock still ends with the connection
+
+    def _drop(self) -> None:
+        conn, self._conn = self._conn, None
+        self.held = False
+        if conn is not None and not conn.is_closed():
+            conn.terminate()  # never wait on a broken connection
+
+
 # ============================================================================= database
 
 
@@ -429,7 +539,10 @@ class PostgresDatabase(_Executor):
     async def init_schema(self) -> None:
         script = SCHEMA_FILE.read_text(encoding="utf-8").replace("{schema}", self.schema)
         async with self.conn.acquire() as conn:
-            await conn.execute(script)
+            async with conn.transaction():
+                # instances starting together on a fresh database must not race on CREATE ... IF NOT EXISTS
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", advisory_lock_key(self.schema, "schema"))
+                await conn.execute(script)
         self._types.clear()
         await self.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -488,6 +601,10 @@ class PostgresDatabase(_Executor):
 
     def size_bytes(self) -> int:
         return self._size
+
+    def advisory_lock(self, name: str = "leader") -> AdvisoryLock:
+        """Dedicated-connection advisory lock for this database + schema (see AdvisoryLock)."""
+        return AdvisoryLock(self.dsn, advisory_lock_key(self.schema, name))
 
     async def refresh_size(self) -> None:
         try:

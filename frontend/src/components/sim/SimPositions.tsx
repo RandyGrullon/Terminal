@@ -38,7 +38,7 @@ function OpenTable(props: { rows: Position[]; tf: string | null; autoTrade: bool
       <div className="sim-table-empty">
         Sin posiciones abiertas.{' '}
         {props.autoTrade
-          ? 'El auto-trading abrirá una operación cuando el filtro diga TOMAR.'
+          ? 'El auto-trading abrirá una operación cuando NEXUS dé señal de entrada y el filtro diga TOMAR.'
           : 'Activa «Auto-trading (solo TOMAR)» para que el simulador opere en la cuenta «Simulación».'}
       </div>
     )

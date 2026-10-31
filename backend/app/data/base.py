@@ -51,7 +51,7 @@ def make_symbol_info(symbol: str, **kw: Any) -> dict:
 class CandleSet:
     """OHLCV bars as numpy arrays (ascending, unique times). `time` = bar open in unix seconds (UTC)."""
 
-    __slots__ = ("symbol", "tf", "provider", "history", "note", "time", "open", "high", "low", "close", "volume")
+    __slots__ = ("symbol", "tf", "provider", "history", "note", "stale", "time", "open", "high", "low", "close", "volume")
 
     def __init__(
         self,
@@ -66,12 +66,16 @@ class CandleSet:
         provider: str = "",
         history: str = "full",
         note: str | None = None,
+        stale: bool = False,
     ):
         self.symbol = symbol
         self.tf = tf
         self.provider = provider
         self.history = history
         self.note = note
+        # True when the newest bar is far older than it should be (venue stopped trading / feed down): the data must
+        # not be presented or used as live (NEXUS answers ok=false, the scanner skips it).
+        self.stale = bool(stale)
         self.time = np.asarray(time, dtype=np.int64)
         self.open = np.asarray(open, dtype=np.float64)
         self.high = np.asarray(high, dtype=np.float64)
@@ -89,6 +93,7 @@ class CandleSet:
         provider: str = "",
         history: str = "full",
         note: str | None = None,
+        stale: bool = False,
     ) -> "CandleSet":
         rows = list(rows)
         if not rows:
@@ -112,7 +117,7 @@ class CandleSet:
         # repair inconsistent highs/lows defensively
         h = np.maximum.reduce([h, o, c])
         lo = np.minimum.reduce([lo, o, c])
-        return cls(symbol, tf, t, o, h, lo, c, v, provider=provider, history=history, note=note)
+        return cls(symbol, tf, t, o, h, lo, c, v, provider=provider, history=history, note=note, stale=stale)
 
     @classmethod
     def empty(cls, symbol: str, tf: str, note: str | None = None, provider: str = "", history: str = "none") -> "CandleSet":
@@ -124,7 +129,8 @@ class CandleSet:
         return int(self.time.shape[0])
 
     def __repr__(self) -> str:
-        return f"CandleSet({self.symbol} {self.tf} n={len(self)} provider={self.provider} history={self.history})"
+        stale = " stale" if self.stale else ""
+        return f"CandleSet({self.symbol} {self.tf} n={len(self)} provider={self.provider} history={self.history}{stale})"
 
     @property
     def is_empty(self) -> bool:
@@ -157,6 +163,7 @@ class CandleSet:
             provider=self.provider,
             history=self.history,
             note=self.note,
+            stale=self.stale,
         )
 
     def tail(self, n: int) -> "CandleSet":
@@ -188,6 +195,7 @@ class CandleSet:
             provider=self.provider,
             history=self.history,
             note=self.note,
+            stale=self.stale,
         )
 
     def to_list(self) -> list[dict]:
@@ -228,6 +236,7 @@ def resample(cs: CandleSet, tf: str) -> CandleSet:
         provider=cs.provider,
         history=cs.history,
         note=cs.note,
+        stale=cs.stale,
     )
 
 

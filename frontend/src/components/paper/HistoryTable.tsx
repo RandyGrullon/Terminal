@@ -2,7 +2,8 @@
 // was opened, so the user can see what ignoring the filter costs.
 import { memo, useMemo, useState } from 'react'
 import type { Position } from '../../api/types'
-import { DIRECTION_LABEL, fmtBarTime, fmtDuration, fmtInt, fmtPct, fmtPrice, fmtProb, fmtR, signTone, splitSymbol, toneColor } from '../../lib/format'
+import { DIRECTION_LABEL, fmtBarTime, fmtDuration, fmtPct, fmtPrice, fmtProb, fmtR, signTone, splitSymbol, toneColor } from '../../lib/format'
+import { plural } from '../../lib/plural'
 import { Badge, Button, VerdictBadge } from '../ui'
 import { ORIGIN_LABEL, fmtMoney, fmtQty, isNum } from '../markets/opsUtils'
 import { exitInfo, verdictBreakdown } from './paperUtils'
@@ -18,7 +19,7 @@ function Breakdown({ history }: { history: Position[] }) {
         <div key={g.verdict ?? 'none'} className="pp-bd">
           {g.verdict ? <VerdictBadge verdict={g.verdict} /> : <Badge tone="muted">Sin filtro</Badge>}
           <span className="text-2">
-            {fmtInt(g.n)} {g.n === 1 ? 'operación' : 'operaciones'} · {fmtProb(g.winRate)} ganadoras
+            {plural(g.n, 'operación', 'operaciones')} · {fmtProb(g.winRate)} ganadoras
           </span>
           <span className="mono">
             <b style={{ color: toneColor(signTone(g.pnl)) }}>{fmtMoney(g.pnl, true)}</b>
@@ -119,7 +120,7 @@ function HistoryTable({ history, onOpenChart }: { history: Position[]; onOpenCha
       {sorted.length > limit && (
         <div className="row center" style={{ padding: 8 }}>
           <Button size="sm" variant="ghost" onClick={() => setLimit((l) => l + PAGE)}>
-            Mostrar más ({fmtInt(sorted.length - limit)} restantes)
+            Mostrar más ({plural(sorted.length - limit, 'restante', 'restantes')})
           </Button>
         </div>
       )}

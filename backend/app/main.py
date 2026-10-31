@@ -12,6 +12,7 @@ import time
 import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
@@ -21,10 +22,12 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app import config
+from app.auth import PUBLIC_PATHS, WS_TRY_AGAIN, refuse_websocket, send_json_error
 from app.db import open_database
 from app.events import EventBus
 from app.runtime import rt
 from app.settings import SettingsStore
+from app.util import RateLimitedLog
 from app.ws import WSManager
 
 # (attribute on rt, module, class) — constructed in this order, started in this order, stopped in reverse.
@@ -49,6 +52,15 @@ COMMAND_MODULES = [
     "app.macro.commands",
 ]
 
+# Single active instance on a shared PostgreSQL database (see Leadership)
+LEADER_RETRY_S = 3.0  # standby: how often to try to take over
+LEADER_CHECK_S = 5.0  # active: how often to verify that the lock connection is still alive
+STANDBY_NOTICE_S = 600.0  # standby: how often to repeat the "en espera" notice in the log
+STANDBY_DETAIL = (
+    "Instancia en espera: otra instancia de NEXUS está activa con la misma base de datos (por ejemplo, durante un "
+    "despliegue). Reintenta en unos segundos."
+)
+
 
 def _import(modname: str):
     try:
@@ -65,27 +77,12 @@ def _record_error(err: str) -> None:
         rt.bus.emit("error", "system", f"Módulo no disponible → {err}")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    rt.started_at = time.time()
-    rt.db = await open_database()
-    await rt.db.init_schema()
-    rt.settings = SettingsStore(rt.db)
-    await rt.settings.load()
-    rt.ws = WSManager(rt)
-    rt.bus = EventBus(console=os.environ.get("NEXUS_CONSOLE_EVENTS", "1") != "0")
-    await rt.bus.start(rt.db)
-    db_kind = "PostgreSQL" if rt.db.dialect == "postgres" else "SQLite"
-    auth = "login Supabase" if config.AUTH_MODE == "supabase" else "sin login (solo local)"
-    rt.bus.emit("system", "system", f"Iniciando {config.APP_NAME} v{config.VERSION} · {db_kind} {rt.db.path} · {auth}")
-    for err in list(rt.load_errors):  # router import errors collected in create_app()
-        rt.bus.emit("error", "system", f"Módulo no disponible → {err}")
+def _new_bus() -> EventBus:
+    return EventBus(console=os.environ.get("NEXUS_CONSOLE_EVENTS", "1") != "0")
 
-    for modname in COMMAND_MODULES:
-        _, err = _import(modname)
-        if err:
-            _record_error(err)
 
+async def _start_services() -> int:
+    """Construct every service (table order), then start them in the same order. Returns how many loaded."""
     instances: list[tuple[str, object]] = []
     for attr, modname, clsname in SERVICES:
         module, err = _import(modname)
@@ -106,23 +103,222 @@ async def lifespan(app: FastAPI):
             await inst.start()
         except Exception as exc:
             rt.bus.emit("error", "system", f"El servicio '{attr}' no pudo iniciar: {exc}", {"trace": traceback.format_exc(limit=8)})
+    return len(instances)
 
+
+async def _stop_services(*, detach: bool = False) -> None:
+    """Stop the services in reverse order. detach=True (stepping down to standby) also clears rt.<attr>, so the
+    API never reaches a stopped service."""
+    instances = list(rt.services)
+    if detach:
+        rt.services = []
+    for attr, inst in reversed(instances):
+        try:
+            await asyncio.wait_for(inst.stop(), timeout=8)
+        except Exception:
+            pass
+        if detach and getattr(rt, attr, None) is inst:
+            setattr(rt, attr, None)
+
+
+def _ready(count: int) -> None:
     mode = " · sin conexión" if config.OFFLINE else ""
+    role = " · instancia activa" if rt.role == "leader" else ""
     rt.bus.emit(
         "success",
         "system",
-        f"NEXUS listo en http://{config.HOST}:{config.PORT} · {len(instances)}/{len(SERVICES)} servicios{mode}",
+        f"NEXUS listo en http://{config.HOST}:{config.PORT} · {count}/{len(SERVICES)} servicios{mode}{role}",
     )
+
+
+def _auth_summary() -> str:
+    if config.AUTH_MODE != "supabase":
+        return "sin login (solo local)"
+    n = len(config.ALLOWED_EMAILS)
+    if not n:
+        return "login Supabase (cualquier usuario del proyecto)"
+    return f"login Supabase ({n} {'correo permitido' if n == 1 else 'correos permitidos'})"
+
+
+def _warn_risky_setup() -> None:
+    if config.AUTH_MODE != "supabase":
+        return
+    if not config.ALLOWED_EMAILS:  # only reachable with NEXUS_ALLOW_ANY_SUPABASE_USER=1 (see create_app)
+        rt.bus.emit(
+            "warn",
+            "system",
+            "NEXUS_ALLOW_ANY_SUPABASE_USER=1: cualquier cuenta de tu proyecto Supabase puede entrar. Desactiva los "
+            "registros en Supabase o define NEXUS_ALLOWED_EMAILS.",
+        )
+    if rt.db.dialect == "sqlite":
+        rt.bus.emit(
+            "warn",
+            "system",
+            "Modo nube con SQLite local (sin NEXUS_DATABASE_URL): en un contenedor los datos se pierden en cada "
+            "despliegue salvo que la carpeta de datos sea un volumen persistente. Configura NEXUS_DATABASE_URL "
+            "(docs/DEPLOY.md).",
+        )
+
+
+class Leadership:
+    """Single active instance on a shared PostgreSQL database (cloud mode with background work).
+
+    Two instances can run at once: Railway keeps the previous deployment until the new one is healthy, and Fly may
+    start a second machine. Background loops, the demo account and the in-memory state must exist only once, so only
+    the holder of the schema's advisory lock (app.db_pg.AdvisoryLock, dedicated connection) starts the services.
+    The other instance stays in standby: /api/health answers (role "standby"), the rest gets 503 / WebSocket 1013
+    (StandbyGate) and it retries the lock every LEADER_RETRY_S, taking over once the active instance stops. The
+    services are never started on a standby: their start() does single-instance recovery (closing the simulator's
+    positions, marking running scans as interrupted) that would hit the active instance. The active instance probes
+    its lock connection every LEADER_CHECK_S and steps down when it is lost (another instance may take over)."""
+
+    def __init__(self, lock: Any):
+        self.lock = lock
+        self.since = time.time()  # when the current role started
+        self.takeovers = 0
+        self.last_error: str | None = None
+        self._task: asyncio.Task | None = None
+        self._busy = asyncio.Lock()
+        self._closing = False
+        self._notice_at = time.monotonic()
+        self._log = RateLimitedLog()
+
+    async def acquire(self) -> bool:
+        try:
+            return await self.lock.try_acquire()
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            if self._log.should_log("acquire", 300) and rt.bus is not None:
+                rt.bus.emit("warn", "system", f"No se pudo comprobar qué instancia está activa: {self.last_error}")
+            return False
+
+    def run(self) -> None:
+        self._task = asyncio.create_task(self._loop(), name="leader-election")
+
+    async def _loop(self) -> None:
+        while not self._closing:
+            await asyncio.sleep(LEADER_CHECK_S if rt.role == "leader" else LEADER_RETRY_S)
+            async with self._busy:
+                if self._closing:
+                    return
+                try:
+                    if rt.role == "leader":
+                        if not await self.lock.alive():
+                            await self._step_down()
+                    elif await self.acquire():
+                        await self._take_over()
+                    else:
+                        self._standby_notice()
+                except Exception as exc:  # never let the election die
+                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    if self._log.should_log("loop", 60) and rt.bus is not None:
+                        rt.bus.emit("error", "system", f"Elección de instancia activa: {self.last_error}")
+
+    def _standby_notice(self) -> None:
+        if time.monotonic() - self._notice_at < STANDBY_NOTICE_S:
+            return
+        self._notice_at = time.monotonic()
+        minutes = int((time.time() - self.since) // 60)
+        rt.bus.emit(
+            "warn",
+            "system",
+            f"Instancia en espera desde hace {minutes} min: otra instancia de NEXUS usa esta base de datos. Si no hay "
+            "un despliegue en curso, deja una sola máquina (Fly: fly scale count 1; Railway: 1 réplica).",
+        )
+
+    async def _take_over(self) -> None:
+        """Standby -> active. The previous instance stopped: its loops are gone and its events were flushed."""
+        self.since = time.time()
+        self.takeovers += 1
+        # A fresh store with the values the previous instance saved while this one waited. Fresh, not reloaded: after
+        # a step-down the old store still holds the settings listeners of the stopped services of the earlier term.
+        settings = SettingsStore(rt.db)
+        await settings.load()
+        rt.settings = settings
+        rt.bus = _new_bus()  # persisted from now on; event ids continue after the previous instance's last event
+        await rt.bus.start(rt.db)
+        rt.bus.emit("system", "system", "Esta instancia toma el relevo como instancia activa (la anterior se detuvo)")
+        count = await _start_services()
+        rt.role = "leader"
+        _ready(count)
+
+    async def _step_down(self) -> None:
+        """Active -> standby: the lock connection was lost, so another instance may take over at any moment."""
+        rt.role = "standby"  # StandbyGate refuses new work from now on
+        self.since = time.time()
+        self._notice_at = time.monotonic()
+        rt.bus.emit(
+            "error",
+            "system",
+            "Se perdió la conexión que garantiza que esta es la única instancia activa: se detienen los servicios "
+            "de fondo y la instancia queda en espera hasta recuperarla",
+        )
+        await _stop_services(detach=True)
+        if rt.ws is not None:
+            await rt.ws.close_all(WS_TRY_AGAIN, "Instancia en espera")
+        await self.lock.release()
+        await rt.bus.stop()  # flush what can still be saved
+        rt.bus = _new_bus()  # standby: console and memory only (its ids would clash with the active instance)
+
+    async def close(self) -> None:
+        """Stop the election loop (waits for an in-flight take-over or step-down to finish)."""
+        self._closing = True
+        async with self._busy:
+            task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    rt.started_at = time.time()
+    rt.role = "single"
+    rt.db = await open_database()
+    await rt.db.init_schema()
+    rt.settings = SettingsStore(rt.db)
+    await rt.settings.load()
+    rt.ws = WSManager(rt)
+    rt.bus = _new_bus()
+    if config.BACKGROUND and hasattr(rt.db, "advisory_lock"):  # PostgreSQL: the database may be shared
+        rt.leader = Leadership(rt.db.advisory_lock())
+        rt.role = "leader" if await rt.leader.acquire() else "standby"
+    if rt.role != "standby":
+        await rt.bus.start(rt.db)  # a standby only logs to the console: its event ids would clash with the active one
+    db_kind = "PostgreSQL" if rt.db.dialect == "postgres" else "SQLite"
+    rt.bus.emit(
+        "system", "system", f"Iniciando {config.APP_NAME} v{config.VERSION} · {db_kind} {rt.db.path} · {_auth_summary()}"
+    )
+    _warn_risky_setup()
+    for err in list(rt.load_errors):  # router import errors collected in create_app()
+        rt.bus.emit("error", "system", f"Módulo no disponible → {err}")
+
+    for modname in COMMAND_MODULES:
+        _, err = _import(modname)
+        if err:
+            _record_error(err)
+
+    if rt.role == "standby":
+        rt.bus.emit(
+            "warn",
+            "system",
+            "Instancia en espera: otra instancia de NEXUS ya ejecuta los servicios con esta base de datos. Esta solo "
+            "responde /api/health y tomará el relevo cuando la otra se detenga (p. ej. al terminar un despliegue).",
+        )
+    else:
+        _ready(await _start_services())
+    if rt.leader is not None:
+        rt.leader.run()
     try:
         yield
     finally:
-        for attr, inst in reversed(instances):
-            try:
-                await asyncio.wait_for(inst.stop(), timeout=8)
-            except Exception:
-                pass
+        if rt.leader is not None:
+            await rt.leader.close()
+        await _stop_services()
         rt.bus.emit("system", "system", "NEXUS detenido")
         await rt.bus.stop()
+        if rt.leader is not None:
+            await rt.leader.lock.release()  # only now may another instance start its services
         await rt.db.close()
         if rt.auth is not None:
             await rt.auth.close()
@@ -135,7 +331,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 _NOT_BUILT = """<!doctype html><html lang="es"><meta charset="utf-8"><title>NEXUS Terminal</title>
 <body style="background:#0b0e14;color:#d1d4dc;font-family:system-ui;padding:40px">
 <h1>NEXUS Terminal</h1><p>La API está funcionando, pero la interfaz no está compilada.</p>
-<p>Ejecuta <code>start.ps1</code> (o <code>cd frontend &amp;&amp; npm install &amp;&amp; npm run build</code>)
+<p>Ejecuta <code>start.bat</code> (o <code>bash start.sh</code>, o <code>cd frontend &amp;&amp; npm install &amp;&amp; npm run build</code>)
 y recarga esta página. Documentación de la API: <a style="color:#2962ff" href="/api/docs">/api/docs</a></p></body></html>"""
 
 
@@ -197,11 +393,62 @@ def _allowed_hosts() -> list[str]:
     return ["127.0.0.1", "localhost", "::1", "[::1]", "testserver", *extra]
 
 
+def _host_check_exempt() -> tuple[str, ...]:
+    # Platform health checks use their own Host header (Railway: healthcheck.railway.app, Fly: the machine address),
+    # so on a public bind /api/health (anonymous view: no data) skips the NEXUS_ALLOWED_HOSTS check. Locally every
+    # path stays checked (DNS rebinding protection).
+    return ("/api/health",) if config.HOST not in config.LOOPBACK_HOSTS else ()
+
+
+class HostCheckMiddleware:
+    """TrustedHostMiddleware except for `exempt_paths` (HTTP only)."""
+
+    def __init__(self, app: Callable, allowed_hosts: list[str], exempt_paths: tuple[str, ...] = ()):
+        self.app = app
+        self.checked = TrustedHostMiddleware(app, allowed_hosts=allowed_hosts)
+        self.exempt = frozenset(exempt_paths)
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope.get("type") == "http" and scope.get("path") in self.exempt:
+            await self.app(scope, receive, send)
+            return
+        await self.checked(scope, receive, send)
+
+
+class StandbyGate:
+    """While this instance is in standby (another one holds the leader lock, see Leadership) only /api/health and
+    /api/auth/config answer: the rest of the API gets 503 and WebSockets close with 1013, so clients retry (and reach
+    the active instance) instead of using services that do not run here."""
+
+    def __init__(self, app: Callable, open_paths: tuple[str, ...] = PUBLIC_PATHS):
+        self.app = app
+        self.open = frozenset(open_paths)
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if rt.role == "standby":
+            stype = scope.get("type")
+            path = scope.get("path", "")
+            if stype == "websocket":
+                await refuse_websocket(receive, send, WS_TRY_AGAIN, "Instancia en espera; reintenta")
+                return
+            if stype == "http" and path.startswith("/api") and path not in self.open and scope.get("method") != "OPTIONS":
+                await send_json_error(send, 503, STANDBY_DETAIL, retry_after=5)
+                return
+        await self.app(scope, receive, send)
+
+
 def create_app() -> FastAPI:
     if config.AUTH_MODE not in ("none", "supabase"):
         raise RuntimeError(f"NEXUS_AUTH no válido: {config.AUTH_MODE!r} (usa 'none' o 'supabase')")
     if config.AUTH_MODE == "supabase" and not (config.SUPABASE_URL and config.SUPABASE_ANON_KEY):
         raise RuntimeError("NEXUS_AUTH=supabase requiere NEXUS_SUPABASE_URL y NEXUS_SUPABASE_ANON_KEY")
+    if config.AUTH_MODE == "supabase" and not config.ALLOWED_EMAILS and not config.ALLOW_ANY_SUPABASE_USER:
+        # Fail closed: without the allowlist any account of the Supabase project (sign-ups are on by default) gets in.
+        raise RuntimeError(
+            "NEXUS_AUTH=supabase requiere NEXUS_ALLOWED_EMAILS (correos con acceso, separados por comas): sin esa "
+            "lista cualquier cuenta de tu proyecto Supabase podría entrar. Si de verdad quieres aceptar a cualquier "
+            "usuario del proyecto, define NEXUS_ALLOW_ANY_SUPABASE_USER=1 (ver docs/DEPLOY.md)."
+        )
     app = FastAPI(
         title=config.APP_NAME,
         version=config.VERSION,
@@ -210,9 +457,11 @@ def create_app() -> FastAPI:
         openapi_url="/api/openapi.json",
         redoc_url=None,
     )
-    # Middleware order (last added = outermost): CORS -> Auth -> TrustedHost -> app.
-    # TrustedHost protects the local API against DNS rebinding; Auth guards public (cloud) deployments.
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts())
+    # Middleware order (last added = outermost): CORS -> Auth -> host check -> standby gate -> app.
+    # The host check protects the local API against DNS rebinding; Auth guards public (cloud) deployments; the
+    # standby gate only acts while another instance is the active one (PostgreSQL leader lock).
+    app.add_middleware(StandbyGate)
+    app.add_middleware(HostCheckMiddleware, allowed_hosts=_allowed_hosts(), exempt_paths=_host_check_exempt())
     if config.AUTH_MODE == "supabase":
         from app.auth import AuthMiddleware, SupabaseVerifier
 
@@ -223,6 +472,7 @@ def create_app() -> FastAPI:
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", *config.CORS_ORIGINS],
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Retry-After"],  # readable by the browser: back-off hint of the 503s (auth outage, standby)
     )
 
     rt.load_errors.clear()
@@ -285,6 +535,16 @@ def main() -> None:
             "\n  ERROR: el servidor escucharía en una interfaz pública sin login.\n"
             "  Configura NEXUS_AUTH=supabase (ver docs/DEPLOY.md) o usa NEXUS_HOST=127.0.0.1.\n"
             "  (Solo si sabes lo que haces: NEXUS_ALLOW_INSECURE=1)\n",
+            flush=True,
+        )
+        sys.exit(2)
+    if config.HOST not in config.LOOPBACK_HOSTS and not config.DATABASE_URL and not config.ALLOW_LOCAL_DB:
+        print(
+            "\n  ERROR: servidor público sin NEXUS_DATABASE_URL: los datos irían a un archivo SQLite dentro del\n"
+            "  contenedor y se perderían en cada despliegue o reinicio.\n"
+            "  Configura NEXUS_DATABASE_URL con tu Postgres de Supabase (ver docs/DEPLOY.md).\n"
+            "  (Solo si la carpeta de datos está en un disco persistente, p. ej. un volumen montado en /app/data:\n"
+            "  NEXUS_ALLOW_LOCAL_DB=1)\n",
             flush=True,
         )
         sys.exit(2)

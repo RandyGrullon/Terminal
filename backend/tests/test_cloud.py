@@ -91,7 +91,7 @@ def secured_client(tmp_path, monkeypatch):
     from app.auth import SupabaseVerifier
     from app.runtime import rt
 
-    async def fake_verify(self, token):
+    async def fake_verify(self, token, **_kw):
         return {"id": "u1", "email": "randy@example.com"} if token == "good-token" else None
 
     monkeypatch.setattr(SupabaseVerifier, "verify", fake_verify)
@@ -100,6 +100,7 @@ def secured_client(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "AUTH_MODE", "supabase")
     monkeypatch.setattr(config, "SUPABASE_URL", "https://example.supabase.co")
     monkeypatch.setattr(config, "SUPABASE_ANON_KEY", "anon-key")
+    monkeypatch.setattr(config, "ALLOWED_EMAILS", ["randy@example.com"])
     monkeypatch.setattr(config, "CORS_ORIGINS", ["https://nexus.example.app"])
     monkeypatch.setattr(config, "OFFLINE", True)
     monkeypatch.setattr(config, "BACKGROUND", False)
@@ -123,8 +124,9 @@ def test_auth_blocks_api_without_token(secured_client):
 def test_auth_public_endpoints(secured_client):
     r = secured_client.get("/api/health")
     assert r.status_code == 200 and r.json() == {**r.json(), "auth": "required"} and "services" not in r.json()
+    assert r.json()["role"] == "single"  # SQLite: no leader election
     r = secured_client.get("/api/health", headers={"Authorization": "Bearer good-token"})
-    assert "services" in r.json() and r.json()["auth"] == "supabase"
+    assert "services" in r.json() and r.json()["auth"] == "supabase" and r.json()["role"] == "single"
     cfg = secured_client.get("/api/auth/config").json()
     assert cfg == {"mode": "supabase", "supabase_url": "https://example.supabase.co", "supabase_anon_key": "anon-key"}
 
@@ -142,9 +144,12 @@ def test_auth_cors_preflight_and_401_carry_cors_headers(secured_client):
 def test_auth_websocket(secured_client):
     from starlette.websockets import WebSocketDisconnect
 
-    with pytest.raises(WebSocketDisconnect):
-        with secured_client.websocket_connect("/ws") as ws:
-            ws.receive_json()
+    # Rejected sockets are accepted first and then closed with 4401, so browsers see the code (not 1006)
+    for path in ("/ws", "/ws?token=bad"):
+        with secured_client.websocket_connect(path) as ws:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_json()
+        assert exc.value.code == 4401
     with secured_client.websocket_connect("/ws?token=good-token", headers={"origin": "https://nexus.example.app"}) as ws:
         assert ws.receive_json()["type"] == "hello"
     with pytest.raises(WebSocketDisconnect):

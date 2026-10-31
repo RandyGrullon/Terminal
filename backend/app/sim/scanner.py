@@ -9,10 +9,14 @@ feeding the model (feedback loop → honest out-of-sample hit rate).
 
 Deep mode: the top candidates with real history run the full NEXUS engine + Trade Gate (`rt.nexus.analyze`) →
 verdict TOMAR / ESPERAR / NO TOMAR, SL/TP, regime, expected move; every gate decision is logged in `gate_log`.
+A gate TOMAR is an "oportunidad TOMAR" only when NEXUS itself signals that entry (BUY for long, SELL for short);
+otherwise the row reads "Filtro favorable · sin señal NEXUS". Outdated series (a venue that stopped trading) are
+skipped: no verdict and no gate_log row.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import re
 import time
@@ -23,6 +27,7 @@ import numpy as np
 
 from app import config
 from app.sim.common import (
+    ACTION_LABEL,
     VERDICT_LABEL,
     fmt_num,
     fmt_pct,
@@ -33,6 +38,7 @@ from app.sim.common import (
     json_loads,
     rating_label,
 )
+from app.engine.service_watch import gate_target_ms
 from app.util import RateLimitedLog, TTLCache, clamp, clean_json, normalize_tf, now_ms, now_s, parse_symbol, safe_float, tf_seconds
 
 # ----------------------------------------------------------------------------- TradingView columns
@@ -119,12 +125,48 @@ FEATURES: list[tuple[str, str]] = [
 ]
 FEATURE_NAMES = [name for name, _ in FEATURES]
 FEATURE_LABELS = dict(FEATURES)
+# Signature of the feature list stored with every compact vector: a later change of FEATURES can never map old
+# values to the wrong names (such rows are simply not used for training).
+FEATURE_SIG = hashlib.sha1(",".join(FEATURE_NAMES).encode("utf-8")).hexdigest()[:8]
 
 COLD_UPDATES = 200
 ACTION_THRESHOLD = 0.15
 QUICK_TTL_S = 60.0
 FIRST_RUN_DELAY_S = 20.0
 COLUMN_MODE_TTL_S = 6 * 3600.0  # how long a column/filter fallback is remembered per market
+STALE_BARS = 3  # a 24/7 (crypto) series whose newest bar is further behind is outdated: no deep verdict...
+STALE_QUIET_S = 3600  # ...once it also closed more than this ago (same rule as app.data.hub.stale_note)
+# ScanRow fields stored in their own scan_results columns (not repeated inside `data`)
+RESULT_COLUMNS = ("rank", "symbol", "score", "prob_up", "action", "confidence", "price", "change_pct", "volume",
+                  "verdict", "gate_score")
+RESULT_DEFAULTS: dict[str, Any] = {
+    "type": "", "rating": None, "deep": False, "direction": None, "regime": None, "sl": None, "tp1": None,
+    "tp2": None, "expected_move_pct": None, "reasons": [], "nexus_action": None, "opportunity": None,
+}
+
+
+def encode_features(feats: dict[str, float]) -> str:
+    """Compact `predictions.features` JSON: values in FEATURE_NAMES order (4 decimals, null when missing)."""
+    values = [None if safe_float(feats.get(n)) is None else round(float(feats[n]), 4) for n in FEATURE_NAMES]
+    return json_dumps({"v": 2, "f": FEATURE_SIG, "x": values})
+
+
+def decode_features(raw: Any) -> dict[str, float] | None:
+    """Feature dict from `predictions.features` (compact v2 list or legacy {"x": {name: value}}); None if unusable."""
+    data = json_loads(raw, None)
+    if not isinstance(data, dict):
+        return None
+    x = data.get("x")
+    if isinstance(x, list):
+        if data.get("f") != FEATURE_SIG or len(x) != len(FEATURE_NAMES):
+            return None
+        out = {name: float(v) for name, v in zip(FEATURE_NAMES, x) if safe_float(v) is not None}
+        return out or None
+    if isinstance(x, dict):
+        return x or None
+    if "x" in data or "v" in data:
+        return None  # a versioned payload without a usable vector
+    return data or None  # oldest format: the feature dict itself
 
 
 def _f(row: dict, key: str) -> float | None:
@@ -1011,12 +1053,14 @@ class ScannerService:
                     "tp2": None,
                     "expected_move_pct": None,
                     "reasons": ev.reasons,
+                    "nexus_action": None,
+                    "opportunity": False,
                 }
             )
             direction = 1 if ev.action == "BUY" else -1 if ev.action == "SELL" else 0
             pred_rows.append(
                 ("scanner", symbol, tf, key, created, target, ev.price, direction, ev.prob_up, ev.score,
-                 json_dumps({"v": 1, "x": ev.features}))
+                 encode_features(ev.features))
             )
         if pred_rows:
             await self.rt.db.executemany(
@@ -1028,7 +1072,7 @@ class ScannerService:
                        "message": f"{len(results)} activos evaluados"})
         deep_done = 0
         if deep and results:
-            deep_done = await self._deep(run_id, results, tf, deep_top)
+            deep_done = await self._deep(run_id, results, tf, deep_top, market)
         rank_rows(results)
         await self._persist_results(run_id, results)
         summary = self._summary(market, tf, results, deep and deep_done > 0)
@@ -1045,7 +1089,7 @@ class ScannerService:
                            + (f" y {len(rejected) - 5} más" if len(rejected) > 5 else ""),
                            {"run_id": run_id})
 
-    async def _deep(self, run_id: int, results: list[dict], tf: str, deep_top: int) -> int:
+    async def _deep(self, run_id: int, results: list[dict], tf: str, deep_top: int, market: str = "") -> int:
         nexus, hub = self.rt.nexus, self.rt.hub
         if nexus is None or hub is None:
             self._emit("warn", "Modo profundo no disponible: el motor NEXUS no está cargado")
@@ -1079,6 +1123,10 @@ class ScannerService:
             except Exception as exc:
                 row["reasons"] = [f"Análisis profundo no disponible: {type(exc).__name__}"] + row["reasons"]
                 continue
+            outdated = stale_reason(resp, tf, market, now_s())
+            if outdated:  # no verdict, SL/TP or gate_log decision from weeks-old candles
+                row["reasons"] = [f"NEXUS: {outdated} (sin análisis profundo)"] + list(row.get("reasons") or [])
+                continue
             gate = apply_deep(row, resp)
             if gate is not None:
                 done += 1
@@ -1090,7 +1138,9 @@ class ScannerService:
             current = resp.get("current") or {}
             t = safe_float(gate.get("time")) or safe_float(current.get("time")) or now_s()
             created = now_ms()
-            target = created + horizon_bars * tf_seconds(tf) * 1000
+            # horizon from the decision bar (close of the horizon_bars-th bar after it), not from the wall clock: the
+            # convention of every gate_log writer (watcher, paper, scanner)
+            target = gate_target_ms(int(t), tf, horizon_bars)
             await self.rt.db.execute(
                 "INSERT OR IGNORE INTO gate_log(symbol, tf, time, direction, verdict, score, win_prob, entry, sl, tp1, "
                 "tp2, checks, taken, source, created_at, target_at) "
@@ -1113,9 +1163,13 @@ class ScannerService:
             if r["symbol"] in seen:
                 continue
             seen.add(r["symbol"])
+            # `data` keeps only what has no column of its own (and no empty values): results() rebuilds the row
+            data = {k: v for k, v in r.items() if k not in RESULT_COLUMNS and v is not None}
+            if data.get("description") == r["symbol"]:
+                data.pop("description")
             rows.append(
                 (run_id, r["symbol"], r["rank"], r["score"], r["prob_up"], r["action"], r["confidence"],
-                 r["price"], r["change_pct"], r["volume"], r["verdict"], r["gate_score"], json_dumps(r))
+                 r["price"], r["change_pct"], r["volume"], r["verdict"], r["gate_score"], json_dumps(data))
             )
         await self.rt.db.executemany(
             "INSERT INTO scan_results(run_id, symbol, rank, score, prob_up, action, confidence, price, "
@@ -1126,19 +1180,24 @@ class ScannerService:
     @staticmethod
     def _summary(market: str, tf: str, results: list[dict], deep: bool) -> str:
         n = len(results)
+        head = f"Escaneo {market} {tf}: {n} {_plural(n, 'activo', 'activos')}"
         if deep:
-            takes = [r for r in results if r["deep"] and r["verdict"] == "TAKE"]
+            takes = [r for r in results if r.get("opportunity")]  # ranked: the best one first
+            favorable = [r for r in results if r["deep"] and r["verdict"] == "TAKE" and not r.get("opportunity")]
+            fav_txt = f"{len(favorable)} con filtro favorable sin señal NEXUS" if favorable else ""
             if takes:
                 best = takes[0]
-                return (f"Escaneo {market} {tf}: {n} activos · {len(takes)} oportunidades TOMAR · mejor: "
-                        f"{best['symbol']} (TOMAR {best['gate_score'] or 0:.0f}/100)")
-            return (f"Escaneo {market} {tf}: {n} activos · ninguna oportunidad TOMAR: el filtro recomienda "
-                    f"esperar")
+                return (f"{head} · {len(takes)} {_plural(len(takes), 'oportunidad', 'oportunidades')} TOMAR · mejor: "
+                        f"{best['symbol']} (TOMAR {best['gate_score'] or 0:.0f}/100)"
+                        + (f" · {fav_txt}" if fav_txt else ""))
+            if favorable:
+                return f"{head} · ninguna oportunidad TOMAR con señal NEXUS ({fav_txt})"
+            return f"{head} · ninguna oportunidad TOMAR: el filtro recomienda esperar"
         buys = sum(1 for r in results if r["action"] == "BUY")
         sells = sum(1 for r in results if r["action"] == "SELL")
         best = results[0] if results else None
         best_txt = f" · mejor: {best['symbol']} (p↑ {fmt_prob(best['prob_up'])})" if best else ""
-        return f"Escaneo {market} {tf}: {n} activos · {buys} alcistas · {sells} bajistas{best_txt}"
+        return f"{head} · {buys} alcistas · {sells} bajistas{best_txt}"
 
     # ------------------------------------------------------------------ queries
 
@@ -1167,9 +1226,10 @@ class ScannerService:
             )
         if row is None:
             return None, []
-        data = await self.rt.db.fetchall("SELECT data FROM scan_results WHERE run_id=? ORDER BY rank", (row["id"],))
-        results = [d for d in (json_loads(r["data"]) for r in data) if isinstance(d, dict)]
-        return _run_dict(row), results
+        data = await self.rt.db.fetchall(
+            f"SELECT {', '.join(RESULT_COLUMNS)}, data FROM scan_results WHERE run_id=? ORDER BY rank", (row["id"],)
+        )
+        return _run_dict(row), [result_row(r) for r in data]
 
     # ------------------------------------------------------------------ quick signals (any symbol)
 
@@ -1187,7 +1247,9 @@ class ScannerService:
         return market_for_exchange(exchange) or "america"
 
     async def quick_signal(self, symbol: str, tf: str = "1h") -> dict | None:
-        """QuickSignal for ANY TradingView symbol (single-ticker scan); local candles as fallback."""
+        """QuickSignal for ANY TradingView symbol (single-ticker scan); local candles as fallback. A fallback read from
+        a series the hub flags as outdated carries `stale: True` and says so in its first reason (contract I2), so it
+        is never shown as the current market."""
         symbol = (symbol or "").strip().upper()
         if not symbol:
             return None
@@ -1226,6 +1288,12 @@ class ScannerService:
                 local = None
             if local is not None:
                 result = {"symbol": symbol, "tf": tf, **local, "time": now_s()}
+                if getattr(cs, "stale", False):  # series the hub flags as outdated: never read as the current market
+                    from app.engine.service import stale_head
+
+                    result["stale"] = True
+                    result["reasons"] = ([f"{stale_head(cs)}: esta lectura usa esas velas antiguas"]
+                                         + list(result.get("reasons") or []))
         if result is not None:
             result = clean_json(result)
             self._quick_cache.set((symbol, tf), result)
@@ -1286,8 +1354,52 @@ class ScannerService:
                 await asyncio.sleep(30)
 
 
+def _plural(n: int, one: str, many: str) -> str:
+    return one if n == 1 else many
+
+
+def _age_text(seconds: float) -> str:
+    """Spanish age: 'hace 3 días' / 'hace 5 horas' / 'hace 40 minutos'."""
+    if seconds >= 2 * 86400:
+        n = int(seconds // 86400)
+        return f"hace {n} {_plural(n, 'día', 'días')}"
+    if seconds >= 2 * 3600:
+        n = int(seconds // 3600)
+        return f"hace {n} {_plural(n, 'hora', 'horas')}"
+    n = max(int(seconds // 60), 1)
+    return f"hace {n} {_plural(n, 'minuto', 'minutos')}"
+
+
+def stale_reason(resp: dict | None, tf: str, market: str, now: int) -> str | None:
+    """Why a NexusResponse must not be used as a live verdict (outdated series), else None.
+
+    The data hub flags outdated candle sets (`stale`) and NEXUS answers ok=false for them (apply_deep reports that
+    message); on top of that a 24/7 crypto series whose newest bar is more than STALE_BARS bars old and closed more
+    than STALE_QUIET_S ago is refused here (the hub's own rule: quiet minutes of an illiquid pair are not old data)."""
+    if not isinstance(resp, dict) or not resp.get("ok", True):
+        return None
+    current = resp.get("current") or {}
+    if resp.get("stale") or current.get("stale"):
+        note = str(resp.get("note") or resp.get("message") or "").strip()
+        return note if note.lower().startswith("datos desactualizados") else "Datos desactualizados"
+    t = safe_float(current.get("time"))
+    if market != "crypto" or t is None:
+        return None
+    try:
+        tf_s = tf_seconds(normalize_tf(tf))
+    except ValueError:
+        return None
+    age = now - int(t)  # since the newest bar opened (< tf_s while it is the forming bar)
+    if age // tf_s > STALE_BARS and age - tf_s > STALE_QUIET_S:
+        return f"Datos desactualizados: última vela {_age_text(age)}"
+    return None
+
+
 def apply_deep(row: dict, resp: dict | None) -> dict | None:
-    """Fill a ScanRow with the NEXUS + gate verdict. Returns the GateResult used (or None)."""
+    """Fill a ScanRow with the NEXUS + gate verdict. Returns the GateResult used (or None).
+
+    `opportunity` = the gate says TOMAR *and* NEXUS signals that same entry now (BUY for long, SELL for short). A gate
+    TOMAR without that signal is presented as "Filtro favorable · sin señal NEXUS" (its verdict stays the gate's)."""
     if not isinstance(resp, dict):
         return None
     current = resp.get("current") or {}
@@ -1305,6 +1417,9 @@ def apply_deep(row: dict, resp: dict | None) -> dict | None:
     if not isinstance(gate, dict):
         return None
     prediction = resp.get("prediction") or {}
+    action = str(current.get("action") or "") or None
+    take = gate.get("verdict") == "TAKE"
+    signal = action == ("BUY" if direction == "long" else "SELL")
     row.update(
         {
             "deep": True,
@@ -1316,24 +1431,50 @@ def apply_deep(row: dict, resp: dict | None) -> dict | None:
             "tp1": safe_float(gate.get("tp1")),
             "tp2": safe_float(gate.get("tp2")),
             "expected_move_pct": safe_float(prediction.get("expected_return_pct")),
+            "nexus_action": action,
+            "opportunity": bool(take and signal),
         }
     )
-    head = f"Filtro {gate_line(gate)}"
-    summary = gate.get("summary")
-    reasons = [f"{head}: {summary}" if summary else head]
-    if gate.get("verdict") != "TAKE":
-        reasons += [f"En contra: {r}" for r in (gate.get("reasons_against") or [])[:2]]
+    if take and not signal:
+        label = ACTION_LABEL.get(action or "", action or "sin acción")
+        reasons = [
+            f"Filtro favorable · sin señal NEXUS ({gate_line(gate)}; NEXUS: {label})",
+            "El filtro aprueba la idea, pero NEXUS no da una señal de entrada en esa dirección: no cuenta como "
+            "oportunidad TOMAR",
+        ]
+        reasons += list(gate.get("reasons_for") or [])[:1]
     else:
-        reasons += list(gate.get("reasons_for") or [])[:2]
+        head = f"Filtro {gate_line(gate)}"
+        summary = gate.get("summary")
+        reasons = [f"{head}: {summary}" if summary else head]
+        if not take:
+            reasons += [f"En contra: {r}" for r in (gate.get("reasons_against") or [])[:2]]
+        else:
+            reasons += list(gate.get("reasons_for") or [])[:2]
     row["reasons"] = (reasons + list(row.get("reasons") or []))[:8]
     return gate
 
 
+def is_opportunity(row: dict) -> bool:
+    """A real 'oportunidad TOMAR' (gate TOMAR + NEXUS signal). Rows stored before this flag existed never count."""
+    return bool(row.get("opportunity"))
+
+
+def result_row(rec: dict) -> dict:
+    """ScanRow from a scan_results row: its columns + the compact `data` JSON (older rows stored the whole row)."""
+    data = json_loads(rec.get("data"), {}) or {}
+    out: dict[str, Any] = {**RESULT_DEFAULTS, **(data if isinstance(data, dict) else {})}
+    out.update({k: rec.get(k) for k in RESULT_COLUMNS})
+    out.setdefault("description", out["symbol"])
+    out["deep"] = bool(out.get("deep"))
+    return out
+
+
 def rank_rows(rows: list[dict]) -> None:
-    """Deep TAKE first (by gate score), then |score| × confidence."""
+    """Oportunidades TOMAR first (by gate score), then |score| × confidence."""
 
     def key(r: dict) -> tuple:
-        take = bool(r.get("deep")) and r.get("verdict") == "TAKE"
+        take = is_opportunity(r)
         return (0 if take else 1, -(r.get("gate_score") or 0.0) if take else 0.0,
                 -abs(r.get("score") or 0.0) * (r.get("confidence") or 0.0))
 

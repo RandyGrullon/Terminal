@@ -32,12 +32,22 @@ function loadPersisted(): Partial<Persisted> {
   }
 }
 
+/** Section in the URL hash (#/scanner). An empty hash is the default section; an unknown one is null. */
 function pageFromHash(): Page | null {
   const h = location.hash.replace(/^#\/?/, '') as Page
+  if (!h) return 'chart'
   return PAGES.includes(h) ? h : null
 }
 
 const saved = loadPersisted()
+const initialPage: Page = pageFromHash() ?? 'chart'
+
+// Give the first history entry its #/page without adding an entry, so Back from the next section returns here.
+try {
+  if (location.hash !== `#/${initialPage}`) history.replaceState(history.state, '', `#/${initialPage}`)
+} catch {
+  /* history unavailable: ignore */
+}
 
 export interface AppState {
   page: Page
@@ -63,10 +73,11 @@ export interface AppState {
 let toastSeq = 0
 
 export const useApp = create<AppState>((set, get) => ({
-  page: pageFromHash() ?? 'chart',
+  page: initialPage,
   setPage: (page) => {
     set({ page })
-    if (location.hash !== `#/${page}`) history.replaceState(null, '', `#/${page}`)
+    // Every section change is a history entry: the browser's Back / Forward move between sections.
+    if (location.hash !== `#/${page}`) history.pushState(null, '', `#/${page}`)
   },
   symbol: saved.symbol || 'BINANCE:BTCUSDT',
   tf: saved.tf && TIMEFRAMES.includes(saved.tf) ? saved.tf : '1h',
@@ -110,7 +121,10 @@ export function runUiAction(a: UiAction): void {
   else if (a.action === 'notify' && a.message) s.notify(a.message)
 }
 
-window.addEventListener('hashchange', () => {
+// Back / Forward (popstate) and edits of the #/page hash switch the section without adding history entries.
+function syncPageFromHash(): void {
   const p = pageFromHash()
   if (p && p !== useApp.getState().page) useApp.setState({ page: p })
-})
+}
+window.addEventListener('hashchange', syncPageFromHash)
+window.addEventListener('popstate', syncPageFromHash)

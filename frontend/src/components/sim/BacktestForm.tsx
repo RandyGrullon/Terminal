@@ -17,7 +17,7 @@ export function buildBacktestBody(form: Form, appSymbol: string, appTf: Timefram
   if (!inRange(form.limit, 100, 20000)) return { error: 'Velas: indica un número entre 100 y 20.000.' }
   if (!inRange(form.initialCapital, 1, 1e12)) return { error: 'El capital inicial debe ser mayor que 0.' }
   if (!inRange(form.riskPct, 0.01, 100)) return { error: 'Riesgo por operación: entre 0,01 % y 100 %.' }
-  if (!inRange(form.feePct, 0, 10)) return { error: 'Comisión: entre 0 % y 10 %.' }
+  if (form.feePct !== null && !inRange(form.feePct, 0, 10)) return { error: 'Comisión: entre 0 % y 10 % (vacía = la de su clase de activo).' }
   if (!inRange(form.slippagePct, 0, 10)) return { error: 'Slippage: entre 0 % y 10 %.' }
   const params: Record<string, unknown> = {}
   if (form.entryThreshold !== null) {
@@ -32,19 +32,20 @@ export function buildBacktestBody(form: Form, appSymbol: string, appTf: Timefram
     if (!inRange(form.horizon, 1, 500)) return { error: 'Horizonte: entre 1 y 500 velas.' }
     params.horizon = Math.round(form.horizon)
   }
-  return {
-    body: {
-      symbol,
-      tf: form.tf ?? appTf,
-      limit: Math.round(form.limit),
-      initial_capital: form.initialCapital,
-      risk_pct: form.riskPct,
-      fee_pct: form.feePct,
-      slippage_pct: form.slippagePct,
-      use_gate: form.useGate,
-      params,
-    },
+  const body: BacktestBody = {
+    symbol,
+    tf: form.tf ?? appTf,
+    limit: Math.round(form.limit),
+    initial_capital: form.initialCapital,
+    risk_pct: form.riskPct,
+    slippage_pct: form.slippagePct,
+    use_gate: form.useGate,
+    params,
   }
+  // Commission only when the user typed one: otherwise the server uses the asset class's fee (Ajustes › Riesgo,
+  // risk.fee_pct_by_class) and reports the one used in result.params.fee_pct / params.notes.
+  if (form.feePct !== null) body.fee_pct = form.feePct
+  return { body }
 }
 
 const hint = (v: number | null | undefined, fallback: string) =>
@@ -90,8 +91,15 @@ export function BacktestForm(props: {
         <Field label="Riesgo / operación %">
           <NumberInput value={form.riskPct} onChange={(v) => onChange({ riskPct: v })} min={0.01} max={100} step={0.25} />
         </Field>
-        <Field label="Comisión %">
-          <NumberInput value={form.feePct} onChange={(v) => onChange({ feePct: v })} min={0} max={10} step={0.01} />
+        <Field label="Comisión %" hint="Vacío = la de su clase de activo">
+          <NumberInput
+            value={form.feePct}
+            onChange={(v) => onChange({ feePct: v })}
+            min={0}
+            max={10}
+            step={0.01}
+            placeholder="Según la clase de activo (Ajustes)"
+          />
         </Field>
         <Field label="Slippage %">
           <NumberInput value={form.slippagePct} onChange={(v) => onChange({ slippagePct: v })} min={0} max={10} step={0.01} />

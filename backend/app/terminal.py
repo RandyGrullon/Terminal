@@ -11,6 +11,7 @@ Modules register commands at import time:
 from __future__ import annotations
 
 import difflib
+import math
 import shlex
 import time
 import traceback
@@ -90,14 +91,15 @@ class CommandContext:
     def flag_int(self, name: str, default: int | None = None) -> int | None:
         try:
             return int(float(self.flags[name]))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):  # OverflowError: --limit=inf
             return default
 
     def flag_float(self, name: str, default: float | None = None) -> float | None:
         try:
-            return float(self.flags[name])
+            value = float(self.flags[name])
         except (KeyError, TypeError, ValueError):
             return default
+        return value if math.isfinite(value) else default
 
     async def symbol(self, text: str | None) -> str:
         """Resolve user text ('btc', 'aapl', 'BINANCE:ETHUSDT') to a full symbol."""

@@ -18,16 +18,17 @@ import {
 } from 'lucide-react'
 import { api } from '../api/client'
 import type { Candle, GateResult, HistoryKind, NexusCurrent, SymbolDetail } from '../api/types'
+import ChartMacro from '../components/chart/ChartMacro'
 import IndicatorsDialog from '../components/chart/IndicatorsDialog'
 import NexusChart, { type ChartToggles, type NexusChartHandle } from '../components/chart/NexusChart'
 import TradingViewWidget from '../components/chart/TradingViewWidget'
 import { isFiniteNumber } from '../components/chart/chartUtils'
+import { DETAIL_REFRESH_MS, ROLLOVER_DELAY_MS, msToNextUtcDay, priceChange } from '../components/chart/dailyChange'
 import { useIndicators } from '../components/chart/indicatorsModel'
 import { useMarketData } from '../components/chart/useMarketData'
 import SignalPanel from '../components/nexus/SignalPanel'
 import TradeCheck from '../components/nexus/TradeCheck'
 import Watchlist from '../components/nexus/Watchlist'
-import { MacroBadge } from '../components/macro/MacroBadge'
 import { Badge, Button, Empty, ErrorBox, IconButton, Loading, Spinner } from '../components/ui'
 import { VERDICT_LABEL, fmtPct, fmtPrice, signTone, splitSymbol, verdictTone, type Tone } from '../lib/format'
 import { useApp } from '../store'
@@ -101,30 +102,70 @@ function loadPrefs(): Prefs {
   }
 }
 
-function useSymbolDetail(symbol: string): SymbolDetail | null {
-  const [state, setState] = useState<{ symbol: string; detail: SymbolDetail } | null>(null)
+/** Symbol snapshot (description + quote). The quote's daily change rolls with the session, so it is re-read every
+ *  DETAIL_REFRESH_MS while the page is visible and right after 00:00 UTC; `at` = client ms of the snapshot. */
+function useSymbolDetail(symbol: string): { detail: SymbolDetail | null; at: number | null } {
+  const [state, setState] = useState<{ symbol: string; detail: SymbolDetail; at: number } | null>(null)
   useEffect(() => {
     let alive = true
-    api
-      .symbol(symbol)
-      .then((d) => {
-        if (alive && d && typeof d === 'object') setState({ symbol, detail: d })
-      })
-      .catch(() => undefined)
+    let busy = false
+    let lastAt = 0
+    let rollover: number | null = null
+    const load = () => {
+      if (busy) return
+      busy = true
+      api
+        .symbol(symbol)
+        .then((d) => {
+          if (!alive || !d || typeof d !== 'object') return
+          lastAt = Date.now()
+          setState({ symbol, detail: d, at: lastAt })
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          busy = false
+        })
+    }
+    const armRollover = () => {
+      rollover = window.setTimeout(() => {
+        load()
+        armRollover()
+      }, msToNextUtcDay(Date.now()) + ROLLOVER_DELAY_MS)
+    }
+    const onVisible = () => {
+      if (!document.hidden && Date.now() - lastAt >= DETAIL_REFRESH_MS / 2) load()
+    }
+    load()
+    armRollover()
+    const poll = window.setInterval(() => {
+      if (!document.hidden) load()
+    }, DETAIL_REFRESH_MS)
+    document.addEventListener('visibilitychange', onVisible)
     return () => {
       alive = false
+      window.clearInterval(poll)
+      if (rollover !== null) window.clearTimeout(rollover)
+      document.removeEventListener('visibilitychange', onVisible)
     }
   }, [symbol])
-  return state && state.symbol === symbol ? state.detail : null
+  return state && state.symbol === symbol ? { detail: state.detail, at: state.at } : { detail: null, at: null }
 }
 
-function GateChip({ label, gate }: { label: string; gate: GateResult | undefined }) {
+const FAVORABLE_LABEL = 'Filtro favorable · sin señal NEXUS'
+
+/** Gate verdict for one direction. A TOMAR is an opportunity only when NEXUS gives the matching entry signal
+ *  (BUY for a long, SELL for a short); otherwise it is shown as "Filtro favorable · sin señal NEXUS". */
+function GateChip({ label, gate, action }: { label: string; gate: GateResult | undefined; action: string | undefined }) {
   if (!gate || !gate.verdict) return null
-  const tone = verdictTone(gate.verdict)
+  const favorable = gate.verdict === 'TAKE' && action !== (gate.direction === 'short' ? 'SELL' : 'BUY')
+  const tone = favorable ? 'info' : verdictTone(gate.verdict)
+  const title = favorable
+    ? `${label}: ${FAVORABLE_LABEL}. El filtro aprueba la idea, pero NEXUS no da señal de ${gate.direction === 'short' ? 'venta' : 'compra'} en esta vela: no es una oportunidad TOMAR.`
+    : `${label}: ${gate.summary || gate.verdict_label}`
   return (
-    <span className={`chart-gate-chip ${tone}`} title={`${label}: ${gate.summary || gate.verdict_label}`}>
+    <span className={`chart-gate-chip ${tone}`} title={title}>
       {label}
-      <b>{gate.verdict_label || VERDICT_LABEL[gate.verdict]}</b>
+      <b>{favorable ? FAVORABLE_LABEL : gate.verdict_label || VERDICT_LABEL[gate.verdict]}</b>
       {isFiniteNumber(gate.score) && <span className="mono">{Math.round(gate.score)}</span>}
     </span>
   )
@@ -151,7 +192,7 @@ export default function ChartPage() {
     dataVersion: md.dataVersion,
     barVersion: md.barVersion,
   })
-  const detail = useSymbolDetail(symbol)
+  const { detail, at: detailAt } = useSymbolDetail(symbol)
 
   useEffect(() => {
     try {
@@ -217,20 +258,8 @@ export default function ChartPage() {
   const quote = detail?.quote ?? null
   const price = md.live?.price ?? lastCandle?.close ?? (isFiniteNumber(quote?.price) ? quote.price : null)
 
-  const change = useMemo(() => {
-    if (price === null) return null
-    if (quote && isFiniteNumber(quote.price) && isFiniteNumber(quote.change) && quote.price - quote.change > 0) {
-      const prevClose = quote.price - quote.change
-      return { pct: (price / prevClose - 1) * 100, basis: 'Variación del día' }
-    }
-    if (quote && isFiniteNumber(quote.change_pct) && quote.price === price) return { pct: quote.change_pct, basis: 'Variación del día' }
-    if (candles && candles.length >= 2) {
-      const live = md.live
-      const prev = live && lastCandle && live.time > lastCandle.time ? lastCandle.close : candles[candles.length - 2].close
-      if (prev > 0) return { pct: (price / prev - 1) * 100, basis: 'Variación respecto al cierre de la vela anterior' }
-    }
-    return null
-  }, [price, quote, candles, lastCandle, md.live])
+  // Cheap and clock-dependent (a snapshot from before 00:00 UTC no longer defines "the day"): computed every render.
+  const change = priceChange({ price, quote, quoteAt: detailAt, nowMs: Date.now(), candles, live: md.live })
 
   const history = md.candles?.history ?? null
   const historyInfo = history ? (HISTORY_INFO[history] ?? null) : null
@@ -309,11 +338,11 @@ export default function ChartPage() {
           )}
           {current?.gate && (
             <span className="row gap-1" aria-label="Filtro de operaciones">
-              <GateChip label="Largo" gate={current.gate.long} />
-              <GateChip label="Corto" gate={current.gate.short} />
+              <GateChip label="Largo" gate={current.gate.long} action={current.action} />
+              <GateChip label="Corto" gate={current.gate.short} action={current.action} />
             </span>
           )}
-          <MacroBadge symbol={symbol} />
+          <ChartMacro symbol={symbol} scope={`${symbol}|${tf}`} nexusUpdatedAt={md.nexusUpdatedAt} refreshNexus={md.refreshNexus} />
           {(md.nexusLoading || md.nexusRefreshing || (md.candlesLoading && !!candles)) && (
             <span className="row gap-1 tiny muted nowrap" title={md.nexusLoading ? 'Calculando NEXUS…' : 'Actualizando datos…'}>
               <Spinner /> {md.nexusLoading ? 'NEXUS…' : ''}
@@ -369,8 +398,12 @@ export default function ChartPage() {
             <div className="chart-toolbar-spacer" />
             <Button
               size="sm"
-              icon={ind.computing ? <Spinner /> : <ChartLine size={14} />}
-              title="Añadir o editar indicadores (atajo: i)"
+              icon={ind.computing ? <Spinner /> : ind.listError ? <TriangleAlert size={14} className="warn" /> : <ChartLine size={14} />}
+              title={
+                ind.listError
+                  ? 'No se pudo cargar tu lista de indicadores guardada (se reintenta sola). Ábrela para reintentar ahora.'
+                  : 'Añadir o editar indicadores (atajo: i)'
+              }
               onClick={() => openIndicators(null)}
             >
               Indicadores{activeCount ? ` (${activeCount})` : ''}
@@ -399,6 +432,7 @@ export default function ChartPage() {
             <NexusChart
               ref={chartRef}
               viewKey={`${symbol}|${tf}`}
+              tf={tf}
               candles={candles}
               nexus={nexus}
               indicators={indicatorItems}
@@ -440,6 +474,8 @@ export default function ChartPage() {
         catalog={ind.catalog}
         catalogError={ind.catalogError}
         onRetryCatalog={reloadCatalog}
+        listError={ind.listError}
+        onRetryList={ind.retryList}
         items={indicatorItems}
         focusUid={focusUid}
         onAdd={ind.add}

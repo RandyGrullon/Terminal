@@ -1,12 +1,13 @@
 // Sortable scanner results table. Click a row to see the reasons; click the symbol to open its chart.
 import { memo, useCallback, useState } from 'react'
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronRight, TrendingDown, TrendingUp } from 'lucide-react'
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronRight, ShieldCheck, TrendingDown, TrendingUp } from 'lucide-react'
 import type { Regime, ScanRow, Timeframe } from '../../api/types'
-import { REGIME_LABEL, fmtCompact, fmtPct, fmtPrice, fmtProb, fmtScore, regimeTone, signTone, toneColor } from '../../lib/format'
+import { ACTION_LABEL, REGIME_LABEL, fmtCompact, fmtPct, fmtPrice, fmtProb, fmtScore, regimeTone, signTone, toneColor } from '../../lib/format'
 import { useApp } from '../../store'
 import { ActionBadge, Badge, Meter, VerdictBadge } from '../ui'
+import { FAVORABLE_LABEL } from '../nexus/GateChecklist'
 import { isNum, probTone, ratingInfo, typeLabel } from '../markets/opsUtils'
-import { SCAN_ACTION_LABEL, type SortKey, type SortState } from './scanUtils'
+import { SCAN_ACTION_LABEL, favorableNote, isFavorableWithoutSignal, isLegacyTake, type SortKey, type SortState } from './scanUtils'
 
 interface Props {
   rows: ScanRow[]
@@ -22,8 +23,12 @@ const COLUMNS: { key: SortKey | null; label: string; title?: string; num?: boole
   { key: 'change_pct', label: 'Cambio %', num: true },
   { key: 'score', label: 'Score', title: 'Puntuación del modelo (−1 venta … +1 compra)' },
   { key: 'prob_up', label: 'P↑', num: true, title: 'Probabilidad estimada de subida en el horizonte del escáner' },
-  { key: 'action', label: 'Acción' },
-  { key: 'verdict', label: 'Veredicto', title: 'Veredicto del filtro (Trade Gate) y su puntuación 0-100' },
+  { key: 'action', label: 'Acción', title: 'Señal del modelo rápido del escáner (no es la acción de NEXUS completo)' },
+  {
+    key: 'verdict',
+    label: 'Veredicto',
+    title: 'Veredicto del filtro (Trade Gate) y su puntuación 0-100; un TOMAR solo es oportunidad si NEXUS da la señal de entrada',
+  },
   { key: 'regime', label: 'Régimen' },
   { key: null, label: 'SL / TP1 / TP2', title: 'Niveles propuestos por NEXUS: SL «hasta aquí» y objetivos' },
   { key: 'expected_move_pct', label: 'Mov. esperado', num: true, title: 'Movimiento esperado en el horizonte de NEXUS' },
@@ -46,6 +51,18 @@ function Levels({ row }: { row: ScanRow }) {
       <span className="pos">{fmtPrice(row.tp2)}</span>
     </div>
   )
+}
+
+const LEGACY_TAKE_NOTE = 'Escaneo anterior a la comprobación de la señal NEXUS: este TOMAR es solo el veredicto del filtro'
+const NO_VERDICT_TITLE = 'NEXUS no dio veredicto para este activo: abre la fila para ver el motivo'
+const SHALLOW_TITLE =
+  'Solo modelo rápido: el modo profundo analiza solo los mejores candidatos y omite los datos desactualizados o con ' +
+  'poco historial (abre la fila para ver el motivo)'
+
+/** Tooltip of the verdict cell: direction evaluated, plus a note on TOMAR rows of runs that did not check NEXUS. */
+function verdictTitle(r: ScanRow): string | undefined {
+  const dir = r.direction ? `Evaluado en ${r.direction === 'long' ? 'largo' : 'corto'}` : ''
+  return [dir, isLegacyTake(r) ? LEGACY_TAKE_NOTE : ''].filter(Boolean).join(' · ') || undefined
 }
 
 const Row = memo(function Row(props: { row: ScanRow; open: boolean; onToggle: (symbol: string) => void; onOpenChart: (symbol: string) => void }) {
@@ -96,12 +113,21 @@ const Row = memo(function Row(props: { row: ScanRow; open: boolean; onToggle: (s
         </td>
         <td>
           {r.deep && r.verdict ? (
-            <span className="row gap-1" title={r.direction ? `Evaluado en ${r.direction === 'long' ? 'largo' : 'corto'}` : undefined}>
-              <VerdictBadge verdict={r.verdict} score={r.gate_score} />
+            <span className="row gap-1" title={verdictTitle(r)}>
+              {isFavorableWithoutSignal(r) ? (
+                // Same chip as GateVerdictBadge (components/nexus/GateChecklist): neutral info tone, never the green TOMAR.
+                <span className="verdict info" style={{ color: 'var(--info)' }} title={favorableNote(r)}>
+                  <ShieldCheck size={15} />
+                  {FAVORABLE_LABEL}
+                  {isNum(r.gate_score) && <span className="mono" style={{ opacity: 0.85 }}>{Math.round(r.gate_score)}/100</span>}
+                </span>
+              ) : (
+                <VerdictBadge verdict={r.verdict} score={r.gate_score} />
+              )}
               {r.direction === 'long' ? <TrendingUp size={13} className="pos" /> : r.direction === 'short' ? <TrendingDown size={13} className="neg" /> : null}
             </span>
           ) : (
-            <span className="tiny muted" title="Solo modelo rápido: activa el modo profundo para pasar el filtro">
+            <span className="tiny muted" title={r.deep ? NO_VERDICT_TITLE : SHALLOW_TITLE}>
               {r.deep ? 'sin veredicto' : 'sin análisis'}
             </span>
           )}
@@ -138,6 +164,11 @@ const Row = memo(function Row(props: { row: ScanRow; open: boolean; onToggle: (s
                 Calificación TradingView: <b style={{ color: toneColor(rating.tone) }}>{rating.label}</b>
               </span>
               <span>Volumen: {fmtCompact(r.volume)}</span>
+              {r.deep && r.nexus_action && (
+                <span>
+                  Acción NEXUS: <b>{ACTION_LABEL[r.nexus_action] ?? r.nexus_action}</b>
+                </span>
+              )}
               <span>{r.deep ? 'Análisis profundo: NEXUS completo + filtro' : 'Solo modelo rápido (sin NEXUS completo)'}</span>
             </div>
           </td>

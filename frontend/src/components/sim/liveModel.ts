@@ -9,6 +9,7 @@ import {
   addLine,
   addVolume,
   positionLevels,
+  timeScaleFor,
   toCandleData,
   toLineData,
   toVolumeData,
@@ -81,12 +82,15 @@ export class SimFeedModel {
   candles: Candle[] = []
   markers: ChartMarker[] = []
   emas: EmaTrack[] = []
+  /** Timeframe of the session: the chart converts bar times with it (1d / 1w keep their UTC dates). */
+  tf: string | null = null
   /** Bumped whenever the whole data set is replaced or trimmed. */
   version = 0
   private markerKeys = new Set<string>()
   private byTime = new Map<number, ChartMarker[]>()
 
-  load(candles: Candle[], nexus: NexusResponse | null): void {
+  load(candles: Candle[], nexus: NexusResponse | null, tf: string | null = null): void {
+    this.tf = tf
     this.candles = sanitizeCandles(candles)
     this.emas = buildEmaTracks(this.candles, nexus?.bars)
     this.markers = []
@@ -226,15 +230,17 @@ export class LiveChartView {
     const timeScale = this.chart.timeScale()
     const prev = fit ? null : timeScale.getVisibleLogicalRange()
     const followEdge = !prev || prev.to >= this.renderedLen - 3
+    const tf = model.tf
     try {
-      this.candles.setData(toCandleData(model.candles))
-      this.volume.setData(toVolumeData(model.candles))
+      this.chart.applyOptions({ timeScale: timeScaleFor(tf) })
+      this.candles.setData(toCandleData(model.candles, tf))
+      this.volume.setData(toVolumeData(model.candles, tf))
       const times = model.times()
       for (const [key, series] of this.emaSeries) {
         const track = model.emas.find((t) => t.key === key)
-        series.setData(track ? toLineData(times, track.values) : [])
+        series.setData(track ? toLineData(times, track.values, tf) : [])
       }
-      this.markerLayer.set(model.markers)
+      this.markerLayer.set(model.markers, tf)
     } catch (err) {
       console.error('No se pudo dibujar el gráfico del simulador', err)
     }
@@ -248,7 +254,7 @@ export class LiveChartView {
   pushed(model: SimFeedModel, kind: Exclude<PushResult, 'ignored'>): void {
     const c = model.lastCandle()
     if (!c) return
-    const t = ts(c.time)
+    const t = ts(c.time, model.tf)
     try {
       this.candles.update({ time: t, open: c.open, high: c.high, low: c.low, close: c.close })
       this.volume.update({ time: t, value: c.volume, color: c.close >= c.open ? COLORS.upVol : COLORS.downVol })
@@ -268,7 +274,7 @@ export class LiveChartView {
 
   renderMarkers(model: SimFeedModel): void {
     try {
-      this.markerLayer.set(model.markers)
+      this.markerLayer.set(model.markers, model.tf)
     } catch (err) {
       console.error('No se pudieron dibujar las marcas NEXUS', err)
     }

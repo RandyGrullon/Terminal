@@ -1,8 +1,10 @@
 // Out-of-sample accuracy over time: hit rate (%) on top with a 50 % "coin flip" reference and the Brier score
-// below with its 0.25 reference. Used for the global timeline and for a single NEXUS model's rolling stats.
+// below with its 0.25 reference. Used for the global timeline (one point per UTC day: tf '1d') and for a single
+// NEXUS model's rolling stats (bar times of the model's timeframe). Times go through lib/chart `ts(sec, tf)`, so
+// daily points keep their UTC date instead of showing as the previous day at 20:00 in UTC-4.
 import { memo, useEffect, useRef } from 'react'
 import type { ISeriesApi } from 'lightweight-charts'
-import { COLORS, LevelLines, LineStyle, addLine, ts, useChart } from '../../lib/chart'
+import { COLORS, LevelLines, LineStyle, addLine, timeScaleFor, ts, useChart } from '../../lib/chart'
 import { Empty } from '../ui'
 import { ensureAscending, toSec } from '../studio/chartUtils'
 import { ratePct } from './learnFormat'
@@ -21,8 +23,8 @@ interface Series {
   brierRef: LevelLines
 }
 
-function TimelineChart({ points, height = 260 }: { points: TimelinePoint[]; height?: number }) {
-  const { ref, chart } = useChart({ timeScale: { timeVisible: true, rightOffset: 2 } })
+function TimelineChart({ points, height = 260, tf }: { points: TimelinePoint[]; height?: number; tf?: string }) {
+  const { ref, chart } = useChart({ timeScale: { ...timeScaleFor(tf), rightOffset: 2 } })
   const series = useRef<Series | null>(null)
 
   useEffect(() => {
@@ -49,24 +51,26 @@ function TimelineChart({ points, height = 260 }: { points: TimelinePoint[]; heig
   useEffect(() => {
     const s = series.current
     if (!chart || !s) return
+    // 1d / 1w: dates without a clock on the axis and crosshair (see lib/chart.ts timeScaleFor).
+    chart.applyOptions({ timeScale: { ...timeScaleFor(tf), rightOffset: 2 } })
     const clean = points.filter((p) => typeof p.time === 'number' && Number.isFinite(p.time))
     s.hit.setData(
       ensureAscending(
         clean.flatMap((p) => {
           const v = ratePct(p.hit_rate)
-          return v === null ? [] : [{ time: ts(toSec(p.time)), value: v }]
+          return v === null ? [] : [{ time: ts(toSec(p.time), tf), value: v }]
         }),
       ),
     )
     s.brier.setData(
       ensureAscending(
         clean.flatMap((p) =>
-          typeof p.brier === 'number' && Number.isFinite(p.brier) ? [{ time: ts(toSec(p.time)), value: p.brier }] : [],
+          typeof p.brier === 'number' && Number.isFinite(p.brier) ? [{ time: ts(toSec(p.time), tf), value: p.brier }] : [],
         ),
       ),
     )
     chart.timeScale().fitContent()
-  }, [chart, points])
+  }, [chart, points, tf])
 
   return (
     <div className="brain-timeline" style={{ height }}>

@@ -21,6 +21,7 @@ import {
   addCandles,
   addLine,
   addVolume,
+  timeScaleFor,
   toCandleData,
   toHistogramData,
   toLineData,
@@ -82,12 +83,12 @@ function createPlotSeries(chart: IChartApi, plot: ScriptPlot, pane: number, colo
   }
 }
 
-function plotData(plot: ScriptPlot, time: number[], color: string) {
+function plotData(plot: ScriptPlot, time: number[], color: string, tf: string) {
   const n = Math.min(time.length, Array.isArray(plot.data) ? plot.data.length : 0)
   const t = n === time.length ? time : time.slice(0, n)
   const v = n === plot.data.length ? plot.data : plot.data.slice(0, n)
-  if (plot.style === 'histogram' || plot.style === 'columns') return ensureAscending(toHistogramData(t, v, color, color))
-  return ensureAscending(toLineData(t, v))
+  if (plot.style === 'histogram' || plot.style === 'columns') return ensureAscending(toHistogramData(t, v, tf, color, color))
+  return ensureAscending(toLineData(t, v, tf))
 }
 
 const LINE_STYLE = { solid: LineStyle.Solid, dashed: LineStyle.Dashed, dotted: LineStyle.Dotted } as const
@@ -98,6 +99,7 @@ interface Props {
   running: boolean
   error: string | null
   symbol: string
+  /** Timeframe of `result` (1d / 1w bars are drawn with their UTC session dates). */
   tf: string
   onRetry: () => void
 }
@@ -165,9 +167,10 @@ function PreviewChart({ result, viewKey, running, error, symbol, tf, onRetry }: 
     }
 
     try {
-      const candleData = ensureAscending(toCandleData(result.candles))
+      chart.applyOptions({ timeScale: timeScaleFor(tf) })
+      const candleData = ensureAscending(toCandleData(result.candles, tf))
       b.candles.setData(candleData)
-      b.volume.setData(ensureAscending(toVolumeData(result.candles)))
+      b.volume.setData(ensureAscending(toVolumeData(result.candles, tf)))
 
       // Plots: overlay -> pane 0, the rest grouped by their declared pane (renumbered 1..n).
       const time = result.time.length ? result.time : result.candles.map((c) => c.time)
@@ -179,7 +182,7 @@ function PreviewChart({ result, viewKey, running, error, symbol, tf, onRetry }: 
       for (const { p, pane } of ordered) {
         const color = resolveColor(p.color, COLORS.info)
         const series = createPlotSeries(chart, p, pane, color)
-        series.setData(plotData(p, time, color))
+        series.setData(plotData(p, time, color, tf))
         dyn.current.series.push(series)
         dyn.current.plots.push({ plot: p, series })
       }
@@ -206,7 +209,7 @@ function PreviewChart({ result, viewKey, running, error, symbol, tf, onRetry }: 
           ownPane,
         )
         bg.priceScale().applyOptions({ visible: false, scaleMargins: { top: 0, bottom: 0 } })
-        bg.setData(ensureAscending(result.bgcolors.map((x) => ({ time: ts(x.time), value: 1, color: softBackground(x.color) }))))
+        bg.setData(ensureAscending(result.bgcolors.map((x) => ({ time: ts(x.time, tf), value: 1, color: softBackground(x.color) }))))
         try {
           bg.setSeriesOrder(0)
         } catch {
@@ -240,7 +243,10 @@ function PreviewChart({ result, viewKey, running, error, symbol, tf, onRetry }: 
         }
       }
 
-      b.markers.set([...result.markers, ...(result.strategy?.markers ?? [])].filter((m) => typeof m.time === 'number' && Number.isFinite(m.time)))
+      b.markers.set(
+        [...result.markers, ...(result.strategy?.markers ?? [])].filter((m) => typeof m.time === 'number' && Number.isFinite(m.time)),
+        tf,
+      )
 
       if (shownKey.current !== viewKey) {
         const n = candleData.length
@@ -250,7 +256,7 @@ function PreviewChart({ result, viewKey, running, error, symbol, tf, onRetry }: 
     } catch (err) {
       setDrawError(err instanceof Error ? err.message : String(err))
     }
-  }, [chart, result, viewKey])
+  }, [chart, result, viewKey, tf])
 
   const legend = useMemo(() => {
     if (!result) return []

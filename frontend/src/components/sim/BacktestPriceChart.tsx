@@ -12,6 +12,7 @@ import {
   addCandles,
   addVolume,
   fromTs,
+  timeScaleFor,
   toCandleData,
   toVolumeData,
   ts,
@@ -33,8 +34,12 @@ interface Layers {
 
 export function BacktestPriceChart(props: { result: BacktestResult; selected: Trade | null; onClearSelection: () => void }) {
   const { result, selected } = props
-  const { ref, chart } = useChart()
+  // 1d / 1w backtests are drawn with their UTC session dates (see lib/chart.ts `ts`).
+  const tf = result.tf
+  const { ref, chart } = useChart({ timeScale: timeScaleFor(tf) })
   const layers = useRef<Layers | null>(null)
+  const tfRef = useRef(tf)
+  tfRef.current = tf
   const [showRejected, setShowRejected] = useState(true)
   const [showLevels, setShowLevels] = useState(true)
   const [hover, setHover] = useState<MarkerHover | null>(null)
@@ -61,7 +66,7 @@ export function BacktestPriceChart(props: { result: BacktestResult; selected: Tr
         setHover(null)
         return
       }
-      const t = fromTs(param.time)
+      const t = fromTs(param.time, tfRef.current)
       const ms = indexRef.current.get(t) ?? []
       setHover(ms.length ? { x: param.point.x, y: param.point.y, width: el.clientWidth, height: el.clientHeight, time: t, markers: ms } : null)
     }
@@ -81,35 +86,36 @@ export function BacktestPriceChart(props: { result: BacktestResult; selected: Tr
     const l = layers.current
     if (!chart || !l) return
     try {
-      l.candles.setData(toCandleData(candles))
-      l.volume.setData(toVolumeData(candles))
+      chart.applyOptions({ timeScale: timeScaleFor(tf) })
+      l.candles.setData(toCandleData(candles, tf))
+      l.volume.setData(toVolumeData(candles, tf))
       applyPricePrecision(l.candles, candles.length ? candles[candles.length - 1].close : null)
       chart.timeScale().fitContent()
     } catch (err) {
       console.error('No se pudo dibujar el gráfico de precio del backtest', err)
     }
-  }, [chart, candles])
+  }, [chart, candles, tf])
 
   useEffect(() => {
     const l = layers.current
     if (!chart || !l) return
     try {
-      l.markers.set(visibleMarkers)
+      l.markers.set(visibleMarkers, tf)
     } catch (err) {
       console.error('No se pudieron dibujar las marcas del backtest', err)
     }
-  }, [chart, visibleMarkers])
+  }, [chart, visibleMarkers, tf])
 
   useEffect(() => {
     const l = layers.current
     if (!chart || !l) return
     try {
-      if (showLevels) l.levels.set(tradeLevelBars(candles, result.trades))
+      if (showLevels) l.levels.set(tradeLevelBars(candles, result.trades), tf)
       else l.levels.clear()
     } catch (err) {
       console.error('No se pudieron dibujar los niveles de las operaciones', err)
     }
-  }, [chart, candles, result.trades, showLevels])
+  }, [chart, candles, result.trades, showLevels, tf])
 
   useEffect(() => {
     const l = layers.current
@@ -136,12 +142,12 @@ export function BacktestPriceChart(props: { result: BacktestResult; selected: Tr
     const to = Math.min(lastT, exitT + pad)
     if (to > from) {
       try {
-        chart.timeScale().setVisibleRange({ from: ts(from), to: ts(to) })
+        chart.timeScale().setVisibleRange({ from: ts(from, tf), to: ts(to, tf) })
       } catch {
         /* range outside data: keep the current view */
       }
     }
-  }, [chart, selected, candles])
+  }, [chart, selected, candles, tf])
 
   return (
     <Card

@@ -2,8 +2,9 @@
 // be added several times) and the "Activos" section to edit parameters or remove indicators.
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ChartLine, Plus, RotateCcw, Search, Settings2, Trash2, TriangleAlert, X } from 'lucide-react'
+import { errorMessage } from '../../api/client'
 import type { IndicatorParam, IndicatorSpec } from '../../api/types'
-import { Badge, Button, Empty, ErrorBox, Field, IconButton, Loading, Modal, Select, Spinner, Tabs, Toggle } from '../ui'
+import { Badge, Button, Empty, ErrorBox, Field, IconButton, Loading, Modal, Select, Spinner, Tabs, Toggle, useFieldId } from '../ui'
 import { foldText, safeColor, type ParamMap, type ParamValue } from './chartUtils'
 import {
   CATEGORY_ORDER,
@@ -22,6 +23,9 @@ interface Props {
   catalog: IndicatorSpec[] | null
   catalogError: unknown
   onRetryCatalog: () => void
+  /** The saved list could not be read yet (retried automatically; edits are not saved until it loads). */
+  listError?: unknown
+  onRetryList?: () => void
   items: ResolvedIndicator[]
   focusUid: string | null
   onAdd: (spec: IndicatorSpec) => void
@@ -37,6 +41,7 @@ function NumberParam(props: { param: IndicatorParam; value: number; onCommit: (v
   const { param, value, onCommit } = props
   const [draft, setDraft] = useState(String(value))
   const focused = useRef(false)
+  const fieldId = useFieldId() // inside the parameter's <Field>: its label names this input
 
   useEffect(() => {
     if (!focused.current) setDraft(String(value))
@@ -60,6 +65,7 @@ function NumberParam(props: { param: IndicatorParam; value: number; onCommit: (v
 
   return (
     <input
+      id={fieldId}
       className="input mono"
       type="number"
       value={draft}
@@ -212,6 +218,7 @@ function IndicatorsDialog(props: Props) {
     })
 
   const full = items.length >= MAX_INDICATORS
+  const listFailed = !!props.listError
 
   const renderSpec = (s: IndicatorSpec) => {
     const count = activeCount.get(s.id) ?? 0
@@ -259,7 +266,10 @@ function IndicatorsDialog(props: Props) {
       footer={
         <>
           <span className="tiny muted grow">
-            Atajo: pulsa <kbd className="chart-kbd">i</kbd> en el gráfico. Los indicadores se guardan automáticamente.
+            Atajo: pulsa <kbd className="chart-kbd">i</kbd> en el gráfico.{' '}
+            {listFailed
+              ? 'Los cambios no se guardarán hasta que se cargue tu lista guardada.'
+              : 'Los indicadores se guardan automáticamente.'}
           </span>
           {items.length > 0 && (
             <Button size="sm" variant="ghost" icon={<Trash2 size={13} />} onClick={props.onClear}>
@@ -312,6 +322,23 @@ function IndicatorsDialog(props: Props) {
 
         <section className="chart-ind-active">
           <h4 className="chart-ind-cat">Activos</h4>
+          {listFailed && (
+            <div className="notice chart-ind-list-error" role="status">
+              <TriangleAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
+              <div className="grow col gap-1">
+                <span>
+                  <b>No se pudo cargar tu lista de indicadores guardada.</b> Se reintenta automáticamente; mientras tanto
+                  tus cambios no se guardan, para no borrar la lista guardada.
+                </span>
+                <span className="tiny muted">{errorMessage(props.listError)}</span>
+              </div>
+              {props.onRetryList && (
+                <Button size="sm" icon={<RotateCcw size={13} />} onClick={props.onRetryList}>
+                  Reintentar
+                </Button>
+              )}
+            </div>
+          )}
           {items.length === 0 && (
             <Empty icon={<ChartLine size={20} />} title="Sin indicadores">
               Haz clic en cualquier indicador del catálogo para añadirlo al gráfico.

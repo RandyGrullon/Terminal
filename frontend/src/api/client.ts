@@ -1,6 +1,8 @@
 // Typed REST client for the NEXUS backend. Same origin in local mode; VITE_API_BASE in cloud mode, where every
-// call carries the Supabase session token (refreshed and retried once on 401).
-import { authEnabled, ensureFreshSession, getAccessToken, refreshSession, signOut } from '../auth/session'
+// call carries the Supabase session token (refreshed and retried once on 401). A 503 because the backend could not
+// verify the session (Supabase unreachable) or because this instance is in standby while another one is active
+// (deploys) is transient: the session is kept and GET requests are retried.
+import { authEnabled, currentSession, ensureFreshSession, getAccessToken, refreshSession, signOut, type Session } from '../auth/session'
 import { apiUrl } from '../lib/config'
 import type {
   BacktestResult,
@@ -65,6 +67,41 @@ interface RequestOptions {
   signal?: AbortSignal
 }
 
+/** Waits before retrying a GET that got a transient 503 (see isTransient503). */
+const TRANSIENT_RETRY_DELAYS_MS = [1000, 3000]
+
+/** Transient 503s, never a reason to sign out: "no se pudo verificar tu sesión…" (app.auth: Supabase unreachable) and
+ *  "Instancia en espera…" (app.main StandbyGate: another instance holds the database, e.g. during a deploy). Both come
+ *  with Retry-After, which a cross-origin page cannot read (not exposed by CORS), hence the detail. Other 503s mean a
+ *  module is not available and are not retried. */
+function isTransient503(status: number, data: unknown): boolean {
+  const detail = (data as { detail?: unknown } | null)?.detail
+  return status === 503 && typeof detail === 'string' && /verificar (tu|la) sesi[oó]n|^instancia en espera/i.test(detail.trim())
+}
+
+function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException('Aborted', 'AbortError'))
+    const onAbort = () => {
+      window.clearTimeout(timer)
+      reject(new DOMException('Aborted', 'AbortError'))
+    }
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function errorText(status: number, data: unknown): string {
+  const detail = (data as { detail?: unknown } | null)?.detail
+  if (typeof detail === 'string') return detail
+  if (detail && typeof detail === 'object' && 'message' in detail) return String((detail as { message: unknown }).message)
+  if (Array.isArray(detail) && detail.length) return 'Parámetros no válidos: ' + detail.map((d) => d?.msg ?? '').join('; ')
+  return `Error ${status}`
+}
+
 export async function request<T>(method: string, path: string, opts: RequestOptions = {}, retried = false): Promise<T> {
   let url = apiUrl(path)
   if (opts.query) {
@@ -75,45 +112,56 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
     const qs = params.toString()
     if (qs) url += (url.includes('?') ? '&' : '?') + qs
   }
-  await ensureFreshSession()
-  const headers: Record<string, string> = {}
-  if (opts.body !== undefined) headers['Content-Type'] = 'application/json'
-  const token = getAccessToken()
-  if (token) headers.Authorization = `Bearer ${token}`
-  let res: Response
-  try {
-    res = await fetch(url, {
-      method,
-      headers,
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-      signal: opts.signal,
-    })
-  } catch (err) {
-    if ((err as Error)?.name === 'AbortError') throw err
-    throw new ApiError('No hay conexión con el servidor NEXUS', 0, null)
-  }
-  if (res.status === 401 && authEnabled()) {
-    if (!retried && (await refreshSession())) return request<T>(method, path, opts, true)
-    void signOut()
-  }
-  const text = await res.text()
-  let data: unknown = null
-  if (text) {
+  for (let attempt = 0; ; attempt++) {
+    await ensureFreshSession()
+    const headers: Record<string, string> = {}
+    if (opts.body !== undefined) headers['Content-Type'] = 'application/json'
+    const token = getAccessToken()
+    if (token) headers.Authorization = `Bearer ${token}`
+    let res: Response
     try {
-      data = JSON.parse(text)
-    } catch {
-      data = text
+      res = await fetch(url, {
+        method,
+        headers,
+        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+        signal: opts.signal,
+      })
+    } catch (err) {
+      if ((err as Error)?.name === 'AbortError') throw err
+      throw new ApiError('No hay conexión con el servidor NEXUS', 0, null)
     }
+    if (res.status === 401 && authEnabled() && currentSession()) {
+      if (retried) {
+        // Even a freshly refreshed token is refused: this account may no longer use this NEXUS instance.
+        void signOut({ scope: 'local' })
+      } else {
+        let fresh: Session | null
+        try {
+          fresh = await refreshSession()
+        } catch (err) {
+          // Supabase could not refresh the token right now: keep the session (a retry is scheduled).
+          throw new ApiError(errorMessage(err), 401, null)
+        }
+        if (fresh) return request<T>(method, path, opts, true)
+        // null: the refresh token was rejected for good and the session is closed (login screen).
+      }
+    }
+    const text = await res.text()
+    let data: unknown = null
+    if (text) {
+      try {
+        data = JSON.parse(text)
+      } catch {
+        data = text
+      }
+    }
+    if (method.toUpperCase() === 'GET' && attempt < TRANSIENT_RETRY_DELAYS_MS.length && isTransient503(res.status, data)) {
+      await wait(TRANSIENT_RETRY_DELAYS_MS[attempt], opts.signal)
+      continue
+    }
+    if (!res.ok) throw new ApiError(errorText(res.status, data), res.status, data)
+    return data as T
   }
-  if (!res.ok) {
-    const detail = (data as { detail?: unknown } | null)?.detail
-    let message = `Error ${res.status}`
-    if (typeof detail === 'string') message = detail
-    else if (detail && typeof detail === 'object' && 'message' in detail) message = String((detail as { message: unknown }).message)
-    else if (Array.isArray(detail) && detail.length) message = 'Parámetros no válidos: ' + detail.map((d) => d?.msg ?? '').join('; ')
-    throw new ApiError(message, res.status, data)
-  }
-  return data as T
 }
 
 const get = <T>(path: string, query?: Query, signal?: AbortSignal) => request<T>('GET', path, { query, signal })

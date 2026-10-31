@@ -1,7 +1,8 @@
 # Fly.io (alternativa a Railway). Pasos en docs/DEPLOY.md:
-#   fly launch --no-deploy --copy-config --name <tu-app>
+#   fly launch --no-deploy --copy-config --ha=false --name <tu-app>
 #   fly secrets set NEXUS_DATABASE_URL=... NEXUS_SUPABASE_URL=... NEXUS_SUPABASE_ANON_KEY=... NEXUS_ALLOWED_EMAILS=... NEXUS_CORS_ORIGINS=...
-#   fly deploy
+#   fly deploy --ha=false
+# Sin --ha=false Fly crea DOS máquinas; si ya las tienes: fly scale count 1
 app = "nexus-terminal"
 primary_region = "fra"   # Europa: compatible con Binance/OKX (sus APIs bloquean IPs de EE. UU.)
 
@@ -12,12 +13,15 @@ primary_region = "fra"   # Europa: compatible con Binance/OKX (sus APIs bloquean
   NEXUS_HOST = "0.0.0.0"
   NEXUS_PORT = "8080"
   NEXUS_AUTH = "supabase"
+  # Límite aproximado de memoria por script PyChart (pueden correr 2 a la vez en esta máquina de 1 GB)
+  NEXUS_SCRIPT_MEMORY_MB = "320"
 
 [http_service]
   internal_port = 8080
   force_https = true
   # NEXUS tiene servicios de fondo (vigilancia, escáner, evaluador, cuenta demo): debe quedarse encendido
-  # y con UNA sola máquina (los bucles de fondo no deben duplicarse).
+  # y con UNA sola máquina. Si llegara a haber dos, solo la que tiene el bloqueo de Postgres ejecuta los
+  # servicios; la otra queda en espera (503 "Instancia en espera" salvo /api/health).
   auto_stop_machines = "off"
   auto_start_machines = true
   min_machines_running = 1

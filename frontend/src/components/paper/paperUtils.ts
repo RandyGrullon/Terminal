@@ -62,12 +62,14 @@ export function distPct(level: number | null | undefined, price: number | null |
 
 export type AdviceLevel = 'close' | 'warn' | 'ok' | 'none'
 
-/** How urgent the live NEXUS advice for a position is ("close" = NEXUS recommends closing now). */
+/** How urgent the live NEXUS advice for a position is. "close" only when the advice itself says to close ("Cerrar
+ *  ya: …", the monitor's exit decision): NEXUS' other warnings — a negative EV of holding ("vigila la salida"), a
+ *  volatility spike, the market-conditions alert — are cautions while it keeps the position, never "cerrar". */
 export function adviceLevel(p: Position): AdviceLevel {
   const warnings = Array.isArray(p.warnings) ? p.warnings : []
   const advice = (p.advice ?? '').trim()
-  if (/^(cerrar|salir)/i.test(advice) || warnings.some((w) => w.code === 'EARLY_EXIT' || w.severity === 'critical')) return 'close'
-  if (warnings.some((w) => w.severity === 'warn')) return 'warn'
+  if (/^(cerrar|salir)/i.test(advice)) return 'close'
+  if (warnings.some((w) => w.severity === 'warn' || w.severity === 'critical')) return 'warn'
   return advice ? 'ok' : 'none'
 }
 

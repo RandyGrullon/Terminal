@@ -215,8 +215,10 @@ def row_info(row: dict, market: str | None = None) -> dict:
 
 
 def row_quote(row: dict, ts_ms: int) -> dict:
-    """Quote (types.ts) from a scan row with QUOTE_COLUMNS."""
-    return {
+    """Quote (types.ts) from a scan row with QUOTE_COLUMNS. ``ts`` is when TradingView returned it; ``delay_s`` is
+    added only when TradingView announces delayed data (e.g. 900 for NASDAQ/NYSE without a real-time feed), so the UI
+    never presents a 15-minute-old price as live."""
+    quote = {
         "symbol": str(row.get("symbol") or "").upper(),
         "price": num(row.get("close")),
         "change_pct": num(row.get("change")),
@@ -227,6 +229,10 @@ def row_quote(row: dict, ts_ms: int) -> dict:
         "open": num(row.get("open")),
         "ts": int(ts_ms),
     }
+    delay = delay_seconds(row.get("update_mode"))
+    if delay:
+        quote["delay_s"] = int(delay)
+    return quote
 
 
 def row_technicals(row: dict) -> dict[str, float | None]:
@@ -260,9 +266,12 @@ def public_universe_row(row: dict) -> dict:
 
 
 def row_current_bars(row: dict, tfs: Iterable[str], now: int) -> dict[str, dict]:
-    """{tf: Candle} for the bars forming at `now` (time = floor_time(now, tf)). The close of every timeframe is the
-    freshest `close` (high/low widened to contain it). Timeframes without data are omitted."""
+    """{tf: Candle} for the bars forming in market time. TradingView announces the data delay of each row
+    (`update_mode`, e.g. delayed_streaming_900 = 15 min for NASDAQ/NYSE), so the values describe the market at
+    `asof = now - delay`: bars are stamped floor_time(asof, tf) and carry `asof` (unix s). The close of every
+    timeframe is the freshest `close` (high/low widened to contain it). Timeframes without data are omitted."""
     latest = num(row.get("close"))
+    asof = int(now) - int(delay_seconds(row.get("update_mode")) or 0)
     out: dict[str, dict] = {}
     for tf in tfs:
         sfx = CURRENT_BAR_SUFFIX.get(tf)
@@ -275,12 +284,13 @@ def row_current_bars(row: dict, tfs: Iterable[str], now: int) -> dict[str, dict]
             c = latest
         v = num(row.get(f"volume{sfx}"))
         out[tf] = {
-            "time": floor_time(now, tf),
+            "time": floor_time(asof, tf),
             "open": o,
             "high": max(h, o, c),
             "low": min(lo, o, c),
             "close": c,
             "volume": v if v is not None and v >= 0 else 0.0,
+            "asof": asof,
         }
     return out
 

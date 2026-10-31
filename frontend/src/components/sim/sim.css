@@ -374,6 +374,12 @@
   background: var(--warn-bg);
   border-color: rgba(245, 165, 36, 0.4);
 }
+/* gate TOMAR without the matching NEXUS signal: "Filtro favorable · sin señal NEXUS" (neutral, never green) */
+.sim-headline.info {
+  color: var(--info);
+  background: var(--info-bg);
+  border-color: rgba(62, 166, 255, 0.4);
+}
 .sim-gate {
   display: flex;
   flex-direction: column;
@@ -395,6 +401,9 @@
 }
 .sim-gate.focus.warn {
   box-shadow: inset 3px 0 0 var(--warn);
+}
+.sim-gate.focus.info {
+  box-shadow: inset 3px 0 0 var(--info);
 }
 .sim-gate-dir {
   font-size: 12.5px;
@@ -427,6 +436,9 @@
   font-size: 12px;
   line-height: 1.35;
   color: var(--text-2);
+}
+.sim-gate-summary.info {
+  color: var(--info);
 }
 .sim-checks {
   display: flex;
@@ -522,6 +534,12 @@
   background: var(--neg-bg);
   border: 1px solid rgba(234, 57, 67, 0.4);
 }
+/* "Vigila la salida": a caution while NEXUS keeps the position, not an order to close */
+.sim-alert.warn {
+  color: #ffd9a0;
+  background: var(--warn-bg);
+  border: 1px solid rgba(245, 165, 36, 0.4);
+}
 .sim-alert svg {
   flex: none;
   margin-top: 2px;
@@ -534,7 +552,8 @@
   gap: 10px 12px;
   align-items: start;
 }
-.sim-form .field > label {
+.sim-form .field > label,
+.sim-form .field > .label {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

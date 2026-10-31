@@ -1,8 +1,11 @@
-// "Efecto del filtro": gated vs ungated backtest, so the user SEES what saying NO to bad trades is worth.
+// "Efecto del filtro": gated vs ungated backtest, so the user SEES what saying NO to doubtful trades changed in this
+// period. Differences of percentages are percentage points (pp); the rejected signals are compared with the taken
+// trades and never sold as proof on a small sample.
 import { Info, ShieldCheck } from 'lucide-react'
 import type { BacktestMetrics } from '../../api/types'
-import { fmtInt, fmtNum, fmtPct, fmtProb, type Tone } from '../../lib/format'
+import { fmtInt, fmtNum, fmtPct, type Tone } from '../../lib/format'
 import { Card } from '../ui'
+import { evidenceText, evidenceTone, filterEvidence, fmtTally } from '../brain/evidence'
 import { asFraction, ddValue } from './labels'
 
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
@@ -98,22 +101,28 @@ function buildRows(g: BacktestMetrics, u: BacktestMetrics): Row[] {
 function RejectedLine(props: { metrics: BacktestMetrics }) {
   const m = props.metrics
   const rejected = num(m.rejected_signals) ?? 0
-  const wouldWin = asFraction(m.rejected_would_win_rate)
-  const wouldLose = wouldWin === null ? null : Math.min(1, Math.max(0, 1 - wouldWin))
-  const tone: Tone = wouldLose === null ? 'muted' : wouldLose >= 0.5 ? 'pos' : 'neg'
-  let note: string
-  if (rejected === 0) note = 'El filtro no rechazó ninguna señal en este periodo.'
-  else if (wouldLose === null) note = 'Todavía no hay datos suficientes para saber cómo habrían terminado las señales rechazadas.'
-  else if (wouldLose >= 0.5) note = 'El filtro acertó: la mayoría de las operaciones que evitó habrían terminado en pérdida.'
-  else note = 'Ojo: la mayoría de las señales rechazadas habrían ganado; en este periodo el filtro fue demasiado exigente.'
+  // Rejected signals vs the trades this run did take ("x de n"; no conclusion below 30 cases or inside the 95 % margin).
+  const e = filterEvidence({
+    total: rejected,
+    resolved: m.rejected_resolved,
+    winRate: m.rejected_would_win_rate,
+    takenN: m.trades,
+    takenWinRate: m.win_rate,
+  })
+  const note = rejected === 0 ? 'El filtro no rechazó ninguna señal en este periodo.' : evidenceText(e, 'signals')
   return (
     <div className="sim-rejected">
       <div>
         Señales rechazadas: <b className="mono">{fmtInt(rejected)}</b>
-        {rejected > 0 && (
+        {e.rejected && <span className="muted"> ({fmtInt(e.rejected.n)} con resultado conocido)</span>}
+        {e.verdict !== 'none' && (
           <>
-            {' · '}
-            <b className={`mono ${tone}`}>{fmtProb(wouldLose, 0)}</b> habrían perdido
+            {' · '}habrían ganado <b className={`mono ${evidenceTone(e)}`}>{fmtTally(e.rejected, e.rate)}</b>
+            {e.takenRate !== null && (
+              <>
+                {' · '}tomadas que ganaron <b className="mono">{fmtTally(e.taken, e.takenRate)}</b>
+              </>
+            )}
           </>
         )}
       </div>
@@ -128,7 +137,7 @@ export function GateEffect(props: { metrics: BacktestMetrics; ungated: BacktestM
 
   if (!props.usedGate) {
     return (
-      <Card title={<><ShieldCheck size={14} /> Efecto del filtro</>} sub="¿Qué aporta decir NO a las malas operaciones?">
+      <Card title={<><ShieldCheck size={14} /> Efecto del filtro</>} sub="¿Qué cambia al decir NO a las operaciones dudosas?">
         <div className="notice">
           <Info size={15} style={{ flex: 'none', marginTop: 1 }} />
           <div>
@@ -156,10 +165,10 @@ export function GateEffect(props: { metrics: BacktestMetrics; ungated: BacktestM
       <div className="col gap-3">
         <div className={`sim-lift ${liftTone}`}>
           <div className="col gap-0">
-            <span className="tiny muted nowrap" title="Rendimiento con filtro − rendimiento sin filtro">
-              Mejora por el filtro
+            <span className="tiny muted nowrap" title="Rendimiento con filtro − rendimiento sin filtro, en puntos porcentuales (pp)">
+              Diferencia por el filtro
             </span>
-            <span className={`sim-lift-value ${liftTone}`}>{fmtPct(lift)}</span>
+            <span className={`sim-lift-value ${liftTone}`}>{lift === null ? '—' : signed(lift, 2, ' pp')}</span>
           </div>
           <div className="small">{liftText}</div>
         </div>

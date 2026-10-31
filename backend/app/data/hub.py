@@ -4,9 +4,14 @@
   APIs (`app.data.providers`), stocks / forex / indices / futures from API-key providers (`app.data.keyed`) or, when
   no key is configured, from the local history built by the recorder (TradingView current-bar snapshots).
 - DB cache (`candles` table): incremental fetches, forming bar refreshed with a short TTL, concurrent identical
-  requests deduplicated.
+  requests deduplicated, holes inside cached crypto windows (24/7 markets) refetched from the exchange.
+- Freshness: a series whose newest bar is clearly too old (venue stopped trading, feed down) comes back with
+  `stale=True` and a Spanish note ("Datos desactualizados: última vela hace 3 días"); quotes older than 2 minutes
+  carry `stale: True` and `ts` = the real time of the price.
 - Symbols: resolve / search / symbol_info (`symbols` table), quotes, universe and raw scans through TradingView.
-- Live feed: ref-counted subscriptions, one poller task, bar-close detection, WS `market:SYMBOL:tf` + listeners.
+- Live feed: ref-counted subscriptions, one task per polled key (a slow venue only delays its own keys) plus one for
+  the TradingView snapshots, bar-close detection (missed bars after a stall are fetched and emitted in order),
+  WS `market:SYMBOL:tf` + listeners.
 - Watchlist (`watchlist` table).
 """
 from __future__ import annotations
@@ -23,7 +28,9 @@ import numpy as np
 from app import config
 from app.data import symbols as S
 from app.data.base import CandleSet, ProviderError, make_symbol_info, merge_candles, resample
-from app.data.recorder import RECORDER_BASE, RECORDER_TFS, CandleRecorder, normalize_candle
+from app.data.recorder import (
+    RECORDER_BASE, RECORDER_TFS, ROLLOVER_JITTER_S, CandleRecorder, normalize_candle, same_bar, signature,
+)
 from app.util import (
     RateLimitedLog,
     TTLCache,
@@ -50,8 +57,29 @@ LIVE_PRICE_TTL_S = 15.0  # live feed prices younger than this answer last_price(
 CRYPTO_POLL_S = 3.0  # live feed: crypto symbols (exchange API)
 SNAPSHOT_POLL_S = 15.0  # live feed: recorder / keyed symbols (TradingView current bars)
 FEED_TICK_S = 1.0
-FEED_CONCURRENCY = 4
-FEED_DOWN_AFTER = 5  # consecutive live-feed failures before a crypto symbol falls back to TradingView
+FEED_DOWN_AFTER = 5  # consecutive live-feed failures before a crypto symbol's live updates use TradingView
+FEED_FALLBACK_S = 300.0  # ... for this long (live updates only: candles keep coming from the exchanges)
+LIVE_HTTP_TIMEOUT_S = 5.0  # one live poll request (no retries: the next poll comes a few seconds later)
+LIVE_POLL_TIMEOUT_S = 8.0  # whole live poll of one key (incl. waiting for the exchange's rate limiter)
+CATCHUP_TIMEOUT_S = 20.0
+MAX_CATCHUP_BARS = 360  # bars missed by a stalled feed that are fetched and emitted as closed (else: gap fill only)
+GAP_FILL_LIMIT = 1000  # get_candles limit used to download a gap found by the live feed (large: no history reset)
+TRANSIENT_BACKOFF_S = 30.0  # (symbol, tf) after a network / rate-limit / server error of every venue
+DEFINITIVE_BACKOFF_S = 300.0  # (symbol, tf) after every venue answered "no data" (pair delisted...)
+HOLE_RECHECK_S = 1800.0  # a cached crypto window with holes is re-verified with the exchange at most this often
+# kinds of DataProviderError that are a definitive answer about the symbol (anything else is worth retrying soon)
+DEFINITIVE_KINDS = frozenset({"not_found", "unsupported", "invalid"})
+# Freshness (I2): a series is stale when its newest bar is more than STALE_BARS bars behind AND it ended more than
+# STALE_MIN_S ago (24/7 crypto; quiet minutes of illiquid pairs are fine) or SESSION_STALE_S ago (markets with
+# sessions: nights, weekends and holidays are normal).
+STALE_BARS = 3
+STALE_MIN_S = 3600
+SESSION_STALE_S = 6 * 86400
+QUOTE_STALE_S = 120  # a quote whose price is older than this is flagged stale (never a live price)
+EXCHANGE_PRICE_MAX_AGE_S = 180  # last_price(): newest 1m exchange bar older than this is not a live price
+# TradingView current-bar timeframes usable as they are for keyed series / crypto (recorder series use RECORDER_TFS)
+SNAPSHOT_TFS = ("1m", "5m", "15m", "1h", "4h", "1d", "1w")
+SNAPSHOT_SOURCES = frozenset({"recorder", "keyed", "snapshot"})  # live rows that come from TradingView snapshots
 UPSERT_CHUNK = 1000
 INFO_FIELDS = ("ticker", "exchange", "description", "type", "market", "currency", "pricescale", "logoid")
 UNIVERSE_NUMBERS = (
@@ -116,7 +144,47 @@ def normalize_quote(symbol: str, q: Any) -> dict | None:
         return None
     ts = safe_float(q.get("ts"))
     out["ts"] = int(ts) if ts is not None and ts > 0 else now_ms()
+    if q.get("stale"):
+        out["stale"] = True
     return out
+
+
+def is_definitive(exc: BaseException) -> bool:
+    """True for provider errors that settle whether a venue has the pair (not found / unsupported / invalid)."""
+    return getattr(exc, "kind", None) in DEFINITIVE_KINDS
+
+
+def ago_text(seconds: float) -> str:
+    """'45 minutos' / '1 hora' / '3 días'."""
+    s = max(0, int(seconds))
+    if s < 90 * 60:
+        n = max(1, round(s / 60))
+        return f"{n} minuto" if n == 1 else f"{n} minutos"
+    if s < 48 * 3600:
+        n = round(s / 3600)
+        return f"{n} hora" if n == 1 else f"{n} horas"
+    n = round(s / 86400)
+    return f"{n} día" if n == 1 else f"{n} días"
+
+
+def stale_note(last_time: int, tf: str, now: int, continuous: bool) -> str | None:
+    """Spanish note when the newest bar of a series is clearly older than it should be (None when fresh enough).
+    `continuous` = the market trades 24/7 (crypto); other markets have nights, weekends and holidays."""
+    tf_s = tf_seconds(tf)
+    behind = (floor_time(now, tf) - int(last_time)) // tf_s
+    quiet = int(now) - (int(last_time) + tf_s)
+    if behind <= STALE_BARS or quiet <= (STALE_MIN_S if continuous else SESSION_STALE_S):
+        return None
+    return f"Datos desactualizados: última vela hace {ago_text(int(now) - int(last_time))}"
+
+
+def first_hole(rows: list[dict], tf_s: int) -> int | None:
+    """Open time of the first missing bar inside ascending `rows` (None when the window is contiguous)."""
+    if len(rows) < 2:
+        return None
+    times = np.fromiter((int(r["time"]) for r in rows), dtype=np.int64, count=len(rows))
+    gaps = np.flatnonzero(np.diff(times) > tf_s)
+    return int(times[gaps[0]]) + int(tf_s) if len(gaps) else None
 
 
 class MarketDataHub:
@@ -141,6 +209,10 @@ class MarketDataHub:
         self._history_start: dict[tuple[str, str], int] = {}
         self._venue_ok: dict[str, S.Venue] = {}
         self._crypto_down = TTLCache(CRYPTO_DOWN_S, maxsize=2048)
+        self._backoff = TTLCache(TRANSIENT_BACKOFF_S, maxsize=4096)  # (symbol, tf) -> (error, transient)
+        self._holes_checked = TTLCache(HOLE_RECHECK_S, maxsize=4096)
+        self._keyed_offsets: dict[tuple[str, str], int] = {}  # (symbol, tf) -> session offset of the provider's bars
+        self._keyed_clean: set[tuple[str, str, str]] = set()  # keyed series already purged of other sources
         # symbols
         self._info_mem = TTLCache(900.0, maxsize=4096)
         self._remembered: dict[str, tuple[str, str]] = {}
@@ -154,6 +226,12 @@ class MarketDataHub:
         self._prices: dict[str, tuple[float, float]] = {}
         self._feed_task: asyncio.Task | None = None
         self._feed_failures: dict[str, int] = {}
+        self._feed_tv = TTLCache(FEED_FALLBACK_S, maxsize=2048)  # crypto symbols fed by TradingView snapshots
+        self._jobs: dict[tuple[str, str], asyncio.Future] = {}  # in-flight live poll per (symbol, tf)
+        self._snap_job: asyncio.Future | None = None
+        self._gap_jobs: dict[tuple[str, str], asyncio.Future] = {}
+        self._snap_seen: dict[tuple[str, str], tuple[int, Any]] = {}  # (symbol, TradingView tf) -> (time, OHLCV)
+        self._closed_at: dict[tuple[str, str], int] = {}  # snapshot keys: bar already emitted closed (market shut)
         self.feed_polls = 0
         self.feed_updates = 0
         # stats
@@ -199,16 +277,26 @@ class MarketDataHub:
             self._keyed_fresh.clear()
             self._crypto_down.clear()
             self._details_miss.clear()
+            self._backoff.clear()
+            self._feed_tv.clear()
+            self._keyed_offsets.clear()
 
     async def stop(self) -> None:
         self._running = False
         task, self._feed_task = self._feed_task, None
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        jobs = [task, self._snap_job, *self._jobs.values(), *self._gap_jobs.values()]
+        self._snap_job = None
+        self._jobs.clear()
+        self._gap_jobs.clear()
+        for job in jobs:
+            if job is not None and not job.done():
+                job.cancel()
+        for job in jobs:
+            if job is not None:
+                try:
+                    await job
+                except (asyncio.CancelledError, Exception):
+                    pass
         await self.recorder.stop()
         for fut in list(self._inflight.values()):
             fut.cancel()
@@ -310,6 +398,15 @@ class MarketDataHub:
         except ValueError as exc:
             raise ProviderError(str(exc)) from None
 
+    @staticmethod
+    def _int_arg(value: Any, default: int, lo: int, hi: int, name: str) -> int:
+        """Integer argument clamped to [lo, hi]; ProviderError (Spanish) for non-numbers, NaN and ±inf."""
+        try:
+            n = int(value) if value not in (None, "") else default
+        except (TypeError, ValueError, OverflowError):
+            raise ProviderError(f"El parámetro '{name}' debe ser un número entero") from None
+        return int(clamp(n, lo, hi))
+
     # ================================================================== routing
 
     def route(self, symbol: str, info: dict | None = None) -> S.Route:
@@ -338,12 +435,28 @@ class MarketDataHub:
         if route.kind == "sim":
             return "synthetic", "synthetic"
         if route.kind == "crypto" and route.venues and self._crypto_down.get(symbol) is None:
-            venue = self._venue_ok.get(symbol) or route.venues[0]
-            return venue.provider, "full"
+            return self._known_venue(symbol, route, info).provider, "full"
         keyed = self.keyed_candidates(symbol, route.asset_class)
         if keyed:
             return keyed[0][0], "keyed"
         return "recorder", "recorder"
+
+    @staticmethod
+    def _venue_of(route: S.Route, provider: str | None) -> S.Venue | None:
+        return next((v for v in route.venues if v.provider == provider), None) if provider else None
+
+    def _known_venue(self, symbol: str, route: S.Route, info: dict | None = None) -> S.Venue:
+        """Venue that serves `symbol`: the one that worked last in this process, else (equivalent pairs only) the
+        provider stored in the `symbols` table (it survives restarts), else the first venue of the route. A symbol
+        whose own instrument is listed starts on it again after a restart: an equivalent pair that served it during
+        an outage is not kept for good."""
+        venue = self._venue_ok.get(symbol)
+        if venue is not None:
+            return venue
+        if route.native and route.venues:
+            return route.venues[0]
+        provider = (info or {}).get("provider") or (self._info_mem.get(symbol) or {}).get("provider")
+        return self._venue_of(route, provider) or route.venues[0]
 
     def _http(self) -> Any:
         if self._client is None or getattr(self._client, "is_closed", False):
@@ -387,7 +500,7 @@ class MarketDataHub:
         tf = self._tf(tf)
         try:
             n = int(limit if limit is not None else 500)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):  # OverflowError: limit=inf
             raise ProviderError("El límite de velas debe ser un número entero") from None
         n = int(clamp(n, 1, MAX_LIMIT))
         key = (symbol, tf, n)
@@ -446,39 +559,61 @@ class MarketDataHub:
     # ------------------------------------------------------------------ crypto (official exchange APIs)
 
     async def _crypto_candles(self, symbol: str, tf: str, limit: int, route: S.Route) -> CandleSet:
-        cached = await self._read_cache(symbol, tf, limit)
-        venue = self._venue_ok.get(symbol) or route.venues[0]
+        sources: list[str] = []
+        cached = await self._read_cache(symbol, tf, limit, sources)
+        venue = self._known_venue(symbol, route)
         if config.OFFLINE:
             note = (
                 "Modo sin conexión: datos de la caché local" if cached
                 else f"Modo sin conexión: no hay velas guardadas de {symbol} {tf}"
             )
-            return self._build(cached, symbol, tf, venue.provider, "full", note)
+            return self._build(cached, symbol, tf, sources[-1] if sources else venue.provider, "full", note, route)
         fkey = (symbol, tf)
         tf_s = tf_seconds(tf)
         now_bar = floor_time(now_s(), tf)
         reset = False
+        hole: int | None = None
         if cached:
             gap = (now_bar - int(cached[-1]["time"])) // tf_s
             need = 0 if (gap <= 0 and self._fresh.get(fkey)) else max(int(gap), 0) + 1
-            if need > max(2 * limit, 1000):  # cache far behind: refetch and drop the stale segment
+            if need > min(max(2 * limit, 1000), MAX_LIMIT):  # cache far behind: refetch and drop the stale segment
                 reset, need = True, limit
+            elif self._holes_checked.get(fkey) is None:
+                # crypto trades 24/7: a missing bar inside the cached window is a hole (app restart, feed stall)
+                hole = first_hole(cached, tf_s)
+                if hole is not None:
+                    need = max(need, (now_bar - hole) // tf_s + 1)
+                    if need > MAX_LIMIT:  # too old to download in one go: drop the segment before it
+                        reset, need = True, limit
         else:
             need = limit
         error: str | None = None
+        transient = False
+        fetched = False
         if need > 0:
-            rows, used, error = await self._fetch_crypto(symbol, route, tf, min(max(need, 2), MAX_LIMIT))
-            if rows and used is not None:
-                if reset:
-                    await self._delete_before(symbol, tf, rows[0]["time"])
-                    self._history_start.pop(fkey, None)
-                    cached = []
-                await self._upsert(symbol, tf, rows, used.provider)
-                self._fresh.set(fkey, True)
-                if not cached and len(rows) < need:
-                    self._history_start[fkey] = int(rows[0]["time"])  # the listing starts here
-                cached = merge_candles(cached, rows)
-                venue = used
+            backoff = self._backoff.get(fkey)
+            if backoff is not None:  # every venue failed moments ago: serve what we have, retry after the backoff
+                error, transient = backoff
+            else:
+                rows, used, error, transient = await self._fetch_crypto(
+                    symbol, route, tf, min(max(need, 2), MAX_LIMIT)
+                )
+                if rows and used is not None:
+                    if reset:
+                        await self._delete_before(symbol, tf, rows[0]["time"])
+                        self._history_start.pop(fkey, None)
+                        cached, sources = [], []
+                    await self._upsert(symbol, tf, rows, used.provider)
+                    self._fresh.set(fkey, True)
+                    if hole is not None or reset:
+                        self._holes_checked.set(fkey, True)  # what is still missing is missing at the exchange
+                    if not cached and len(rows) < need:
+                        self._history_start[fkey] = int(rows[0]["time"])  # the listing starts here
+                    cached = merge_candles(cached, rows)
+                    venue, fetched = used, True
+                else:
+                    ttl = TRANSIENT_BACKOFF_S if transient else DEFINITIVE_BACKOFF_S
+                    self._backoff.set(fkey, (error, transient), ttl=ttl)
         if need == 0:
             self.cache_hits += 1
         else:
@@ -487,15 +622,22 @@ class MarketDataHub:
             cached = await self._backfill(symbol, tf, limit, route, venue, cached)
         if not cached:
             reason = error or f"ningún exchange devolvió velas de {symbol}"
+            if transient:  # network / rate limit / server: nothing is known about the symbol, retry soon
+                # nothing reloads the chart by itself: the user (or the next NEXUS / scanner request) asks again
+                note = f"Error temporal al consultar los exchanges ({reason}); vuelve a intentarlo en unos segundos"
+                return self._build([], symbol, tf, venue.provider, "full", note, route)
             self._crypto_down.set(symbol, reason)
             self._emit("info", f"{symbol}: sin datos en los exchanges ({reason}); se usa el historial local")
             return await self._other_candles(symbol, tf, limit, route, reason=reason)
+        # provider = real source of the newest bars (a restart must not relabel KuCoin bars as Binance)
+        provider = venue.provider if fetched or not sources else (sources[-1] or venue.provider)
+        shown = venue if venue.provider == provider else self._venue_of(route, provider)
         note = None
-        if not (route.native and route.venues and venue == route.venues[0]):
-            note = f"Datos de {venue.tv_symbol} vía {provider_label(venue.provider)} (par equivalente)"
+        if shown is not None and not (route.native and route.venues and shown == route.venues[0]):
+            note = f"Datos de {shown.tv_symbol} vía {provider_label(shown.provider)} (par equivalente)"
         if error:
             note = f"No se pudo actualizar ({error}); se muestran los datos guardados"
-        return self._build(cached[-limit:], symbol, tf, venue.provider, "full", note)
+        return self._build(cached[-limit:], symbol, tf, provider, "full", note, route)
 
     async def _backfill(
         self, symbol: str, tf: str, limit: int, route: S.Route, venue: S.Venue, cached: list[dict]
@@ -503,7 +645,9 @@ class MarketDataHub:
         """Fetch bars older than the cache until `limit` bars are available (or the listing start is reached)."""
         oldest = int(cached[0]["time"])
         want = limit - len(cached) + 1
-        rows, used, error = await self._fetch_crypto(symbol, route, tf, min(want, MAX_LIMIT), end_time=oldest, only=venue)
+        rows, used, error, _transient = await self._fetch_crypto(
+            symbol, route, tf, min(want, MAX_LIMIT), end_time=oldest, only=venue
+        )
         if error:
             return cached
         older = [r for r in rows if r["time"] < oldest]
@@ -515,18 +659,22 @@ class MarketDataHub:
 
     async def _fetch_crypto(
         self, symbol: str, route: S.Route, tf: str, n: int, end_time: int | None = None, only: S.Venue | None = None
-    ) -> tuple[list[dict], S.Venue | None, str | None]:
-        """(rows, venue that served them, error). Tries the working venue first, then equivalent pairs."""
+    ) -> tuple[list[dict], S.Venue | None, str | None, bool]:
+        """(rows, venue that served them, error, transient). Tries the known venue first, then equivalent pairs.
+        `transient` is True when a venue failed for a reason worth retrying soon (network, rate limit, server...):
+        only definitive answers of every venue (pair not found / unsupported / invalid / no bars) mean that the
+        exchanges have no data for the symbol."""
         try:
             providers = self._providers()
         except Exception as exc:
-            return [], None, f"módulo de proveedores no disponible ({type(exc).__name__}: {exc})"
+            return [], None, f"módulo de proveedores no disponible ({type(exc).__name__}: {exc})", True
         if only is not None:
             venues = [only]
         else:
-            first = self._venue_ok.get(symbol)
+            first = self._known_venue(symbol, route)
             venues = list(dict.fromkeys([v for v in (first, *route.venues) if v is not None]))[:MAX_VENUES]
         last_error: str | None = None
+        transient_error: str | None = None
         for venue in venues:
             label = provider_label(venue.provider)
             try:
@@ -539,7 +687,11 @@ class MarketDataHub:
             except Exception as exc:
                 self.fetch_errors += 1
                 last_error = f"{label}: {exc}"
-                self._warn_once(f"fetch:{venue.provider}:{symbol}:{tf}", f"{symbol} {tf}: error de {label} → {exc}")
+                if not is_definitive(exc):
+                    transient_error = transient_error or last_error
+                    self._warn_once(f"fetch:{venue.provider}:{symbol}:{tf}", f"{symbol} {tf}: error de {label} → {exc}")
+                # A definitive answer ("par no encontrado" while trying equivalent pairs) is ordinary routing, not a
+                # problem worth a warning per venue: the outcome is reported once when no venue has the symbol.
                 continue
             self.fetches += 1
             rows = clean_rows(raw)
@@ -548,11 +700,13 @@ class MarketDataHub:
                     if route.venues and venue != route.venues[0]:
                         self._emit("info", f"{symbol}: usando {venue.tv_symbol} ({label}) como fuente de velas")
                     self._venue_ok[symbol] = venue
-                return rows, venue, None
+                return rows, venue, None, False
             if end_time is not None:
-                return [], venue, None  # no older history on this venue
+                return [], venue, None, False  # no older history on this venue
             last_error = last_error or f"{label}: sin velas para {venue.tv_symbol}"
-        return [], None, last_error
+        if transient_error is not None:
+            return [], None, transient_error, True
+        return [], None, last_error, False
 
     # ------------------------------------------------------------------ stocks / forex / indices / futures
 
@@ -571,12 +725,18 @@ class MarketDataHub:
         self, symbol: str, tf: str, limit: int, route: S.Route, provider: str, api_key: str, errors: list[str]
     ) -> CandleSet | None:
         label = provider_label(provider)
-        cached = await self._read_cache(symbol, tf, limit)
+        sources: list[str] = []
+        cached = await self._read_cache(symbol, tf, limit, sources)
+        # bars of another source (TradingView snapshots stamped on the hour, another provider) are never mixed into
+        # this series: the provider aligns intraday bars to the session (13:30 UTC for US stocks)
+        foreign = any(src != provider for src in sources)
+        if foreign:
+            cached = [c for c, src in zip(cached, sources) if src == provider]
         fkey = (symbol, tf, provider)
         enough = len(cached) >= min(limit, self._keyed_avail.get(fkey, limit))
         if cached and enough and self._keyed_fresh.get(fkey):
             self.cache_hits += 1
-            return self._build(cached, symbol, tf, provider, "keyed", None)
+            return self._keyed_set(cached, symbol, tf, provider, None, route)
         want = limit
         if cached and enough:
             gap = (floor_time(now_s(), tf) - int(cached[-1]["time"])) // tf_seconds(tf)
@@ -594,7 +754,7 @@ class MarketDataHub:
             self._warn_once(f"keyed:{provider}:{symbol}:{tf}", f"{symbol} {tf}: error de {label} → {exc}")
             if cached:
                 note = f"No se pudo actualizar desde {label} ({exc}); se muestran los datos guardados"
-                return self._build(cached, symbol, tf, provider, "keyed", note)
+                return self._keyed_set(cached, symbol, tf, provider, note, route)
             return None
         self.fetches += 1
         self.cache_misses += 1
@@ -602,21 +762,42 @@ class MarketDataHub:
         if not rows:
             errors.append(f"{label}: sin velas para {symbol} {tf}")
             if cached:
-                return self._build(cached, symbol, tf, provider, "keyed", f"{label} no devolvió velas nuevas")
+                return self._keyed_set(cached, symbol, tf, provider, f"{label} no devolvió velas nuevas", route)
             return None
         await self._upsert(symbol, tf, rows, provider)
+        if foreign or fkey not in self._keyed_clean:
+            # leftovers of another source (live snapshots stored before, recorder history) leave the series
+            await self.rt.db.execute(
+                "DELETE FROM candles WHERE symbol = ? AND tf = ? AND source <> ?", (symbol, tf, provider)
+            )
+            self._keyed_clean.add(fkey)
         self._keyed_fresh.set(fkey, True, ttl=keyed_ttl(tf))
         if want >= limit:
             self._keyed_avail[fkey] = len(rows)
-        return self._build(merge_candles(cached, rows)[-limit:], symbol, tf, provider, "keyed", None)
+        return self._keyed_set(merge_candles(cached, rows)[-limit:], symbol, tf, provider, None, route)
+
+    def _keyed_set(
+        self, rows: list[dict], symbol: str, tf: str, provider: str, note: str | None, route: S.Route
+    ) -> CandleSet:
+        """CandleSet of a keyed series; remembers the provider's session offset (live snapshots are aligned to it)."""
+        if rows and tf_seconds(tf) < 86400:
+            self._keyed_offsets[(symbol, tf)] = int(rows[-1]["time"]) % tf_seconds(tf)
+        return self._build(rows, symbol, tf, provider, "keyed", note, route)
+
+    def _keyed_refresh(self, symbol: str, tf: str) -> None:
+        """A keyed bar closed on the live feed: the next get_candles takes the final bar from the provider."""
+        for provider, _key, _supports in KEYED_SETTINGS:
+            self._keyed_fresh.pop((symbol, tf, provider))
 
     async def _recorder_candles(
         self, symbol: str, tf: str, limit: int, route: S.Route, errors: list[str], reason: str | None
     ) -> CandleSet:
-        """Local history (recorder snapshots or anything cached before); missing timeframes are resampled."""
+        """Local history (recorder snapshots or anything cached before). Timeframes that are not recorded directly
+        are rebuilt from the recorded base (UTC-aligned buckets); rebuilt bars win over bars stored for that
+        timeframe (older versions recorded TradingView's session-aligned 1h/4h bars)."""
         rows = await self._read_cache(symbol, tf, limit)
         base = RECORDER_BASE.get(tf)
-        if base and len(rows) < limit:
+        if base:
             ratio = max(1, tf_seconds(tf) // tf_seconds(base))
             base_rows = await self._read_cache(symbol, base, min(limit * ratio + ratio, 50_000))
             if base_rows:
@@ -624,9 +805,9 @@ class MarketDataHub:
                 first = int(base_rows[0]["time"])
                 if resampled and floor_time(first, tf) != first:
                     resampled = resampled[1:]  # the first bucket is incomplete
-                rows = merge_candles(resampled, rows)[-limit:]
+                rows = merge_candles(rows, resampled)[-limit:]
         note = self._recorder_note(symbol, tf, route, len(rows), errors, reason)
-        return self._build(rows, symbol, tf, "recorder", "recorder", note)
+        return self._build(rows, symbol, tf, "recorder", "recorder", note, route)
 
     def _recorder_note(
         self, symbol: str, tf: str, route: S.Route, n: int, errors: list[str], reason: str | None
@@ -664,13 +845,21 @@ class MarketDataHub:
         "low = excluded.low, close = excluded.close, volume = excluded.volume, source = excluded.source"
     )
 
-    async def _read_cache(self, symbol: str, tf: str, limit: int) -> list[dict]:
+    async def _read_cache(self, symbol: str, tf: str, limit: int, sources: list[str] | None = None) -> list[dict]:
+        """The newest `limit` cached bars, ascending (`sources`, when given, receives the source of each bar)."""
         rows = await self.rt.db.fetchall(
-            "SELECT time, open, high, low, close, volume FROM candles WHERE symbol = ? AND tf = ? "
+            "SELECT time, open, high, low, close, volume, source FROM candles WHERE symbol = ? AND tf = ? "
             "ORDER BY time DESC LIMIT ?",
             (symbol, tf, int(limit)),
         )
-        return [c for c in (normalize_candle(r) for r in reversed(rows)) if c is not None]
+        out: list[dict] = []
+        for r in reversed(rows):
+            c = normalize_candle(r)
+            if c is not None:
+                out.append(c)
+                if sources is not None:
+                    sources.append(str(r.get("source") or ""))
+        return out
 
     async def _upsert(self, symbol: str, tf: str, rows: list[dict], source: str) -> None:
         params = [
@@ -684,8 +873,19 @@ class MarketDataHub:
         await self.rt.db.execute("DELETE FROM candles WHERE symbol = ? AND tf = ? AND time < ?", (symbol, tf, int(t)))
 
     @staticmethod
-    def _build(rows: list[dict], symbol: str, tf: str, provider: str, history: str, note: str | None) -> CandleSet:
-        return CandleSet.from_rows(rows, symbol, tf, provider=provider, history=history, note=note)
+    def _build(
+        rows: list[dict], symbol: str, tf: str, provider: str, history: str, note: str | None,
+        route: S.Route | None = None,
+    ) -> CandleSet:
+        """CandleSet with the freshness check: a series whose newest bar is clearly too old is flagged `stale` and
+        its note starts with "Datos desactualizados: última vela hace ..." (it must not be used as live data)."""
+        stale = None
+        if rows and route is not None and route.kind != "sim":
+            continuous = route.kind == "crypto" or route.asset_class == "crypto"
+            stale = stale_note(int(rows[-1]["time"]), tf, now_s(), continuous)
+        if stale:
+            note = f"{stale}. {note}" if note else stale
+        return CandleSet.from_rows(rows, symbol, tf, provider=provider, history=history, note=note, stale=bool(stale))
 
     # ================================================================== symbols table
 
@@ -924,7 +1124,7 @@ class MarketDataHub:
     async def search(self, q: str, market: str | None = None, limit: int = 30) -> list[dict]:
         """SearchResult list: alias hit first, then TradingView results, then local matches (offline too)."""
         query = " ".join(str(q or "").split())[:64]
-        limit = int(clamp(int(limit or 30), 1, 100))
+        limit = self._int_arg(limit or 30, 30, 1, 100, "limit")
         market = (str(market or "").strip().lower()) or None
         if market and not S.valid_market(market):
             raise ProviderError(f"Mercado no válido: {market}")
@@ -1075,10 +1275,13 @@ class MarketDataHub:
         }
 
     async def _local_quote(self, symbol: str) -> dict | None:
-        """Quote from the live feed / DB cache (offline fallback; change from the last two daily bars)."""
+        """Quote from the live feed / DB cache (fallback when TradingView has none; change from the last two daily
+        bars). `ts` is the real time of the price (live update, or the end of the final cached bar it comes from;
+        for the newest stored bar of a timeframe, maybe stored while still forming, only its open is certain) and
+        prices older than QUOTE_STALE_S carry `stale: True`: they must never be used as live prices."""
         try:
-            last = await self.rt.db.fetchone(
-                "SELECT time, close FROM candles WHERE symbol = ? ORDER BY time DESC LIMIT 1", (symbol,)
+            recent = await self.rt.db.fetchall(
+                "SELECT tf, time, close FROM candles WHERE symbol = ? ORDER BY time DESC LIMIT 8", (symbol,)
             )
             days = await self.rt.db.fetchall(
                 "SELECT time, open, high, low, close, volume FROM candles WHERE symbol = ? AND tf = '1d' "
@@ -1086,15 +1289,36 @@ class MarketDataHub:
                 (symbol,),
             )
         except Exception:
-            last, days = None, []
+            recent, days = [], []
+        now = now_s()
+        best: tuple[float, float] | None = None  # (time of the price, price)
         live = self._prices.get(symbol)
-        price = live[0] if live and time.monotonic() - live[1] <= 4 * LIVE_PRICE_TTL_S else None
-        if price is None and last:
-            price = safe_float(last.get("close"))
-        if price is None:
+        if live is not None:
+            best = (now - max(0.0, time.monotonic() - live[1]), live[0])
+        newest_seen: set[str] = set()
+        for r in recent:  # newest first
+            t, close = safe_float(r.get("time")), safe_float(r.get("close"))
+            tf = str(r.get("tf") or "")
+            try:
+                tf_s = tf_seconds(tf)
+            except (KeyError, ValueError):
+                continue
+            if t is None or close is None:
+                continue
+            # the newest stored bar of a timeframe may have been stored while it was still forming (get_candles
+            # stores the forming bar): its close is only known to be from after its open. An older bar of that
+            # timeframe is final, its close is the price at its end.
+            at = t + tf_s if tf in newest_seen and t + tf_s <= now else t
+            newest_seen.add(tf)
+            if best is None or at > best[0]:
+                best = (at, close)
+        if best is None:
             return None
+        at, price = min(float(now), best[0]), best[1]
         q = {"symbol": symbol, "price": price, "change_pct": None, "change": None, "volume": None, "high": None,
-             "low": None, "open": None, "ts": now_ms()}
+             "low": None, "open": None, "ts": int(at) * 1000}
+        if now - at > QUOTE_STALE_S:
+            q["stale"] = True
         if days:
             today = days[0]
             q.update(open=safe_float(today.get("open")), high=safe_float(today.get("high")),
@@ -1105,8 +1329,9 @@ class MarketDataHub:
                 q["change_pct"] = (price - prev) / prev * 100.0
         return q
 
-    async def last_price(self, symbol: str) -> float | None:
-        """Most recent price: SIM set, live feed, TradingView quote, exchange ticker, then the DB cache."""
+    async def last_price(self, symbol: str, *, allow_stale: bool = True) -> float | None:
+        """Most recent price: SIM set, live feed, TradingView quote, exchange ticker, then the DB cache. The DB
+        cache may be old (see _local_quote): with allow_stale=False such a price gives None instead."""
         symbol = self._clean(symbol)
         if S.is_sim(symbol):
             cs = self._sim_reference(symbol)
@@ -1115,31 +1340,37 @@ class MarketDataHub:
         if live and time.monotonic() - live[1] <= LIVE_PRICE_TTL_S:
             return live[0]
         q = (await self._tv_quotes([symbol])).get(symbol)
-        if q and (q.get("price") or 0) > 0:
+        if q and (q.get("price") or 0) > 0 and not q.get("stale"):
             return float(q["price"])
         if not config.OFFLINE:
             price = await self._exchange_price(symbol)
             if price:
                 return price
         q = await self._local_quote(symbol)
-        return q["price"] if q else None
+        if q is None or (q.get("stale") and not allow_stale):
+            return None
+        return q["price"]
 
     async def _exchange_price(self, symbol: str) -> float | None:
+        """Close of the newest 1m bar of the exchange (None when it is not recent: venue stopped trading)."""
         await self._load_info(symbol)
         route = self.route(symbol)
         if route.kind != "crypto" or not route.venues or self._crypto_down.get(symbol) is not None:
             return None
-        venue = self._venue_ok.get(symbol) or route.venues[0]
+        venue = self._known_venue(symbol, route)
         try:
             providers = self._providers()
-            raw = await providers.fetch_latest(venue.provider, self._native(providers, venue), "1m", client=self._http())
+            raw = await providers.fetch_latest(venue.provider, self._native(providers, venue), "1m", client=self._http(),
+                                               retries=1, timeout=LIVE_HTTP_TIMEOUT_S)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._warn_once(f"latest:{symbol}", f"{symbol}: precio de {provider_label(venue.provider)} no disponible ({exc})")
             return None
         rows = clean_rows(raw)
-        return rows[-1]["close"] if rows else None
+        if not rows or now_s() - int(rows[-1]["time"]) > EXCHANGE_PRICE_MAX_AGE_S:
+            return None
+        return rows[-1]["close"]
 
     # ================================================================== universe & scans
 
@@ -1151,8 +1382,8 @@ class MarketDataHub:
         market = str(market or "crypto").strip().lower()
         if not S.valid_market(market):
             raise ProviderError(f"Mercado no válido: {market}")
-        offset = max(0, int(offset or 0))
-        limit = int(clamp(int(limit or 100), 1, 500))
+        offset = self._int_arg(offset or 0, 0, 0, 10**9, "offset")
+        limit = self._int_arg(limit or 100, 100, 1, 500, "limit")
         order = "asc" if str(order or "").lower() == "asc" else "desc"
         query = " ".join(str(q or "").split())[:64] or None
         kind = str(type_ or "").strip().lower() or None
@@ -1298,6 +1529,7 @@ class MarketDataHub:
             self._subs.pop(key, None)
             self._next_poll.pop(key, None)
             self._last.pop(key, None)
+            self._closed_at.pop(key, None)
 
     def subscriptions(self) -> list[dict]:
         return [{"symbol": s, "tf": tf, "owners": sorted(o)} for (s, tf), o in sorted(self._subs.items())]
@@ -1382,71 +1614,107 @@ class MarketDataHub:
                 self._warn_once("feed", f"Feed en vivo: error ({type(exc).__name__}: {exc})")
             await asyncio.sleep(FEED_TICK_S)
 
-    async def _feed_tick(self) -> None:
+    async def _feed_tick(self) -> list[asyncio.Future]:
+        """Start the polls that are due: one task per crypto (symbol, tf) and one task for every TradingView
+        snapshot, so a slow venue only delays its own keys. Keys whose previous poll is still running are skipped.
+        Returns the tasks started."""
         now = time.monotonic()
-        crypto: list[tuple[str, str]] = []
+        started: list[asyncio.Future] = []
         snaps: list[tuple[str, str]] = []
+        snap_busy = self._snap_job is not None and not self._snap_job.done()
         for key in list(self._subs):
-            symbol = key[0]
+            symbol, tf = key
             if S.is_sim(symbol) or now < self._next_poll.get(key, 0.0):
                 continue  # SIM bars arrive through push_candle
+            job = self._jobs.get(key)
+            if job is not None and not job.done():
+                continue  # the previous poll of this key is still running
             await self._load_info(symbol)
             history = self.history_kind(symbol)[1]
-            if history == "full":
-                crypto.append(key)
+            if history == "full" and self._feed_tv.get(symbol) is None:
                 self._next_poll[key] = now + CRYPTO_POLL_S
-            elif history in ("recorder", "keyed"):
+                task = asyncio.ensure_future(self._poll_key(symbol, tf))
+                self._jobs[key] = task
+                task.add_done_callback(functools.partial(self._job_done, key))
+                started.append(task)
+            elif history in ("full", "recorder", "keyed") and not snap_busy:
                 snaps.append(key)
                 self._next_poll[key] = now + SNAPSHOT_POLL_S
-        if crypto:
-            await self._poll_crypto(crypto)
         if snaps:
-            await self._poll_snapshots(snaps)
+            self._snap_job = asyncio.ensure_future(self._poll_snapshots(snaps))
+            started.append(self._snap_job)
+        return started
+
+    def _job_done(self, key: tuple[str, str], task: asyncio.Future) -> None:
+        if self._jobs.get(key) is task:
+            self._jobs.pop(key, None)
+        if not task.cancelled():
+            task.exception()  # mark retrieved (errors are reported inside the job)
 
     async def _poll_crypto(self, keys: list[tuple[str, str]]) -> None:
+        """Poll these crypto keys now and wait for all of them (the feed loop starts one task per key instead)."""
+        await asyncio.gather(*(self._poll_key(s, tf) for s, tf in keys))
+
+    async def _poll_key(self, symbol: str, tf: str) -> None:
+        """Live poll of one crypto key: the last 2 bars of its exchange (short timeout, no retries: the next poll
+        comes a few seconds later)."""
         try:
             providers = self._providers()
         except Exception as exc:
             self._warn_once("feed-providers", f"Feed en vivo: proveedores no disponibles ({exc})", every_s=600)
             return
-        sem = asyncio.Semaphore(FEED_CONCURRENCY)
-
-        async def poll(symbol: str, tf: str) -> None:
-            route = self.route(symbol)
-            if not route.venues:
-                return
-            venue = self._venue_ok.get(symbol) or route.venues[0]
-            async with sem:
-                try:
-                    raw = await providers.fetch_latest(venue.provider, self._native(providers, venue), tf, client=self._http())
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    label = provider_label(venue.provider)
-                    self._warn_once(f"feed:{venue.provider}:{symbol}", f"Feed {symbol} {tf}: error de {label} → {exc}")
-                    failures = self._feed_failures.get(symbol, 0) + 1
-                    self._feed_failures[symbol] = failures
-                    if failures >= FEED_DOWN_AFTER:  # switch this symbol to TradingView snapshots for a while
-                        self._feed_failures.pop(symbol, None)
-                        self._crypto_down.set(symbol, f"{label}: {exc}")
-                        self._emit("info", f"{symbol}: {label} no responde; el feed en vivo usa TradingView temporalmente")
-                    return
-            self._feed_failures.pop(symbol, None)
-            self.feed_polls += 1
-            await self._apply_live(symbol, tf, clean_rows(raw), venue.provider)
-
-        results = await asyncio.gather(*(poll(s, tf) for s, tf in keys), return_exceptions=True)
-        for res in results:
-            if isinstance(res, Exception):
-                self._warn_once("feed-apply", f"Feed en vivo: error procesando velas ({type(res).__name__}: {res})")
+        route = self.route(symbol)
+        if not route.venues:
+            return
+        venue = self._known_venue(symbol, route)
+        try:
+            raw = await asyncio.wait_for(
+                providers.fetch_latest(venue.provider, self._native(providers, venue), tf, client=self._http(),
+                                       retries=0, timeout=LIVE_HTTP_TIMEOUT_S),
+                LIVE_POLL_TIMEOUT_S,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            label = provider_label(venue.provider)
+            detail = str(exc) or "tiempo de espera agotado"
+            self._warn_once(f"feed:{venue.provider}:{symbol}", f"Feed {symbol} {tf}: error de {label} → {detail}")
+            failures = self._feed_failures.get(symbol, 0) + 1
+            self._feed_failures[symbol] = failures
+            if failures >= FEED_DOWN_AFTER:  # live updates from TradingView for a while; candles stay on exchanges
+                self._feed_failures.pop(symbol, None)
+                self._feed_tv.set(symbol, f"{label}: {detail}")
+                self._emit("info", f"{symbol}: {label} no responde; el feed en vivo usa TradingView temporalmente")
+            return
+        self._feed_failures.pop(symbol, None)
+        self.feed_polls += 1
+        try:
+            await self._apply_live(symbol, tf, clean_rows(raw), venue.provider, venue=venue)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._warn_once("feed-apply", f"Feed en vivo: error procesando velas ({type(exc).__name__}: {exc})")
 
     async def _poll_snapshots(self, keys: list[tuple[str, str]]) -> None:
-        """Recorder / keyed symbols: ONE TradingView current-bars request for every symbol and timeframe."""
+        """Recorder / keyed symbols, and crypto symbols whose exchange feed keeps failing: ONE TradingView
+        current-bars request for every symbol and timeframe. Bars are in market time (TradingView's announced
+        delay). A frozen bar (market closed: the same bar re-stamped) creates no new bar; the last live bar is
+        emitted closed once its bucket is over. Recorder bars are stored; keyed and crypto snapshots are only
+        published (their history comes from the provider / the exchange)."""
         tv = self.tv() if self.tv_online() else None
         if tv is None:
             return
-        symbols = list(dict.fromkeys(s for s, _ in keys))
-        tfs = sorted({tf if tf in RECORDER_TFS else RECORDER_BASE.get(tf, "1m") for _, tf in keys}, key=tf_seconds)
+        plan: list[tuple[str, str, str, str]] = []  # (symbol, tf, TradingView tf, history)
+        for symbol, tf in keys:
+            history = self.history_kind(symbol)[1]
+            if history not in ("recorder", "keyed", "full"):
+                continue
+            direct = RECORDER_TFS if history == "recorder" else SNAPSHOT_TFS
+            plan.append((symbol, tf, tf if tf in direct else RECORDER_BASE.get(tf, "1m"), history))
+        if not plan:
+            return
+        symbols = list(dict.fromkeys(p[0] for p in plan))
+        tfs = sorted({p[2] for p in plan}, key=tf_seconds)
         try:
             data = await tv.current_bars(symbols, tfs)
         except asyncio.CancelledError:
@@ -1455,17 +1723,101 @@ class MarketDataHub:
             self._warn_once("feed-tv", f"Feed en vivo (TradingView): {exc}", "tradingview")
             return
         self.feed_polls += 1
-        for symbol, tf in keys:
+        frozen: dict[tuple[str, str], dict | None] = {}
+        for symbol, tf, tv_tf, history in plan:
             bars = (data or {}).get(symbol) if isinstance(data, dict) else None
-            if not isinstance(bars, dict):
+            raw = bars.get(tv_tf) if isinstance(bars, dict) else None
+            c = normalize_candle(raw)
+            if c is None:
                 continue
-            if tf in RECORDER_TFS:
-                c = normalize_candle(bars.get(tf))
-            else:
-                c = await self._aggregate_current(symbol, tf, normalize_candle(bars.get(RECORDER_BASE[tf])))
-            if c is not None:
-                c["time"] = floor_time(c["time"], tf)
-                await self._apply_live(symbol, tf, [c], "recorder")
+            c["time"] = floor_time(c["time"], tv_tf)
+            asof = int(safe_float(raw.get("asof"), c["time"]))
+            try:
+                if (symbol, tv_tf) not in frozen:
+                    frozen[(symbol, tv_tf)] = await self._snapshot_frozen(symbol, tv_tf, c, asof)
+                if frozen[(symbol, tv_tf)] is not None:
+                    await self._close_if_over(symbol, tf, asof, history, tv_tf, frozen[(symbol, tv_tf)])
+                    continue
+                if tv_tf != tf:
+                    c = await self._aggregate_current(symbol, tf, c)
+                elif history == "keyed":
+                    c["time"] = await self._keyed_stamp(symbol, tf, asof, c["time"])
+                if c is None:
+                    continue
+                if history == "recorder":
+                    await self._apply_live(symbol, tf, [c], "recorder", store=tf in RECORDER_TFS)
+                else:
+                    await self._apply_live(symbol, tf, [c], "keyed" if history == "keyed" else "snapshot", store=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._warn_once("feed-apply", f"Feed en vivo: error procesando velas ({type(exc).__name__}: {exc})")
+
+    async def _snapshot_frozen(self, symbol: str, tv_tf: str, c: dict, asof: int) -> dict | None:
+        """When a TradingView snapshot with a newer stamp is still the last known bar (market closed, no trades,
+        or the previous bar finishing right after our bucket rolled) it must not open a new bar: returns that bar
+        with its real open time (None for a genuinely new or updated bar)."""
+        key = (symbol, tv_tf)
+        seen = self._snap_seen.get(key)
+        from_db = seen is None  # first snapshot since (re)start: compared with the stored bar
+        if seen is None:
+            seen = await self.recorder.last_stored(symbol, tv_tf)
+            self._snap_seen[key] = seen
+        sig = signature(c)
+        if seen[1] is not None and c["time"] > seen[0]:
+            tf_s = tf_seconds(tv_tf)
+            early = asof - c["time"] < min(tf_s / 2.0, ROLLOVER_JITTER_S)
+            if sig == seen[1] or (same_bar(seen[1], sig) and (early or from_db or c["time"] - seen[0] > tf_s)):
+                # remember its final values: later re-stamped copies of this bar must keep matching (else, once
+                # the "early" window is over, the finished bar would open a phantom bar after the close)
+                self._snap_seen[key] = (int(seen[0]), sig)
+                return {**c, "time": int(seen[0])}
+        self._snap_seen[key] = (int(c["time"]), sig)
+        return None
+
+    async def _close_if_over(
+        self, symbol: str, tf: str, asof: int, history: str, tv_tf: str, base: dict | None = None
+    ) -> None:
+        """Frozen snapshots: emit the last live bar closed (once) when its bucket has ended in market time, with
+        the final values of the frozen TradingView bar `base` when it belongs to that bucket."""
+        key = (symbol, tf)
+        prev = self._last.get(key)
+        if prev is None or key not in self._subs or self._closed_at.get(key) == prev["time"]:
+            return
+        if asof < int(prev["time"]) + tf_seconds(tf):
+            return
+        final = prev
+        if base is not None and history != "keyed":
+            if tv_tf == tf and base["time"] == prev["time"]:
+                final = {**base, "open": prev["open"]}
+            elif tv_tf != tf and floor_time(base["time"], tf) == prev["time"]:
+                final = await self._aggregate_current(symbol, tf, dict(base)) or prev
+        self._closed_at[key] = int(prev["time"])
+        self._last[key] = final
+        if history == "recorder" and tf in RECORDER_TFS:
+            await self._store_closed(symbol, tf, [final], "recorder")
+        elif history == "keyed":
+            self._keyed_refresh(symbol, tf)
+        await self._dispatch(symbol, tf, final, True)
+
+    async def _keyed_stamp(self, symbol: str, tf: str, asof: int, utc_time: int) -> int:
+        """Open time of the forming bar in the keyed provider's alignment (US stocks: 1h bars at :30 UTC)."""
+        tf_s = tf_seconds(tf)
+        if tf_s >= 86400:
+            return utc_time
+        offset = self._keyed_offsets.get((symbol, tf))
+        if offset is None:
+            try:
+                row = await self.rt.db.fetchone(
+                    "SELECT time FROM candles WHERE symbol = ? AND tf = ? AND source <> 'recorder' "
+                    "ORDER BY time DESC LIMIT 1",
+                    (symbol, tf),
+                )
+            except Exception:
+                row = None
+            offset = int(row["time"]) % tf_s if row else 0
+            self._keyed_offsets[(symbol, tf)] = offset
+        return int((asof - offset) // tf_s * tf_s + offset) if offset else utc_time
 
     async def _aggregate_current(self, symbol: str, tf: str, base_c: dict | None) -> dict | None:
         """Forming bar of a non-recorded timeframe: recorded base bars of the bucket + the current base bar."""
@@ -1489,8 +1841,15 @@ class MarketDataHub:
             "volume": sum(p["volume"] for p in parts),
         }
 
-    async def _apply_live(self, symbol: str, tf: str, rows: list[dict], source: str) -> None:
-        """Bar-close detection: a newer bar emits the previous one closed=True, then the forming bar."""
+    async def _apply_live(
+        self, symbol: str, tf: str, rows: list[dict], source: str, *, store: bool = True,
+        venue: S.Venue | None = None,
+    ) -> None:
+        """Bar-close detection. A newer bar emits every bar closed since the previous update (oldest first; after a
+        feed stall the missed bars are downloaded from the exchange) and then the forming bar. Exchange bars are
+        stored only when they continue the cached series: a gap (restart, long pause) is downloaded by get_candles
+        instead, so a partial bar is never stored as final. `source`: exchange provider, "recorder" (merged by the
+        recorder), "keyed" / "snapshot" (TradingView snapshots of keyed / crypto series, published only)."""
         key = (symbol, tf)
         if not rows or key not in self._subs:
             return
@@ -1498,17 +1857,91 @@ class MarketDataHub:
         prev = self._last.get(key)
         if prev is not None and latest["time"] < prev["time"]:
             return  # out-of-order answer
-        closed_rows = rows[:-1]
-        if prev is not None and latest["time"] > prev["time"]:
-            final = next((r for r in rows if r["time"] == prev["time"]), prev)
-            closed_rows = [r for r in closed_rows if r["time"] != final["time"]] + [final]
-            await self._store_closed(symbol, tf, closed_rows, source)
-            await self._dispatch(symbol, tf, final, True)
-        elif closed_rows:
-            await self._store_closed(symbol, tf, closed_rows, source)
+        exchange = source not in SNAPSHOT_SOURCES
+        if prev is None:
+            if exchange and store and len(rows) > 1:
+                if await self._continues_cache(symbol, tf, int(rows[0]["time"])):
+                    await self._store_closed(symbol, tf, rows[:-1], source)
+                else:
+                    self._schedule_gap_fill(symbol, tf)
+        elif latest["time"] > prev["time"]:
+            closed: list[dict] = []
+            if exchange:
+                closed = [r for r in rows[:-1] if r["time"] >= prev["time"]]
+                if not closed or closed[0]["time"] != prev["time"]:  # bars were missed (stall, laptop sleep)
+                    caught = await self._catch_up(symbol, tf, venue, int(prev["time"]))
+                    if caught:
+                        latest, closed = caught[-1], caught[:-1]
+                    else:
+                        closed = []
+                        if store:
+                            self._schedule_gap_fill(symbol, tf)
+            elif self._closed_at.get(key) != prev["time"]:
+                closed = [prev]  # snapshots: the last one of the bucket is the best known final bar
+            if closed and store:
+                await self._store_closed(symbol, tf, closed, source)
+            if source == "keyed":
+                self._keyed_refresh(symbol, tf)
+            for bar in closed:
+                await self._dispatch(symbol, tf, bar, True)
         if prev is None or latest != prev:
             self._last[key] = latest
             await self._dispatch(symbol, tf, latest, False)
+
+    async def _continues_cache(self, symbol: str, tf: str, first_time: int) -> bool:
+        """True when bars starting at `first_time` continue the cached series (or nothing is cached yet). The cache
+        must already reach `first_time`: its newest bar may have been stored while it was still forming (app
+        closed during that bar), and only a download from it (get_candles) replaces it with its final version."""
+        try:
+            last = await self.rt.db.fetchval(
+                "SELECT MAX(time) FROM candles WHERE symbol = ? AND tf = ?", (symbol, tf)
+            )
+        except Exception:
+            return False
+        return last is None or int(last) >= int(first_time)
+
+    async def _catch_up(self, symbol: str, tf: str, venue: S.Venue | None, since: int) -> list[dict] | None:
+        """Bars from `since` (the last bar seen live) to the forming one, downloaded after a feed stall. None when
+        the gap is too long or the download fails (get_candles fills the gap then)."""
+        tf_s = tf_seconds(tf)
+        n = (floor_time(now_s(), tf) - int(since)) // tf_s + 1
+        if venue is None or n < 2 or n > MAX_CATCHUP_BARS + 1:
+            return None
+        try:
+            providers = self._providers()
+            raw = await asyncio.wait_for(
+                providers.fetch_candles(venue.provider, self._native(providers, venue), tf, int(n) + 1,
+                                        client=self._http()),
+                CATCHUP_TIMEOUT_S,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._warn_once(f"catchup:{symbol}:{tf}",
+                            f"Feed {symbol} {tf}: no se pudieron recuperar las velas perdidas "
+                            f"({str(exc) or 'tiempo de espera agotado'})")
+            return None
+        rows = [r for r in clean_rows(raw) if r["time"] >= since]
+        return rows if len(rows) >= 2 and rows[0]["time"] == since else None
+
+    def _schedule_gap_fill(self, symbol: str, tf: str) -> None:
+        """Download the bars missing between the cache and now in the background (get_candles fills gaps)."""
+        key = (symbol, tf)
+        job = self._gap_jobs.get(key)
+        if job is not None and not job.done():
+            return
+        self._fresh.pop(key)
+        if self._log.should_log(f"gap:{symbol}:{tf}", 600):
+            self._emit("debug", f"Feed en vivo: faltan velas de {symbol} {tf} (pausa o reinicio); se descargan")
+        self._gap_jobs[key] = asyncio.ensure_future(self._gap_fill(symbol, tf))
+
+    async def _gap_fill(self, symbol: str, tf: str) -> None:
+        try:
+            await self.get_candles(symbol, tf, GAP_FILL_LIMIT)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._warn_once(f"gap-fill:{symbol}:{tf}", f"No se pudo completar el historial de {symbol} {tf}: {exc}")
 
     async def _store_closed(self, symbol: str, tf: str, rows: list[dict], source: str) -> None:
         try:

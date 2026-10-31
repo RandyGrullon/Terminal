@@ -1,10 +1,26 @@
 // Shared UI primitives. Keep pages consistent by composing these (styles live in styles.css).
-import { useEffect, type CSSProperties, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useId, useRef, type CSSProperties, type ReactNode } from 'react'
 import { CircleCheck, CircleX, Clock, TriangleAlert, X } from 'lucide-react'
 import type { NexusAction, Verdict } from '../api/types'
 import { ACTION_LABEL, VERDICT_LABEL, actionTone, verdictTone, type Tone } from '../lib/format'
 
 type BtnVariant = 'default' | 'primary' | 'success' | 'danger' | 'ghost'
+
+/** The control a <Field> labels. NumberInput, Select, TextInput and Toggle inside a Field take this id (unless they get
+ *  their own `id`), so the label names the control for screen readers and clicking it focuses the control. */
+const FieldContext = createContext<{ id: string; hintId?: string } | null>(null)
+
+/** id / aria-describedby of a form control: its own id, else the id of the enclosing Field. */
+function useControlIds(ownId: string | undefined): { id: string | undefined; describedBy: string | undefined } {
+  const field = useContext(FieldContext)
+  if (ownId !== undefined || !field) return { id: ownId, describedBy: undefined }
+  return { id: field.id, describedBy: field.hintId }
+}
+
+/** For other controls placed in a <Field> (e.g. SymbolSearch): the id its label points at; undefined outside one. */
+export function useFieldId(): string | undefined {
+  return useContext(FieldContext)?.id
+}
 
 export function Button(props: {
   children?: ReactNode
@@ -129,13 +145,20 @@ export function Select<T extends string>(props: {
   title?: string
   style?: CSSProperties
   disabled?: boolean
+  id?: string
+  'aria-label'?: string
+  'aria-describedby'?: string
 }) {
+  const ids = useControlIds(props.id)
   const opts = (props.options as unknown[]).map((o) =>
     typeof o === 'string' ? { value: o as T, label: o } : (o as { value: T; label: string }),
   )
   return (
     <select
       className="select"
+      id={ids.id}
+      aria-label={props['aria-label']}
+      aria-describedby={props['aria-describedby'] ?? ids.describedBy}
       value={props.value}
       title={props.title}
       style={props.style}
@@ -160,10 +183,17 @@ export function TextInput(props: {
   style?: CSSProperties
   autoFocus?: boolean
   type?: string
+  id?: string
+  'aria-label'?: string
+  'aria-describedby'?: string
 }) {
+  const ids = useControlIds(props.id)
   return (
     <input
       className={`input ${props.mono ? 'mono' : ''}`}
+      id={ids.id}
+      aria-label={props['aria-label']}
+      aria-describedby={props['aria-describedby'] ?? ids.describedBy}
       type={props.type ?? 'text'}
       value={props.value}
       placeholder={props.placeholder}
@@ -185,10 +215,17 @@ export function NumberInput(props: {
   step?: number
   placeholder?: string
   style?: CSSProperties
+  id?: string
+  'aria-label'?: string
+  'aria-describedby'?: string
 }) {
+  const ids = useControlIds(props.id)
   return (
     <input
       className="input mono"
+      id={ids.id}
+      aria-label={props['aria-label']}
+      aria-describedby={props['aria-describedby'] ?? ids.describedBy}
       type="number"
       value={props.value ?? ''}
       min={props.min}
@@ -204,20 +241,46 @@ export function NumberInput(props: {
   )
 }
 
-export function Field(props: { label: ReactNode; children: ReactNode; hint?: ReactNode; style?: CSSProperties }) {
+/** Label + control. The label is associated with the NumberInput / Select / TextInput / Toggle / SymbolSearch inside
+ *  (one control per Field); another control can take useFieldId(), or pass `htmlFor` and give it that id. */
+export function Field(props: { label: ReactNode; children: ReactNode; hint?: ReactNode; style?: CSSProperties; htmlFor?: string }) {
+  const autoId = useId()
+  const id = props.htmlFor ?? autoId
+  const hintId = props.hint ? `${autoId}-hint` : undefined
   return (
     <div className="field" style={props.style}>
-      <label>{props.label}</label>
-      {props.children}
-      {props.hint && <span className="tiny muted">{props.hint}</span>}
+      <label htmlFor={id}>{props.label}</label>
+      <FieldContext.Provider value={{ id, hintId }}>{props.children}</FieldContext.Provider>
+      {props.hint && (
+        <span id={hintId} className="tiny muted">
+          {props.hint}
+        </span>
+      )}
     </div>
   )
 }
 
-export function Toggle(props: { checked: boolean; onChange: (v: boolean) => void; label?: ReactNode; disabled?: boolean }) {
+export function Toggle(props: {
+  checked: boolean
+  onChange: (v: boolean) => void
+  label?: ReactNode
+  disabled?: boolean
+  id?: string
+  'aria-label'?: string
+  'aria-describedby'?: string
+}) {
+  const ids = useControlIds(props.id)
   return (
     <label className="toggle" style={props.disabled ? { opacity: 0.5, pointerEvents: 'none' } : undefined}>
-      <input type="checkbox" checked={props.checked} onChange={(e) => props.onChange(e.target.checked)} />
+      <input
+        type="checkbox"
+        id={ids.id}
+        aria-label={props['aria-label']}
+        aria-describedby={props['aria-describedby'] ?? ids.describedBy}
+        checked={props.checked}
+        disabled={props.disabled}
+        onChange={(e) => props.onChange(e.target.checked)}
+      />
       <span className="track" />
       {props.label}
     </label>
@@ -289,21 +352,100 @@ export function ErrorBox(props: { error: unknown; onRetry?: () => void }) {
   )
 }
 
-export function Modal(props: { open: boolean; onClose: () => void; title: ReactNode; children: ReactNode; footer?: ReactNode; width?: number }) {
-  useEffect(() => {
-    if (!props.open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') props.onClose()
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), ' +
+  'textarea:not([disabled]), iframe, [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"])'
+
+/** Open dialogs, innermost last: only the top-most one reacts to Escape and keeps Tab inside. */
+const openDialogs: HTMLElement[] = []
+
+function focusableIn(root: HTMLElement | null): HTMLElement[] {
+  if (!root) return []
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.tabIndex >= 0 && el.getClientRects().length > 0)
+}
+
+/** The element that has the keyboard focus (null when nothing has it, or outside a browser). */
+function focusedElement(): HTMLElement | null {
+  if (typeof document === 'undefined' || typeof HTMLElement === 'undefined') return null
+  const el = document.activeElement
+  return el instanceof HTMLElement && el !== document.body ? el : null
+}
+
+/** Keyboard focus of an open dialog: moves focus inside (first control of the content, else of the footer, else the
+ *  dialog itself), keeps Tab / Shift+Tab inside, lets Escape close only the top-most dialog and gives focus back to
+ *  the element that opened it (`openedFrom`: where the focus was when it opened; by default the current focus unless
+ *  a control inside the dialog already took it, e.g. with autoFocus). Returns the cleanup. */
+function trapDialog(dialog: HTMLElement, onEscape: () => void, openedFrom: HTMLElement | null = null): () => void {
+  const current = focusedElement()
+  const opener = openedFrom ?? (current && !dialog.contains(current) ? current : null)
+  openDialogs.push(dialog)
+  if (!dialog.contains(document.activeElement)) {
+    const first = focusableIn(dialog.querySelector<HTMLElement>('.modal-body'))[0] ?? focusableIn(dialog.querySelector<HTMLElement>('.modal-footer'))[0]
+    ;(first ?? dialog).focus()
+  }
+  const onKey = (e: KeyboardEvent) => {
+    if (openDialogs[openDialogs.length - 1] !== dialog) return
+    if (e.key === 'Escape') {
+      if (e.defaultPrevented) return // already handled inside (e.g. a search box closing its list)
+      e.preventDefault()
+      onEscape()
+    } else if (e.key === 'Tab') {
+      const items = focusableIn(dialog)
+      const active = document.activeElement
+      if (!items.length) {
+        e.preventDefault()
+        dialog.focus()
+      } else if (e.shiftKey && (active === items[0] || active === dialog || !dialog.contains(active))) {
+        e.preventDefault()
+        items[items.length - 1].focus()
+      } else if (!e.shiftKey && (active === items[items.length - 1] || !dialog.contains(active))) {
+        e.preventDefault()
+        items[0].focus()
+      }
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [props.open, props.onClose])
+  }
+  document.addEventListener('keydown', onKey)
+  return () => {
+    document.removeEventListener('keydown', onKey)
+    const i = openDialogs.indexOf(dialog)
+    if (i >= 0) openDialogs.splice(i, 1)
+    // Back to the opener, unless the closing action already moved the focus somewhere else on the page.
+    const active = document.activeElement
+    if (opener?.isConnected && (!active || active === document.body || dialog.contains(active))) opener.focus()
+  }
+}
+
+export function Modal(props: { open: boolean; onClose: () => void; title: ReactNode; children: ReactNode; footer?: ReactNode; width?: number }) {
+  const titleId = useId()
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const onCloseRef = useRef(props.onClose)
+  onCloseRef.current = props.onClose
+  // Where the focus was when the dialog opened, read while rendering: a control with autoFocus inside the dialog
+  // takes the focus during the commit, before any effect runs, and must not be mistaken for the opener.
+  const openerRef = useRef<HTMLElement | null>(null)
+  const wasOpenRef = useRef(false)
+  if (props.open && !wasOpenRef.current) openerRef.current = focusedElement()
+  wasOpenRef.current = props.open
+  useEffect(() => {
+    if (!props.open || !dialogRef.current) return
+    return trapDialog(dialogRef.current, () => onCloseRef.current(), openerRef.current)
+  }, [props.open])
   if (!props.open) return null
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
-      <div className="modal" style={props.width ? { width: `min(${props.width}px, 100%)` } : undefined} role="dialog" aria-modal="true">
+      <div
+        ref={dialogRef}
+        className="modal"
+        style={{ outline: 'none', ...(props.width ? { width: `min(${props.width}px, 100%)` } : {}) }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+      >
         <div className="modal-header">
-          <h3 className="grow">{props.title}</h3>
+          <h3 id={titleId} className="grow">
+            {props.title}
+          </h3>
           <IconButton icon={<X size={16} />} title="Cerrar" onClick={props.onClose} />
         </div>
         <div className="modal-body">{props.children}</div>

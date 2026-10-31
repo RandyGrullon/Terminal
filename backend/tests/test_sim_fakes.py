@@ -140,17 +140,20 @@ class FakeNexus:
         self.analyze_map = dict(analyze_map or {})
         self.gate_calls: list[tuple] = []
         self.current_calls: list[tuple] = []
+        self.upto_calls: list[int | None] = []  # `upto` of every current() call (None = live, forming-bar view)
 
     async def gate(self, symbol: str, tf: str, direction: str, entry: float | None = None, sl: float | None = None,
                    tp: float | None = None) -> dict:
         self.gate_calls.append((symbol, tf, direction, entry, sl, tp))
         return make_gate(direction, self.verdict, entry if entry is not None else 100.0)
 
-    async def current(self, symbol: str, tf: str) -> dict | None:
-        self.current_calls.append((symbol, tf))
+    async def current(self, symbol: str, tf: str, *, upto: int | None = None) -> dict | None:
+        # (symbol, tf) when called for the live bar; (symbol, tf, upto) when asked for a closed bar (contract I1)
+        self.current_calls.append((symbol, tf) if upto is None else (symbol, tf, upto))
+        self.upto_calls.append(upto)
         return self.current_value
 
-    async def analyze(self, symbol: str, tf: str, limit: int | None = None) -> dict:
+    async def analyze(self, symbol: str, tf: str, limit: int | None = None, *, upto: int | None = None) -> dict:
         if symbol in self.analyze_map:
             return self.analyze_map[symbol]
         return {"ok": False, "message": "historial insuficiente", "current": None}

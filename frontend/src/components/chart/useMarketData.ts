@@ -2,7 +2,9 @@
 //  - candles + NEXUS fetched in parallel (aborted when the symbol/tf changes),
 //  - live candles from the WebSocket topic `market:{SYMBOL}:{tf}` applied imperatively (no React re-render),
 //  - when a bar closes: debounced (1.5 s) NEXUS refresh + `barVersion` bump (indicators recompute), zoom kept,
-//  - `nexus` socket messages update `current` and merge new markers immediately,
+//  - `nexus` socket messages update `current` and merge new markers immediately, then NEXUS is read again unless the
+//    bar-close refresh is still pending (a semáforo veto of the closed bar is stored before that message),
+//  - semáforo changes (level / "no operar" window) re-read NEXUS through `refreshNexus` (ChartMacro.tsx),
 //  - polling fallback when the socket is down or silent, full soft reload after a reconnect.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../api/client'
@@ -24,6 +26,8 @@ interface Scoped<T> {
 export interface LiveTick {
   price: number
   time: number
+  /** Close of the bar before `time` once a new bar started live (null = the loaded candles hold that bar). */
+  prevClose: number | null
 }
 
 export interface MarketData {
@@ -86,6 +90,9 @@ export function useMarketData(symbol: string, tf: Timeframe, onCandle: (c: Candl
   const pollCtrlRef = useRef<AbortController | null>(null)
   const loadedRef = useRef(false)
   const lastTimeRef = useRef(0)
+  /** Close of the newest bar seen (loaded or live), and of the bar before the live one after a new bar started. */
+  const lastCloseRef = useRef<number | null>(null)
+  const prevCloseRef = useRef<number | null>(null)
   const lastLiveAtRef = useRef(0)
   const barTimerRef = useRef<number | null>(null)
   const tickTimerRef = useRef<number | null>(null)
@@ -93,6 +100,10 @@ export function useMarketData(symbol: string, tf: Timeframe, onCandle: (c: Candl
   /** scope whose NEXUS data is held (and whether it was ok) */
   const nexusHeldRef = useRef<{ scope: string; ok: boolean } | null>(null)
   const candlesHeldRef = useRef<string | null>(null)
+  /** NEXUS requests are numbered: an answer older than the one on screen is dropped (the verdict merges the
+   *  semáforo at request time, so a slow initial load must not overwrite a newer refresh). */
+  const nexusSeqRef = useRef(0)
+  const nexusShownSeqRef = useRef(0)
 
   const setNexusData = useCallback((sc: string, value: NexusResponse) => {
     nexusHeldRef.current = { scope: sc, ok: value.ok }
@@ -114,6 +125,7 @@ export function useMarketData(symbol: string, tf: Timeframe, onCandle: (c: Candl
       if (!soft) {
         loadedRef.current = false
         lastTimeRef.current = 0
+        prevCloseRef.current = null
       }
       lastLiveAtRef.current = Date.now()
 
@@ -126,6 +138,8 @@ export function useMarketData(symbol: string, tf: Timeframe, onCandle: (c: Candl
           setCandlesS({ scope: sc, value: { ...res, candles }, at: Date.now() })
           candlesHeldRef.current = sc
           lastTimeRef.current = candles.length ? candles[candles.length - 1].time : 0
+          lastCloseRef.current = candles.length ? candles[candles.length - 1].close : null
+          prevCloseRef.current = null
           loadedRef.current = true
           setDataVersion((v) => v + 1)
         })
@@ -139,14 +153,16 @@ export function useMarketData(symbol: string, tf: Timeframe, onCandle: (c: Candl
           if (!ctrl.signal.aborted) setCandlesLoading(false)
         })
 
+      const seq = ++nexusSeqRef.current
       api
         .nexus(sym, t, undefined, ctrl.signal)
         .then((res) => {
-          if (ctrl.signal.aborted) return
+          if (ctrl.signal.aborted || seq < nexusShownSeqRef.current) return
+          nexusShownSeqRef.current = seq
           setNexusData(sc, normalizeNexus(res))
         })
         .catch((err) => {
-          if (isAbortError(err) || ctrl.signal.aborted) return
+          if (isAbortError(err) || ctrl.signal.aborted || seq < nexusShownSeqRef.current) return
           if (!soft || nexusHeldRef.current?.scope !== sc) setNexusErr({ scope: sc, value: err, at: Date.now() })
           else console.warn('Recarga de NEXUS fallida', err)
         })
@@ -165,14 +181,16 @@ export function useMarketData(symbol: string, tf: Timeframe, onCandle: (c: Candl
     setNexusRefreshing(true)
     // Retrying after a failure with nothing on screen: show the loading state instead of the old error.
     if (nexusHeldRef.current?.scope !== sc) setNexusErr(null)
+    const seq = ++nexusSeqRef.current
     api
       .nexus(sym, t, undefined, ctrl.signal)
       .then((res) => {
-        if (ctrl.signal.aborted || scopeRef.current.scope !== sc) return
+        if (ctrl.signal.aborted || scopeRef.current.scope !== sc || seq < nexusShownSeqRef.current) return
+        nexusShownSeqRef.current = seq
         setNexusData(sc, normalizeNexus(res))
       })
       .catch((err) => {
-        if (isAbortError(err) || ctrl.signal.aborted || scopeRef.current.scope !== sc) return
+        if (isAbortError(err) || ctrl.signal.aborted || scopeRef.current.scope !== sc || seq < nexusShownSeqRef.current) return
         if (nexusHeldRef.current?.scope !== sc) setNexusErr({ scope: sc, value: err, at: Date.now() })
         else console.warn('Actualización de NEXUS fallida', err)
       })
@@ -197,9 +215,11 @@ export function useMarketData(symbol: string, tf: Timeframe, onCandle: (c: Candl
       if (c.time < last) return
       const isNewBar = last > 0 && c.time > last
       lastTimeRef.current = c.time
+      if (isNewBar) prevCloseRef.current = lastCloseRef.current
+      lastCloseRef.current = c.close
       onCandleRef.current(c)
       // Coalesce bursts of ticks into at most ~8 React updates per second (timers also run in background tabs).
-      pendingTickRef.current = { price: c.close, time: c.time }
+      pendingTickRef.current = { price: c.close, time: c.time, prevClose: prevCloseRef.current }
       if (tickTimerRef.current === null) {
         tickTimerRef.current = window.setTimeout(() => {
           tickTimerRef.current = null
@@ -256,6 +276,12 @@ export function useMarketData(symbol: string, tf: Timeframe, onCandle: (c: Candl
           },
         }
       })
+      // The server sends this message after deciding the closed bar and storing any semáforo veto of its entry. A
+      // bar-close refresh that reached it earlier still holds the vetoed entry: its marker survives the merge above and
+      // its level lines (bars.pos_*) are not in this message. Read NEXUS again (at most one extra request per closed
+      // bar, usually answered from the server's 5 s cache of that view); a pending bar-close refresh runs after this
+      // message anyway, so it is not doubled.
+      if (barTimerRef.current === null) refreshNexus()
     })
     return () => {
       offSub()

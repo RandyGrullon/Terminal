@@ -220,16 +220,28 @@ def test_terminal_commands(client):
 
 
 def test_snapshot_retention_and_prior_selection():
+    """Anchor snapshots (grid / origin) are write-once, because later runs start their window right after them; the
+    newest 'last' snapshot (learning summary) is kept apart and is never an anchor."""
     from app.engine.service import merge_snapshots, pick_prior
 
     tf_s = 3600
-    old = [{"time": t * tf_s, "state": {"v": t}} for t in range(0, 4000, 10)]
-    new = [{"time": 4000 * tf_s, "state": {"v": "new"}}, {"time": 0, "state": {"v": "replaced"}}]
+    old = [{"time": t * tf_s, "state": {"v": t}, "kind": "grid"} for t in range(0, 4000, 100)]
+    old.append({"time": 3990 * tf_s, "state": {"v": "previous last"}, "kind": "last"})
+    new = [{"time": 3900 * tf_s, "state": {"v": "replaced"}, "kind": "grid"},  # stored: never replaced
+           {"time": 3950 * tf_s, "state": {"v": 3950}, "kind": "origin"},  # 50 bars from every kept one: added
+           {"time": 3960 * tf_s, "state": {"v": 3960}, "kind": "grid"},  # crowds the one just added: dropped
+           {"time": 4000 * tf_s, "state": {"v": "new"}, "kind": "last"}]
     kept = merge_snapshots(old, new, tf_s)
     times = [s["time"] for s in kept]
-    assert len(kept) <= 60 and times == sorted(times) and times[-1] == 4000 * tf_s
-    assert all(b - a >= 50 * tf_s for a, b in zip(times, times[1:]))
-    assert pick_prior(kept, 3000 * tf_s)["v"] <= 3000
+    assert times == sorted(times) and times[-1] == 4000 * tf_s and kept[-1]["kind"] == "last"
+    by_time = {s["time"]: s for s in kept}
+    assert by_time[3900 * tf_s]["state"] == {"v": 3900} and by_time[3950 * tf_s]["kind"] == "origin"
+    assert 3960 * tf_s not in by_time and 3990 * tf_s not in by_time  # only the newest 'last' survives
+    assert len(kept) == 40 + 1 + 1
+    # the oldest anchors age out beyond max_keep; stored items without a kind (older format) count as anchors
+    many = merge_snapshots([{"time": t * tf_s, "state": {"v": t}} for t in range(0, 7000, 100)], [], tf_s)
+    assert len(many) == 60 and many[0]["time"] == 1000 * tf_s and {s["kind"] for s in many} == {"grid"}
+    assert pick_prior(kept, 3000 * tf_s)["v"] == 3000
     assert pick_prior(kept, -1) is None
     assert pick_prior([{"time": 5, "state": {"x": 1}}, {"time": 9, "state": {"x": 2}}], 7) == {"x": 1}
 

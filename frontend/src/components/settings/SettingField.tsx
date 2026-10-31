@@ -1,10 +1,11 @@
 // One settings field: label + control (by kind) + help, with dirty marker, per-field revert and inline errors.
-import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
+// The label is associated with its control (or names the group of controls) and the help / error describes it.
+import { memo, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { ExternalLink, Eye, EyeOff, Undo2, X } from 'lucide-react'
 import { TIMEFRAMES } from '../../api/types'
 import { fmtNum } from '../../lib/format'
 import { IconButton, Select, Toggle } from '../ui'
-import type { FieldDef } from './schema'
+import { FEE_CLASS_LABEL, FEE_CLASSES, type FieldDef } from './schema'
 
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 
@@ -27,8 +28,27 @@ function humanSeconds(total: number): string {
   return h ? `${d} d ${h} h` : `${d} d`
 }
 
+/** id / description / validity of a control, so the label and the help or error text reach screen readers. */
+interface A11y {
+  id?: string
+  describedBy?: string
+  invalid?: boolean
+}
+
 /** Number input with a local text buffer so intermediate states ("0.", "-") can be typed. */
-function NumField({ value, onChange, def, small }: { value: unknown; onChange: (v: number | null) => void; def: FieldDef; small?: boolean }) {
+function NumField({
+  value,
+  onChange,
+  def,
+  small,
+  a11y,
+}: {
+  value: unknown
+  onChange: (v: number | null) => void
+  def: FieldDef
+  small?: boolean
+  a11y?: A11y
+}) {
   const num = finite(value) ? value : null
   const [text, setText] = useState(num === null ? '' : String(num))
   const focused = useRef(false)
@@ -38,6 +58,9 @@ function NumField({ value, onChange, def, small }: { value: unknown; onChange: (
   return (
     <input
       className={`input mono set-num ${small ? 'small' : ''}`}
+      id={a11y?.id}
+      aria-describedby={a11y?.describedBy}
+      aria-invalid={a11y?.invalid || undefined}
       type="number"
       inputMode="decimal"
       value={text}
@@ -65,7 +88,7 @@ function NumField({ value, onChange, def, small }: { value: unknown; onChange: (
   )
 }
 
-function SecretField({ value, onChange, def }: { value: unknown; onChange: (v: string) => void; def: FieldDef }) {
+function SecretField({ value, onChange, def, a11y }: { value: unknown; onChange: (v: string) => void; def: FieldDef; a11y: A11y }) {
   const [show, setShow] = useState(false)
   const v = typeof value === 'string' ? value : ''
   return (
@@ -73,6 +96,9 @@ function SecretField({ value, onChange, def }: { value: unknown; onChange: (v: s
       <div className="row gap-1">
         <input
           className="input mono grow"
+          id={a11y.id}
+          aria-describedby={a11y.describedBy}
+          aria-invalid={a11y.invalid || undefined}
           type={show ? 'text' : 'password'}
           value={v}
           autoComplete="off"
@@ -97,7 +123,7 @@ function SecretField({ value, onChange, def }: { value: unknown; onChange: (v: s
   )
 }
 
-function SymbolsField({ value, onChange }: { value: unknown; onChange: (v: string[]) => void }) {
+function SymbolsField({ value, onChange, a11y }: { value: unknown; onChange: (v: string[]) => void; a11y: A11y }) {
   const list = Array.isArray(value) ? value.map(String) : []
   const [text, setText] = useState('')
   const add = () => {
@@ -127,6 +153,9 @@ function SymbolsField({ value, onChange }: { value: unknown; onChange: (v: strin
       <div className="row gap-1">
         <input
           className="input mono grow"
+          id={a11y.id}
+          aria-describedby={a11y.describedBy}
+          aria-invalid={a11y.invalid || undefined}
           value={text}
           placeholder="BINANCE:ETHUSDT y Enter"
           onChange={(e) => setText(e.target.value)}
@@ -168,7 +197,7 @@ function MarketsField({ value, onChange, markets }: { value: unknown; onChange: 
   )
 }
 
-function Tp3Field({ value, onChange, def }: { value: unknown; onChange: (v: (number | null)[]) => void; def: FieldDef }) {
+function Tp3Field({ value, onChange, def, a11y }: { value: unknown; onChange: (v: (number | null)[]) => void; def: FieldDef; a11y: A11y }) {
   const arr: (number | null)[] = Array.isArray(value) ? [0, 1, 2].map((i) => (finite(value[i]) ? (value[i] as number) : null)) : [null, null, null]
   return (
     <div className="set-tp3">
@@ -179,6 +208,7 @@ function Tp3Field({ value, onChange, def }: { value: unknown; onChange: (v: (num
             def={def}
             value={v}
             small
+            a11y={{ describedBy: a11y.describedBy, invalid: a11y.invalid }}
             onChange={(n) => {
               const next = [...arr]
               next[i] = n
@@ -186,6 +216,31 @@ function Tp3Field({ value, onChange, def }: { value: unknown; onChange: (v: (num
             }}
           />
           <span className="tiny muted">R</span>
+        </label>
+      ))}
+    </div>
+  )
+}
+
+/** Fee % per side by asset class (risk.fee_pct_by_class): one number per class the server knows. */
+function FeeClassesField({ value, onChange, def, a11y }: { value: unknown; onChange: (v: Record<string, unknown>) => void; def: FieldDef; a11y: A11y }) {
+  const map = value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+  const known = FEE_CLASSES.map((c) => c.id).filter((id) => id in map)
+  const keys = [...known, ...Object.keys(map).filter((k) => !known.includes(k))]
+  if (!keys.length) return <span className="tiny muted">Este servidor no admite comisiones por clase de activo.</span>
+  return (
+    <div className="set-tp3">
+      {keys.map((k) => (
+        <label key={k} className="set-tp">
+          <span className="tiny muted">{FEE_CLASS_LABEL[k] ?? k}</span>
+          <NumField
+            def={def}
+            value={map[k]}
+            small
+            a11y={{ describedBy: a11y.describedBy, invalid: a11y.invalid }}
+            onChange={(n) => onChange({ ...map, [k]: n })}
+          />
+          <span className="tiny muted">{def.unit ?? ''}</span>
         </label>
       ))}
     </div>
@@ -209,8 +264,16 @@ interface Props {
   onRevert: (key: string) => void
 }
 
+/** Kinds rendered as several controls: their label names the group instead of pointing at one control. */
+const GROUP_KINDS = new Set<FieldDef['kind']>(['markets', 'tp3', 'fee_classes'])
+
 function SettingField({ def, value, dirty, error, markets, onChange, onRevert }: Props) {
   const set = (v: unknown) => onChange(def.key, v)
+  const uid = useId()
+  const labelId = `${uid}-label`
+  const helpId = `${uid}-help`
+  const group = GROUP_KINDS.has(def.kind)
+  const a11y: A11y = { id: group ? undefined : `${uid}-control`, describedBy: helpId, invalid: !!error }
   let control: ReactNode
   switch (def.kind) {
     case 'number':
@@ -218,38 +281,51 @@ function SettingField({ def, value, dirty, error, markets, onChange, onRevert }:
     case 'seconds':
       control = (
         <div className="set-inline">
-          <NumField def={def} value={value} onChange={set} />
+          <NumField def={def} value={value} onChange={set} a11y={a11y} />
           {def.unit && <span className="set-unit">{def.unit}</span>}
           {valueHint(def, value) && <span className="set-unit muted">{valueHint(def, value)}</span>}
         </div>
       )
       break
     case 'bool':
-      control = <Toggle checked={value === true} onChange={set} label={value === true ? 'Activado' : 'Desactivado'} />
+      control = (
+        <Toggle id={a11y.id} aria-describedby={helpId} checked={value === true} onChange={set} label={value === true ? 'Activado' : 'Desactivado'} />
+      )
       break
     case 'tf': {
       const cur = typeof value === 'string' ? value : '1h'
-      control = <Select value={cur} onChange={set} options={(TIMEFRAMES as string[]).includes(cur) ? TIMEFRAMES : [cur, ...TIMEFRAMES]} />
+      control = (
+        <Select
+          id={a11y.id}
+          aria-describedby={helpId}
+          value={cur}
+          onChange={set}
+          options={(TIMEFRAMES as string[]).includes(cur) ? TIMEFRAMES : [cur, ...TIMEFRAMES]}
+        />
+      )
       break
     }
     case 'select': {
       const cur = typeof value === 'string' ? value : ''
       const opts = def.options ?? []
       const all = !cur || opts.some((o) => o.value === cur) ? opts : [{ value: cur, label: cur }, ...opts]
-      control = <Select value={cur} onChange={set} options={all} />
+      control = <Select id={a11y.id} aria-describedby={helpId} value={cur} onChange={set} options={all} />
       break
     }
     case 'secret':
-      control = <SecretField def={def} value={value} onChange={set} />
+      control = <SecretField def={def} value={value} onChange={set} a11y={a11y} />
       break
     case 'markets':
       control = <MarketsField value={value} onChange={set} markets={markets} />
       break
     case 'tp3':
-      control = <Tp3Field def={def} value={value} onChange={set} />
+      control = <Tp3Field def={def} value={value} onChange={set} a11y={a11y} />
+      break
+    case 'fee_classes':
+      control = <FeeClassesField def={def} value={value} onChange={set} a11y={a11y} />
       break
     case 'symbols':
-      control = <SymbolsField value={value} onChange={set} />
+      control = <SymbolsField value={value} onChange={set} a11y={a11y} />
       break
     default:
       control = <span className="muted">—</span>
@@ -258,15 +334,35 @@ function SettingField({ def, value, dirty, error, markets, onChange, onRevert }:
   return (
     <div className={`set-field ${def.wide ? 'wide' : ''} ${dirty ? 'dirty' : ''} ${error ? 'invalid' : ''}`} id={`set-field-${def.key}`}>
       <div className="set-field-head">
-        <label className="set-label" title={def.key}>
-          {def.label}
-        </label>
+        {group ? (
+          <span className="set-label" id={labelId} title={def.key}>
+            {def.label}
+          </span>
+        ) : (
+          <label className="set-label" id={labelId} htmlFor={a11y.id} title={def.key}>
+            {def.label}
+          </label>
+        )}
         {dirty && <span className="set-dirty" title="Modificado sin guardar" />}
         <div className="grow" />
         {dirty && <IconButton size="sm" icon={<Undo2 size={13} />} title="Volver al valor guardado" onClick={() => onRevert(def.key)} />}
       </div>
-      {control}
-      {error ? <span className="set-error">{error}</span> : <span className="set-help">{def.help}</span>}
+      {group ? (
+        <div role="group" aria-labelledby={labelId} aria-describedby={helpId} style={{ minWidth: 0 }}>
+          {control}
+        </div>
+      ) : (
+        control
+      )}
+      {error ? (
+        <span className="set-error" id={helpId}>
+          {error}
+        </span>
+      ) : (
+        <span className="set-help" id={helpId}>
+          {def.help}
+        </span>
+      )}
     </div>
   )
 }

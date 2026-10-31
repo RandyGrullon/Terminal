@@ -13,7 +13,8 @@ DataProviderError (a ProviderError, Spanish message).
       universe(market, offset, limit, sort, order, q, type_) -> {"total", "rows": [UniverseRow-like]}
       market_counts(wait_s=4.0) -> {market: int | None}                   market_counts_cached()
       symbol_details(symbol) -> SymbolInfo + "quote" + "technicals" | None
-      current_bars(symbols, tfs) -> {symbol: {tf: Candle at floor_time(now, tf)}}     status() / close()
+      current_bars(symbols, tfs) -> {symbol: {tf: Candle + asof}} (stamped in market time: now - announced delay)
+      status() / close()
 """
 from __future__ import annotations
 
@@ -451,8 +452,9 @@ class TradingViewClient:
         return {**out, "quote": dict(quote), "technicals": dict(out["technicals"])}
 
     async def current_bars(self, symbols: list[str], tfs: list[str]) -> dict[str, dict[str, dict]]:
-        """{symbol: {tf: Candle}} for the bars forming now (time = util.floor_time(now, tf)) from TradingView's
-        current-bar columns. Supported tfs: P.CURRENT_BAR_TFS (1m 5m 15m 1h 4h 1d 1w); others are ignored."""
+        """{symbol: {tf: Candle}} for the bars forming now from TradingView's current-bar columns, stamped in market
+        time (time = floor_time(now - delay, tf), `asof` = now - delay; delayed exchanges announce 600-900 s).
+        Supported tfs: P.CURRENT_BAR_TFS (1m 5m 15m 1h 4h 1d 1w); others are ignored."""
         if not self.active():
             return {}
         wanted: list[str] = []

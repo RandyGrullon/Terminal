@@ -29,9 +29,11 @@ def _service_status(svc: Any) -> dict:
 
 @router.get("/api/health")
 async def health(request: Request) -> dict:
+    # role: "single" (only instance), "leader" (active instance on a shared PostgreSQL) or "standby" (waiting for the
+    # active instance to stop: the services do not run here and the rest of the API answers 503).
     if config.AUTH_MODE != "none" and not getattr(request.state, "user", None):
         # Public liveness probe for the hosting platform: reveal nothing else without a session.
-        return {"ok": True, "version": VERSION, "auth": "required", "server_time": now_ms()}
+        return {"ok": True, "version": VERSION, "auth": "required", "role": rt.role, "server_time": now_ms()}
     services = {attr: _service_status(svc) for attr, svc in rt.services}
     if rt.ws is not None:
         services["ws"] = rt.ws.status()
@@ -43,6 +45,7 @@ async def health(request: Request) -> dict:
             "server_time": now_ms(),
             "db": {"path": str(rt.db.path), "size_bytes": rt.db.size_bytes(), "dialect": rt.db.dialect},
             "auth": config.AUTH_MODE,
+            "role": rt.role,
             "services": services,
             "load_errors": rt.load_errors,
         }

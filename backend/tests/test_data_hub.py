@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from app.data.base import ProviderError
+from app.data.providers_http import DataProviderError
 from tests.test_data_hub_fakes import Clock, FakeProviders, bar, make_hub
 
 BTC = "BINANCE:BTCUSDT"
@@ -113,8 +114,9 @@ def test_crypto_fallback_venue_then_recorder_history(runtime_factory, monkeypatc
             assert [c["provider"] for c in fake.calls] == ["binance", "okx"]
             assert fake.calls[-1]["native"] == "BTC-USDT"
             assert hub.history_kind(BTC) == ("okx", "full")
-            # every venue fails and nothing is cached -> local (recorder) history with a Spanish note
-            fake.fail = {p: ProviderError("caído") for p in ("binance", "okx", "kucoin", "coinbase", "kraken")}
+            # every venue answers "pair not found" and nothing is cached -> local (recorder) history + Spanish note
+            fake.fail = {p: DataProviderError(f"{p}: par no encontrado", provider=p, kind="not_found")
+                         for p in ("binance", "okx", "kucoin", "coinbase", "kraken")}
             eth = await hub.get_candles("BINANCE:ETHUSDT", "1h", 50)
             assert len(eth) == 0 and eth.history == "recorder" and eth.provider == "recorder"
             assert "Sin datos de los exchanges" in eth.note
@@ -262,12 +264,13 @@ def test_feed_failures_switch_symbol_to_snapshot_feed(runtime_factory, monkeypat
             hub.subscribe(BTC, "1m", owner="t")
             for _ in range(4):
                 await hub._poll_crypto([(BTC, "1m")])
-            assert hub.history_kind(BTC)[1] == "full"
+            assert hub._feed_tv.get(BTC) is None
             await hub._poll_crypto([(BTC, "1m")])  # 5th consecutive failure
-            assert hub.history_kind(BTC) == ("recorder", "recorder")
+            # only the live updates move to TradingView: candles keep coming from the exchanges
+            assert hub._feed_tv.get(BTC) is not None and hub.history_kind(BTC) == ("binance", "full")
             assert any("TradingView temporalmente" in e["message"] for e in hub.rt.bus.recent(20, source="hub"))
             await hub.rt.settings.set("providers.crypto_default", "okx")  # provider settings reset the fallback
-            assert hub.history_kind(BTC) == ("binance", "full")
+            assert hub._feed_tv.get(BTC) is None and hub.history_kind(BTC) == ("binance", "full")
 
     asyncio.run(scenario())
 

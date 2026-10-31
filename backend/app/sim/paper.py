@@ -5,12 +5,22 @@ Margin-style accounting: the balance only moves with realised P&L and fees; equi
 
 Order flow: price → Trade Gate (`rt.nexus.gate`) → AVOID blocks the order unless `force` (PaperRejected → HTTP
 409) → SL/TP from the gate when not given ("hasta aquí") → size by risk % of equity and the stop distance →
-market fill with slippage + fee → rows in paper_positions / paper_fills inside one DB transaction.
+market fill with slippage + fee (per asset class, `app.engine.costs.fee_pct_for`) → rows in paper_positions /
+paper_fills inside one DB transaction. R multiples are net of fees, like the engine's and the backtest's.
 
 Management (live feed through the hub, 1m bars for real symbols): SL first; TP1 closes 1/3 and moves the stop to
-break-even; TP2 closes 1/3 and starts a chandelier trailing stop; TP3 closes the rest. NEXUS advice is attached
-to every open position (≤ 1 refresh/min per symbol); when NEXUS says the trade turned bad (negative expected value
-of holding) auto-managed positions are closed ("Cierre anticipado") and manual ones get a warning event.
+break-even; TP2 closes 1/3 and starts a chandelier trailing stop; TP3 closes the rest. A stop moved by a fill takes
+effect from the next bar: the rest of that bar checks the stop against its close only (its earlier high/low may
+predate the move), and on a real market a bar that ended before the move, delivered late, never checks it. Only
+live prices manage levels: an old quote (venue closed, feed down, only the local cache left) never moves a stop or
+fills a target.
+NEXUS advice is attached to every open position (≤ 1 refresh/min per symbol): expected value of holding from the
+engine's first-passage model; "Cerrar ya" only on NEXUS's own exit rules: it leaves the position's side
+(EXIT_LONG / EXIT_SHORT or a confirmed entry the other way), or its early-exit rule holds for this position (EV of
+holding ≤ −0.10 R with the score against); any other negative EV is a "vigila la salida" warning. Nothing is
+closed on live advice: manual positions get a warning event, and the auto-trader decides on the bar that just
+closed (never on the forming bar), where it closes its positions on those exits and opens new ones on BUY / SELL
+with gate TOMAR.
 Positions with origin 'sim' belong to the simulator: they are priced and managed only through `sim_bar`.
 """
 from __future__ import annotations
@@ -24,6 +34,10 @@ from typing import Any
 import numpy as np
 
 from app import config
+from app.engine.costs import fee_pct_for
+from app.engine.levels import ev_hold
+from app.engine.nexus_current import EARLY_EV
+from app.engine.service_watch import gate_target_ms
 from app.sim import metrics as M
 from app.sim.common import (
     EXIT_LABEL,
@@ -48,8 +62,14 @@ MAX_LEVERAGE = M.DEFAULT_MAX_LEVERAGE
 PUBLISH_EVERY_S = 5.0
 ADVICE_EVERY_S = 60.0
 PRICE_STALE_S = 20.0
+QUOTE_STALE_S = 120.0  # a hub quote older than this is not a live price (the hub also flags it `stale`)
 WARN_REPEAT_S = 900.0
 HISTORY_LIMIT = 100
+SIGMA_ATR = 0.8  # per-bar volatility ≈ 0.8 ATR (the engine's own fallback for its sigma)
+# Engine warnings about NEXUS's own simulated trade (its EV, its stop, its bar count): not about this position.
+ENGINE_TRADE_WARNINGS = {"EARLY_EXIT", "WATCH_EXIT", "NEAR_SL", "TIME_STOP"}
+# Engine warnings phrased for the side NEXUS holds ("en contra de tu largo"): dropped when it holds the other side.
+SIDE_WARNINGS = {"DIVERGENCE", "VOL_SPIKE", "COUNTER_TREND", "REGIME_CHANGE"}
 
 
 class PaperError(ValueError):
@@ -114,19 +134,26 @@ class Fill:
 
 
 def process_bar(st: LevelState, high: float, low: float, close: float, *, open_: float | None = None,
-                use_hl: bool = True) -> list[Fill]:
+                use_hl: bool = True, stop_hl: bool = True, check_stop: bool = True) -> list[Fill]:
     """Apply one price update to the position levels (mutates `st`). Stop first, then targets in order.
 
     `use_hl=False` uses only the close (bar that started before the entry, or a polled last price).
+    `stop_hl=False` checks the stop against the close only (filled there) while the targets still use the high/low:
+    the rest of a bar in which a fill moved the stop (break-even, trailing), whose earlier high/low may predate the
+    move. Like the engine, a moved stop takes effect from the next bar and targets keep filling in the same bar.
+    `check_stop=False` leaves the stop alone (targets only): a bar delivered late that ended before the stop moved,
+    so even its close predates the move.
     """
     if not use_hl:
         high = low = close
+        stop_hl = False
     s = st.side
     fills: list[Fill] = []
     stop = st.effective_stop()
-    if (s > 0 and low <= stop) or (s < 0 and high >= stop):
+    stop_low, stop_high = (low, high) if stop_hl else (close, close)
+    if check_stop and ((s > 0 and stop_low <= stop) or (s < 0 and stop_high >= stop)):
         px = stop
-        if not use_hl:
+        if not stop_hl:
             px = close
         elif open_ is not None and ((s > 0 and open_ < stop) or (s < 0 and open_ > stop)):
             px = open_  # gap through the stop: filled at the open
@@ -170,35 +197,75 @@ def process_bar(st: LevelState, high: float, low: float, close: float, *, open_:
     return fills
 
 
+def _market_warnings(current: dict, side: str) -> list[dict]:
+    """The engine warnings that apply to a position on `side` (see ENGINE_TRADE_WARNINGS / SIDE_WARNINGS)."""
+    nexus_pos = current.get("position")
+    other_side = isinstance(nexus_pos, dict) and nexus_pos.get("side") not in (None, side)
+    out: list[dict] = []
+    for w in current.get("warnings") or []:
+        if not isinstance(w, dict):
+            continue
+        code = str(w.get("code") or "")
+        if code in ENGINE_TRADE_WARNINGS or (other_side and code in SIDE_WARNINGS):
+            continue
+        out.append(w)
+    return out
+
+
 def assess_position(side: str, price: float, stop: float, next_tp: float | None, risk_unit: float,
-                    current: dict | None, exit_threshold: float = 0.0) -> dict:
-    """Live NEXUS advice for an open position: expected value of holding (R) and early-exit flag."""
+                    current: dict | None, exit_threshold: float = 0.0, *, sigma: float = 0.0,
+                    horizon: int = 5) -> dict:
+    """Live NEXUS advice for an open position: expected value of holding (R), P(next target before the stop) and
+    whether NEXUS recommends closing it.
+
+    The EV is the engine's (`levels.ev_hold`): p = P(next target before the stop) from NEXUS's calibrated
+    directional probability over `horizon` bars and the per-bar volatility `sigma` (price units) through the
+    first-passage model, so a trade near its target is not judged with the probability of a whole-horizon move.
+    `early_exit` ("Cerrar ya") only on NEXUS's own exit rules (contract I7): the action leaves this side
+    (EXIT_LONG / EXIT_SHORT, or a confirmed entry the other way; `exit_by` "signal"), or the engine's early-exit rule
+    holds for this position: EV of holding <= EARLY_EV (−0.10 R) with the score against it (`exit_by` "ev"). Any
+    other negative EV is an amber "Vigila la salida" warning with its value, never a close.
+    """
     if not current or risk_unit <= 0 or price is None:
-        return {"early_exit": False, "ev_r": None, "advice": None, "warnings": []}
+        return {"early_exit": False, "exit_by": None, "ev_r": None, "p_hit": None, "advice": None, "warnings": []}
     s = side_sign(side)
     p_up = safe_float(current.get("prob_up"), 0.5)
     p_dir = p_up if s > 0 else 1.0 - p_up
-    dist_tp = abs(next_tp - price) / risk_unit if next_tp is not None else 1.0
-    dist_sl = max(s * (price - stop), 0.0) / risk_unit
-    ev = p_dir * dist_tp - (1.0 - p_dir) * dist_sl
+    ev, p_hit = ev_hold(s, float(price), float(stop), next_tp, float(risk_unit), p_dir, float(sigma or 0.0),
+                        int(horizon or 5))
     score = safe_float(current.get("score"), 0.0)
     action = str(current.get("action") or "")
-    against_action = action in (("EXIT_LONG", "SELL") if s > 0 else ("EXIT_SHORT", "BUY"))
-    score_against = s * score < -max(exit_threshold, 0.1)
-    early = against_action or (ev < -0.05 and score_against)
-    warnings = [w for w in (current.get("warnings") or []) if isinstance(w, dict)]
+    exit_by = ("signal" if action in (("EXIT_LONG", "SELL") if s > 0 else ("EXIT_SHORT", "BUY"))
+               else "ev" if ev <= EARLY_EV and s * score < 0 else None)  # the engine's rules (nexus_decide)
+    warnings = _market_warnings(current, side)
     side_lbl = SIDE_LABEL.get(side, side)
-    if early:
-        why = current.get("action_label") or action or "señal contraria"
-        advice = f"Cerrar ya: NEXUS recomienda cerrar el {side_lbl} (EV {fmt_r(ev)}, {why})"
-        warnings = [{"code": "EARLY_EXIT", "severity": "critical", "message": advice}] + warnings
-    else:
-        critical = next((w for w in warnings if w.get("severity") == "critical"), None)
-        if critical:
-            advice = str(critical.get("message") or "")
+    if exit_by is not None:
+        if exit_by == "signal":
+            advice = f"Cerrar ya: NEXUS recomienda cerrar el {side_lbl} ({current.get('action_label') or action})"
         else:
-            advice = f"Mantener: EV {fmt_r(ev)} · probabilidad a favor {fmt_prob(p_dir)}"
-    return {"early_exit": bool(early), "ev_r": ev, "advice": advice, "warnings": warnings}
+            advice = (f"Cerrar ya: valor esperado de mantener negativo ({fmt_r(ev, 2)}) con el score NEXUS en contra "
+                      f"({fmt_num(score, 2, True)})")
+        warnings = [{"code": "EARLY_EXIT", "severity": "critical", "message": advice}] + warnings
+        return {"early_exit": True, "exit_by": exit_by, "ev_r": ev, "p_hit": p_hit, "advice": advice,
+                "warnings": warnings}
+    watch = None
+    if ev <= -0.005:  # shown with 2 decimals: never "negativo (0,00R)"
+        watch = f"Vigila la salida: el valor esperado de mantener es negativo ({fmt_r(ev, 2)})"
+        if ev <= EARLY_EV:  # the engine's wording: below the exit level, but the score does not turn yet
+            watch += ", aunque el score NEXUS aún no gira en contra"
+        elif s * score < -max(exit_threshold, 0.1):
+            watch += f" y el score NEXUS va en contra ({fmt_num(score, 2, True)})"
+        warnings = [{"code": "WATCH_EXIT", "severity": "warn", "message": watch}] + warnings
+    critical = next((w for w in warnings if w.get("severity") == "critical"), None)
+    if critical:
+        advice = str(critical.get("message") or "")
+    elif watch:
+        advice = watch
+    else:
+        target = "al próximo objetivo" if next_tp is not None else "a +1R"
+        advice = (f"Mantener: EV {fmt_r(ev, 2)} · probabilidad estimada {fmt_prob(p_hit)} de llegar {target} "
+                  "antes del stop")
+    return {"early_exit": False, "exit_by": None, "ev_r": ev, "p_hit": p_hit, "advice": advice, "warnings": warnings}
 
 
 def atr_from_candles(cs: Any, n: int = 14) -> float | None:
@@ -209,6 +276,33 @@ def atr_from_candles(cs: Any, n: int = 14) -> float | None:
     tr = np.maximum.reduce([high - low, np.abs(high - prev), np.abs(low - prev)])
     atr = float(np.mean(tr[-n:]))
     return atr if math.isfinite(atr) and atr > 0 else None
+
+
+def quote_is_live(q: Any, now: int | None = None) -> bool:
+    """True when a hub quote is a live price: not flagged `stale` and `ts` (the real time of the price, unix ms)
+    not older than QUOTE_STALE_S. A quote without a timestamp counts as live."""
+    if not isinstance(q, dict) or q.get("stale"):
+        return False
+    ts = safe_float(q.get("ts"))
+    return ts is None or (now if now is not None else now_ms()) - ts <= QUOTE_STALE_S * 1000.0
+
+
+def _bar_seconds(tf: str) -> int:
+    try:
+        return tf_seconds(tf)
+    except (KeyError, ValueError):
+        return 60
+
+
+def _age_text(seconds: float) -> str:
+    s = max(int(seconds), 0)
+    if s < 120:
+        return f"{s} s"
+    if s < 7200:
+        return f"{s // 60} min"
+    if s < 172800:
+        return f"{s // 3600} h"
+    return f"{s // 86400} días"
 
 
 # ----------------------------------------------------------------------------- engine
@@ -230,6 +324,9 @@ class PaperEngine:
         self._last_publish = 0.0
         self._sim_info: dict[str, Any] = {"auto_trade": False, "symbols": [], "tf": "1h"}
         self._log = RateLimitedLog()
+        self._auto_locks: dict[str, asyncio.Lock] = {}  # one auto-trading decision at a time per symbol
+        self._auto_bar: dict[tuple[str, str], int] = {}  # last closed bar handed to the auto-trader
+        self._stale_warned: set[str] = set()  # symbols whose "sin precio en vivo" warning was already emitted
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -318,8 +415,22 @@ class PaperEngine:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    def _fee_pct(self) -> float:
-        return float(self._setting("risk.fee_pct", 0.1) or 0.0)
+    def _fee_pct(self, symbol: str) -> float:
+        """Commission + spread in % per side for the symbol's asset class (risk.fee_pct_by_class, else risk.fee_pct)."""
+        return fee_pct_for(symbol, {"risk.fee_pct": self._setting("risk.fee_pct", 0.1),
+                                    "risk.fee_pct_by_class": self._setting("risk.fee_pct_by_class", None)})
+
+    @staticmethod
+    def _gate_source(symbol: str, origin: str) -> str:
+        """gate_log source: 'sim' for decisions on simulated markets (the simulator's synthetic or replay trades and
+        any SIM:* symbol), so the evaluator can keep them out of the global gate learner; 'paper' otherwise."""
+        return "sim" if origin == "sim" or symbol.upper().startswith("SIM:") else "paper"
+
+    def _auto_follows(self, pos: dict) -> bool:
+        """True while the auto-trader manages this position (it decides its exits at the bar close)."""
+        return (pos["origin"] == "auto" and pos["account_id"] == 1 and bool(self._setting("paper.auto_trade", False))
+                and pos["symbol"] in {str(s).upper() for s in (self._setting("paper.auto_symbols", []) or [])}
+                and (pos.get("tf") or "1h") == str(self._setting("paper.auto_tf", "1h")))
 
     def _slip_pct(self) -> float:
         return float(self._setting("risk.slippage_pct", 0.02) or 0.0)
@@ -367,8 +478,8 @@ class PaperEngine:
         if is_open:
             unreal = s * ((price or entry) - entry) * pos["qty_open"]
             gross = float(meta.get("realized_gross", 0.0)) + unreal
-            pnl = gross - float(meta.get("fees", 0.0))
-            r_mult = gross / (qty * risk_unit) if qty > 0 and risk_unit > 0 else None
+            pnl = gross - float(meta.get("fees", 0.0))  # fees paid so far (no exit fee on the open part, as the engine)
+            r_mult = pnl / (qty * risk_unit) if qty > 0 and risk_unit > 0 else None
         else:
             pnl = float(pos.get("pnl") or 0.0)
             r_mult = safe_float(pos.get("r_multiple"))
@@ -577,9 +688,14 @@ class PaperEngine:
             qty = M.position_size(eq, risk, fill, stop, max_leverage=MAX_LEVERAGE)
         if qty is None or qty <= 0 or not math.isfinite(qty):
             raise PaperError("Tamaño de posición nulo: revisa el riesgo, el stop y el saldo")
-        fee = qty * fill * self._fee_pct() / 100.0
+        fee = qty * fill * self._fee_pct(symbol) / 100.0
         atr = await self._atr_estimate(symbol, tf_n, risk_unit, origin)
         entry_time = int(time_s) if time_s is not None else now_s()
+        # The gate decision is judged over the trade's time stop counted from its own bar (a replay decision is
+        # historical, a synthetic one may lie ahead of the clock): never from the wall clock. Same target_at
+        # convention as the watcher and the scanner (service_watch.gate_target_ms).
+        decision_time = int(safe_float(gate.get("time")) or entry_time) if gate else entry_time
+        target_at = gate_target_ms(decision_time, tf_n, int(self._setting("nexus.time_stop_bars", 48) or 48))
         meta = {
             "initial_sl": stop,
             "risk_unit": risk_unit,
@@ -622,10 +738,9 @@ class PaperEngine:
                         "tp1, tp2, checks, taken, source, created_at, target_at) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
                         (
-                            symbol, tf_n, int(safe_float(gate.get("time")) or entry_time), side, verdict or "WAIT",
-                            gate_score or 0.0, safe_float(gate.get("win_prob")), fill, stop, targets[0], targets[1],
-                            json_dumps(gate_checks_vector(gate)), "sim" if origin == "sim" else "paper", now_ms(),
-                            now_ms() + int(self._setting("nexus.time_stop_bars", 48) or 48) * tf_seconds(tf_n) * 1000,
+                            symbol, tf_n, decision_time, side, verdict or "WAIT", gate_score or 0.0,
+                            safe_float(gate.get("win_prob")), fill, stop, targets[0], targets[1],
+                            json_dumps(gate_checks_vector(gate)), self._gate_source(symbol, origin), now_ms(), target_at,
                         ),
                     )
             pos = {
@@ -638,6 +753,7 @@ class PaperEngine:
             self._open[pid] = pos
         if origin != "sim":
             self._prices.setdefault(symbol, (ref, time.monotonic()))
+            self._stale_warned.discard(symbol)  # a new position gets its own "sin precio en vivo" notice
         forced =" · FORZADA contra el filtro" if meta["forced"] else ""
         tps_txt = " · ".join(f"TP{i + 1} {fmt_price(t)}" for i, t in enumerate(targets) if t is not None)
         self._emit(
@@ -718,7 +834,7 @@ class PaperEngine:
             return False
         meta = pos["meta"]
         s = side_sign(pos["side"])
-        fee_pct, slip = self._fee_pct(), self._slip_pct()
+        fee_pct, slip = self._fee_pct(pos["symbol"]), self._slip_pct()
         closed = False
         rows: list[tuple] = []
         delta_balance = 0.0
@@ -760,8 +876,8 @@ class PaperEngine:
         if closed:
             notional = pos["qty"] * pos["entry_price"]
             pos["pnl_pct"] = net / notional * 100.0 if notional > 0 else 0.0
-            pos["r_multiple"] = (float(meta["realized_gross"]) / (pos["qty"] * risk_unit)
-                                 if risk_unit > 0 and pos["qty"] > 0 else None)
+            # net of entry + exit fees, like the engine's and the backtest's R (same sign as the P&L)
+            pos["r_multiple"] = net / (pos["qty"] * risk_unit) if risk_unit > 0 and pos["qty"] > 0 else None
         async with self.rt.db.transaction() as tx:
             if rows:
                 await tx.executemany(
@@ -895,16 +1011,42 @@ class PaperEngine:
         )
 
     async def _process_price(self, pos: dict, high: float, low: float, close: float, *, open_: float | None,
-                             use_hl: bool, time_s: int) -> bool:
-        """Run level management for one position (caller holds self._lock). Returns True if it closed."""
+                             use_hl: bool, time_s: int, bar_time: int | None = None, bar_s: int = 60) -> bool:
+        """Run level management for one position (caller holds self._lock). Returns True if it closed.
+
+        `bar_time` / `bar_s` = open time and length of the bar this update belongs to (bar_time None for a polled
+        price). A stop moved by a fill (break-even, trailing) takes effect from the next bar: the hub re-sends the
+        forming 1m bar with its running high/low, so later updates of the bar in which the stop moved (for a move
+        made by a polled price, the bar containing that moment) check the stop against the close only, since their
+        extremes may predate the move. On a real market (bar times follow the clock and never rewind) a bar that
+        ended before that moment, delivered late when the feed comes back after a stall, does not check the stop at
+        all: even its close predates the move. A simulated series may restart earlier (new session), so there only
+        the bar of the move is restricted.
+        """
         meta = pos["meta"]
         meta["last_price"] = close
         st = self._level_state(pos)
         before = (st.sl, st.trail, st.tp_hits)
-        fills = process_bar(st, high, low, close, open_=open_, use_hl=use_hl)
+        stop_before = st.effective_stop()
+        moved_at = safe_float(meta.get("stop_moved_bar"))
+        real = pos["origin"] != "sim" and not pos["symbol"].startswith("SIM:")
+        stop_hl = check_stop = True
+        if bar_time is not None and moved_at is not None:
+            if real:
+                stop_hl = bar_time > moved_at
+                check_stop = bar_time + bar_s > moved_at
+            else:
+                stop_hl = not (moved_at - bar_s < bar_time <= moved_at)
+        fills = process_bar(st, high, low, close, open_=open_ if stop_hl else None, use_hl=use_hl, stop_hl=stop_hl,
+                            check_stop=check_stop)
         # water marks only matter for the trailing stop: keep them in memory, persisted with the next write
         meta["high_water"] = st.high_water
         meta["low_water"] = st.low_water
+        if st.qty_open > 0 and st.effective_stop() != stop_before:
+            moved = int(bar_time if bar_time is not None else time_s)
+            if real and moved_at is not None:
+                moved = max(moved, int(moved_at))  # a late bar never moves the moment back
+            meta["stop_moved_bar"] = moved
         if not fills and before == (st.sl, st.trail, st.tp_hits):
             return False
         return await self._apply_fills(pos, fills, time_s, st)
@@ -916,13 +1058,27 @@ class PaperEngine:
             close = safe_float((candle or {}).get("close"))
             if close is None or close <= 0:
                 return
-            self._prices[sym] = (close, time.monotonic())
-            is_sim_symbol = sym.startswith("SIM:")
-            if is_sim_symbol or tf == "1m":
-                positions = [p for p in self._open.values() if p["symbol"] == sym and p["origin"] != "sim"]
+            candle_time = int(safe_float(candle.get("time")) or 0)
+            bar_s = _bar_seconds(tf)
+            is_sim_symbol = sym.startswith("SIM:")  # synthetic bar times: not comparable with the clock
+            # a real bar that ended minutes ago (closed market: the last session's bar sent right after subscribing)
+            # is not a live price: it neither refreshes the cached price nor moves the levels
+            live = is_sim_symbol or not candle_time or candle_time + bar_s >= now_s() - QUOTE_STALE_S
+            # A final bar delivered late (after a feed stall the hub replays the missed bars, oldest first, as
+            # closed=True with the exchange's final OHLC) is not a live price, but its high/low still decide the
+            # stops and targets crossed meanwhile, filled at the end of that bar. Only bars that end after a
+            # position was opened count for it (never the last session's bar of a closed market).
+            catch_up = closed and not live and candle_time > 0
+            if live:
+                self._prices[sym] = (close, time.monotonic())
+                self._stale_warned.discard(sym)
+            if (live or catch_up) and (is_sim_symbol or tf == "1m"):
+                positions = [p for p in self._open.values() if p["symbol"] == sym and p["origin"] != "sim"
+                             and (live or candle_time + bar_s > int(p["entry_time"]))]
                 if positions:
                     changed_accounts: set[int] = set()
-                    bar_time = int(safe_float(candle.get("time")) or now_s())
+                    bar_time = candle_time or now_s()
+                    fill_time = now_s() if live else candle_time + bar_s
                     high = safe_float(candle.get("high")) or close
                     low = safe_float(candle.get("low")) or close
                     async with self._lock:
@@ -932,15 +1088,17 @@ class PaperEngine:
                             use_hl = bar_time >= int(pos["entry_time"])
                             n_before = (pos["qty_open"], pos["tp_hits"])
                             await self._process_price(pos, high, low, close, open_=safe_float(candle.get("open")),
-                                                      use_hl=use_hl, time_s=now_s())
+                                                      use_hl=use_hl, time_s=fill_time, bar_time=bar_time, bar_s=bar_s)
                             if (pos["qty_open"], pos["tp_hits"]) != n_before:
                                 changed_accounts.add(pos["account_id"])
                     for aid in changed_accounts:
                         await self.publish(aid)
-            if closed and self._setting("paper.auto_trade", False):
+            if closed and candle_time and self._setting("paper.auto_trade", False):
                 auto_symbols = {str(s).upper() for s in (self._setting("paper.auto_symbols", []) or [])}
                 if sym in auto_symbols and tf == str(self._setting("paper.auto_tf", "1h")):
-                    self._spawn(self._auto_check(sym, tf))
+                    if self._auto_bar.get((sym, tf)) != candle_time:  # each closed bar once (the hub may resend it)
+                        self._auto_bar[(sym, tf)] = candle_time
+                        self._spawn(self._auto_check(sym, tf, candle_time))
         except Exception as exc:
             if self._log.should_log("listener", 120):
                 self._emit("warn", "paper", f"Error gestionando posiciones con el feed: {type(exc).__name__}: {exc}")
@@ -956,7 +1114,8 @@ class PaperEngine:
                 use_hl = bar_time >= int(pos["entry_time"])
                 if await self._process_price(pos, float(bar["high"]), float(bar["low"]), float(bar["close"]),
                                              open_=float(bar["open"]), use_hl=use_hl,
-                                             time_s=bar_time + tf_seconds(tf)):
+                                             time_s=bar_time + tf_seconds(tf), bar_time=bar_time,
+                                             bar_s=tf_seconds(tf)):
                     closed.append(self.position_dict(pos))
         return closed
 
@@ -969,19 +1128,26 @@ class PaperEngine:
         if pos is None or not isinstance(current, dict):
             return None
         st = self._level_state(pos)
+        meta = pos["meta"]
         px = price if price is not None else (self._position_price(pos) or safe_float(current.get("price")))
         info = assess_position(
-            pos["side"], px, st.effective_stop(), st.next_target(), float(pos["meta"].get("risk_unit") or 0.0),
+            pos["side"], px, st.effective_stop(), st.next_target(), float(meta.get("risk_unit") or 0.0),
             current, float(self._setting("nexus.exit_threshold", 0.0) or 0.0),
+            sigma=SIGMA_ATR * float(meta.get("atr") or 0.0), horizon=int(self._setting("nexus.horizon", 5) or 5),
         )
-        pos["meta"]["advice"] = info["advice"]
-        pos["meta"]["warnings"] = info["warnings"]
+        meta["advice"] = info["advice"]
+        meta["warnings"] = info["warnings"]
         return info
 
     # ------------------------------------------------------------------ NEXUS advice / early exit
 
     async def refresh_advice(self, *, force: bool = False) -> int:
-        """Attach live NEXUS advice to open positions (≤ 1/min per symbol); early-exit handling. Returns #closed."""
+        """Attach live NEXUS advice to open positions (≤ 1/min per symbol). Returns how many NEXUS recommends closing.
+
+        Live advice never closes anything (it follows the forming bar, so a "cerrar" there is provisional): manual
+        positions, and auto ones the auto-trader no longer follows, get a warning event; the auto-trader closes its
+        own positions on NEXUS's decision for the bar that just closed (`_auto_check`).
+        """
         nexus = self.rt.nexus
         if nexus is None or not hasattr(nexus, "current"):
             return 0
@@ -990,7 +1156,7 @@ class PaperEngine:
             if pos["origin"] == "sim":
                 continue
             by_key.setdefault((pos["symbol"], pos.get("tf") or "1h"), []).append(pos)
-        closed_n = 0
+        exits = 0
         mono = time.monotonic()
         for (symbol, tf), positions in by_key.items():
             if not force and mono - self._advice_at.get(f"{symbol}|{tf}", -1e18) < ADVICE_EVERY_S:
@@ -1002,10 +1168,12 @@ class PaperEngine:
                 if self._log.should_log(f"advice:{symbol}", 600):
                     self._emit("debug", "paper", f"Sin consejo NEXUS para {symbol}: {type(exc).__name__}")
                 continue
-            if not isinstance(current, dict):
-                continue
             for pos in positions:
                 if pos["id"] not in self._open:
+                    continue
+                if not isinstance(current, dict):  # no current analysis (e.g. outdated data): drop the old advice
+                    pos["meta"]["advice"] = "Sin consejo NEXUS: no hay un análisis actual de este mercado"
+                    pos["meta"]["warnings"] = []
                     continue
                 price = self._position_price(pos) or safe_float(current.get("price"))
                 info = self.advise(pos["id"], current, price)
@@ -1014,57 +1182,97 @@ class PaperEngine:
                 if not info["early_exit"]:
                     self._warned.pop(pos["id"], None)
                     continue
-                auto = pos["origin"] != "manual"  # the user's own trades are never closed for them: warn instead
-                if auto and price is not None:
-                    async with self._lock:
-                        if pos["id"] in self._open:
-                            await self._close(pos, price, "EARLY", "Cierre anticipado", now_s())
-                            closed_n += 1
+                exits += 1
+                if self._auto_follows(pos):
+                    pos["meta"]["advice"] = f"{info['advice']}; el auto-trading decide al cierre de la vela"
                     continue
                 last = self._warned.get(pos["id"])
                 if last is None or mono - last >= WARN_REPEAT_S:
                     self._warned[pos["id"]] = mono
+                    why = (current.get("action_label") or current.get("action") if info.get("exit_by") == "signal"
+                           else f"valor esperado de mantener {fmt_r(info['ev_r'], 2)} con el score en contra")
                     self._emit(
                         "warn",
                         "paper",
-                        f"⚠ {pos['symbol']}: NEXUS recomienda CERRAR el {SIDE_LABEL[pos['side']]} "
-                        f"(EV {fmt_r(info['ev_r'])}) para no perder más",
-                        {"position_id": pos["id"], "ev_r": info["ev_r"]},
+                        f"⚠ {pos['symbol']}: NEXUS recomienda CERRAR el {SIDE_LABEL[pos['side']]} ({why})",
+                        {"position_id": pos["id"], "action": current.get("action"), "ev_r": info["ev_r"]},
                     )
-        if closed_n:
-            await self.publish(1)
-        return closed_n
+        return exits
 
     # ------------------------------------------------------------------ auto-trading (account 1)
 
-    async def _auto_check(self, symbol: str, tf: str) -> None:
+    async def _auto_check(self, symbol: str, tf: str, upto: int | None = None) -> None:
+        """Auto-trading on a closed bar of `paper.auto_tf`. NEXUS decides on the bar that just closed (`upto` = its
+        open time), never on the seconds-old forming bar, where a decision taken at the close already looks filled:
+        the auto-trader closes its position there on NEXUS's exit rules (see assess_position), then a BUY / SELL with
+        gate TOMAR opens a new one (one position per symbol). When several bars close at once (the feed catching up
+        after a stall) every bar's exit is followed, but only the newest one may open a trade: an older entry signal
+        is stale."""
         try:
             if not self._setting("paper.auto_trade", False) or self.rt.nexus is None:
                 return
-            if any(p["account_id"] == 1 and p["symbol"] == symbol for p in self._open.values()):
-                return
-            current = await asyncio.wait_for(self.rt.nexus.current(symbol, tf), timeout=90)
-            if not isinstance(current, dict):
-                return
-            action = current.get("action")
-            if action == "BUY":
-                side = "long"
-            elif action == "SELL" and self._setting("nexus.allow_short", True):
-                side = "short"
-            else:
-                return
-            gate = ((current.get("gate") or {}).get(side)) or None
-            if not isinstance(gate, dict) or gate.get("verdict") != "TAKE":
-                self._emit("info", "paper",
-                           f"Auto: {symbol} {SIDE_LABEL[side]} descartado por el filtro ({gate_line(gate)})"
-                           + (f": {gate.get('summary')}" if isinstance(gate, dict) and gate.get("summary") else ""))
-                return
-            await self.open_position(1, symbol, side, tf, origin="auto", gate=gate, check_gate=False)
+            async with self._auto_locks.setdefault(symbol, asyncio.Lock()):
+                mine = [p for p in self._open.values() if p["account_id"] == 1 and p["symbol"] == symbol]
+                followed = [p for p in mine if self._auto_follows(p)]
+                if mine and not followed:
+                    return  # the user's own position: no pyramiding and nothing for the auto-trader to manage
+                if not followed and not self._newest_bar(symbol, tf, upto):
+                    return  # flat, and a newer bar has closed meanwhile: entries are decided on that one
+                current = await asyncio.wait_for(self.rt.nexus.current(symbol, tf, upto=upto), timeout=90)
+                if not isinstance(current, dict):
+                    return
+                for pos in followed:
+                    await self._auto_exit(pos, current)
+                if not self._newest_bar(symbol, tf, upto):
+                    return  # a newer bar has closed meanwhile: entries are decided on that one
+                if any(p["account_id"] == 1 and p["symbol"] == symbol for p in self._open.values()):
+                    return
+                action = current.get("action")
+                if action == "BUY":
+                    side = "long"
+                elif action == "SELL" and self._setting("nexus.allow_short", True):
+                    side = "short"
+                else:
+                    return
+                gate = ((current.get("gate") or {}).get(side)) or None
+                if not isinstance(gate, dict) or gate.get("verdict") != "TAKE":
+                    self._emit("info", "paper",
+                               f"Auto: {symbol} {SIDE_LABEL[side]} descartado por el filtro ({gate_line(gate)})"
+                               + (f": {gate.get('summary')}" if isinstance(gate, dict) and gate.get("summary") else ""))
+                    return
+                await self.open_position(1, symbol, side, tf, origin="auto", gate=gate, check_gate=False)
         except (PaperError, PaperRejected) as exc:
             self._emit("warn", "paper", f"Auto-trading {symbol}: {exc}")
         except Exception as exc:
             if self._log.should_log(f"auto:{symbol}", 300):
                 self._emit("error", "paper", f"Auto-trading {symbol}: {type(exc).__name__}: {exc}")
+
+    def _newest_bar(self, symbol: str, tf: str, upto: int | None) -> bool:
+        """False when a newer closed bar of (symbol, tf) has been handed to the auto-trader since bar `upto`."""
+        return upto is None or self._auto_bar.get((symbol, tf), upto) == upto
+
+    async def _auto_exit(self, pos: dict, current: dict) -> bool:
+        """Close an auto-trader position when NEXUS's closed-bar decision leaves its side or its early-exit rule holds
+        for the position (assess_position `early_exit`). True when it closed."""
+        price = self.cached_price(pos["symbol"], PRICE_STALE_S) or await self.last_price(pos["symbol"])
+        info = self.advise(pos["id"], current, price)
+        if not info or not info["early_exit"]:
+            return False
+        if price is None:
+            if self._log.should_log(f"auto-exit:{pos['symbol']}", 300):
+                self._emit("warn", "paper", f"Auto-trading {pos['symbol']}: NEXUS recomienda cerrar, pero no hay "
+                                            "precio para cerrar la posición")
+            return False
+        reverse = str(current.get("action") or "") in ("BUY", "SELL")
+        async with self._lock:
+            if pos["id"] not in self._open:
+                return False
+            await self._close(pos, price, "REVERSE" if reverse else "EARLY",
+                              EXIT_LABEL["REVERSE"] if reverse else "Cierre anticipado", now_s())
+        await self.publish(1)
+        if config.BACKGROUND:
+            await self._sync_subscriptions()
+        return True
 
     async def set_auto(self, enabled: bool, symbols: list[str] | None = None, tf: str | None = None) -> dict:
         values: dict[str, Any] = {"paper.auto_trade": bool(enabled)}
@@ -1144,28 +1352,46 @@ class PaperEngine:
                     self._emit("error", "paper", f"Monitor de posiciones: {type(exc).__name__}: {exc}")
 
     async def _poll_stale_prices(self) -> None:
-        """Fallback when no live candles arrive: poll the last price and manage levels with it."""
+        """Fallback when no live candles arrive: poll the hub quotes and manage the levels with live prices only.
+
+        A stale quote (flagged by the hub or older than QUOTE_STALE_S: venue closed, feed down, only the local cache
+        left) never moves a stop or fills a target; the user is told once and the levels wait for a live price.
+        """
         symbols = sorted({p["symbol"] for p in self._open.values()
                           if p["origin"] != "sim" and self.cached_price(p["symbol"], PRICE_STALE_S) is None})
         hub = self.rt.hub
-        if not symbols or hub is None:
+        if not symbols or hub is None or not hasattr(hub, "quotes"):
             return
+        try:
+            got = await asyncio.wait_for(hub.quotes(symbols), timeout=20)
+        except Exception:
+            return
+        if not isinstance(got, dict):
+            return
+        changed = False
+        now = now_ms()
         for sym in symbols:
-            try:
-                price = safe_float(await asyncio.wait_for(hub.last_price(sym), timeout=15))
-            except Exception:
-                price = None
+            q = got.get(sym)
+            price = safe_float(q.get("price")) if isinstance(q, dict) else None
             if price is None or price <= 0:
                 continue
+            if not quote_is_live(q, now):
+                if sym not in self._stale_warned:
+                    self._stale_warned.add(sym)
+                    ts = safe_float(q.get("ts"))
+                    age = f"el último es de hace {_age_text((now - ts) / 1000.0)}" if ts else "solo hay uno antiguo"
+                    self._emit("warn", "paper", f"{sym}: sin precio en vivo ({age}); el stop y los objetivos se "
+                                                "vigilarán cuando vuelva a cotizar", {"symbol": sym})
+                continue
+            self._stale_warned.discard(sym)
             self._prices[sym] = (price, time.monotonic())
-            changed = False
             async with self._lock:
                 for pos in [p for p in self._open.values() if p["symbol"] == sym and p["origin"] != "sim"]:
                     before = (pos["qty_open"], pos["tp_hits"])
                     await self._process_price(pos, price, price, price, open_=None, use_hl=False, time_s=now_s())
                     changed = changed or (pos["qty_open"], pos["tp_hits"]) != before
-            if changed:
-                await self.publish(1)
+        if changed:
+            await self.publish(1)
 
 
 def _pos_from_row(row: dict) -> dict:

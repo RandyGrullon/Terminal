@@ -22,6 +22,10 @@ class Runtime:
         self.scripts: Any = None  # app.scripting.service.ScriptService
         self.maintenance: Any = None  # app.maintenance.Maintenance
         self.auth: Any = None  # app.auth.SupabaseVerifier (cloud mode only)
+        # "single": the only instance (SQLite or no background work) · "leader": holds the PostgreSQL leader lock and
+        # runs the services · "standby": another instance holds it; only /api/health answers (see app.main.Leadership)
+        self.role: str = "single"
+        self.leader: Any = None  # app.main.Leadership (PostgreSQL + background work only)
         self.started_at: float = time.time()
         self.load_errors: list[str] = []
         self.services: list[tuple[str, Any]] = []

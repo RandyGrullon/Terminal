@@ -2,9 +2,11 @@
 
 ``run_script(code, candles, inputs=None, *, symbol="", tf="", timeout=10.0) -> dict`` (ScriptRunResult) validates
 the script with ``compile_script`` (invalid code is never executed) and runs it in a fresh, isolated Python
-process (``worker.py``) with a minimal environment, a scratch working directory under ``backend/.tmp/sandbox``
-and a hard timeout (the process is killed). Blocking: call it through ``asyncio.to_thread``. It never raises for
-user errors: they are reported in ``result["errors"]``.
+process (``worker.py``) with a minimal environment, a memory cap (``config.SCRIPT_MEMORY_MB``), a scratch working
+directory under ``backend/.tmp/sandbox`` and a hard timeout (the process is killed). The worker's output is read
+with hard limits (``MAX_STDOUT_BYTES`` of stdout, the last ``STDERR_TAIL_BYTES`` of stderr), so a script cannot
+make this process buffer an unbounded amount of data. Blocking: call it through ``asyncio.to_thread``. It never
+raises for user errors: they are reported in ``result["errors"]``.
 """
 from __future__ import annotations
 
@@ -18,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+from app import config
+
 from .runtime_base import RESULT_MARKER
 from .validator import DEFAULT_TITLE, compile_script, make_error
 
@@ -28,8 +32,16 @@ MAX_BARS = 20_000
 MAX_CONCURRENT = 4
 MIN_TIMEOUT_S = 0.5
 MAX_TIMEOUT_S = 60.0
+MAX_STDOUT_BYTES = 48 * 1024 * 1024  # the worker caps its own result at 40 MB (worker.MAX_RESULT_BYTES)
+STDERR_TAIL_BYTES = 64 * 1024
+_READ_CHUNK = 64 * 1024
+_MARKER = RESULT_MARKER.encode("ascii")
 
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+
+
+class OutputLimitExceeded(Exception):
+    """The worker wrote more than MAX_STDOUT_BYTES to stdout (it was killed)."""
 
 
 def _empty_result(meta: dict | None = None) -> dict[str, Any]:
@@ -94,16 +106,16 @@ def _worker_env() -> dict[str, str]:
     return env
 
 
-def _parse_output(stdout: bytes | None) -> dict | None:
-    text = (stdout or b"").decode("utf-8", errors="replace")
-    idx = text.rfind(RESULT_MARKER)
+def _parse_output(stdout: bytes | bytearray | None) -> dict | None:
+    data = stdout or b""
+    idx = data.rfind(_MARKER)
     if idx < 0:
         return None
     try:
-        data = json.loads(text[idx + len(RESULT_MARKER):].strip())
-    except ValueError:
+        parsed = json.loads(data[idx + len(_MARKER):])  # the worker writes ASCII JSON (+ "\n")
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return None
-    return data if isinstance(data, dict) else None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _last_line(stderr: bytes | None) -> str:
@@ -111,28 +123,113 @@ def _last_line(stderr: bytes | None) -> str:
     return lines[-1][:300] if lines else ""
 
 
+def _kill(proc: subprocess.Popen) -> None:
+    try:
+        proc.kill()
+    except OSError:  # already gone
+        pass
+
+
+def _feed(stream: Any, data: bytes) -> None:
+    """Writes the payload to the worker's stdin (in its own thread: a worker that stops reading cannot block
+    the caller past the timeout)."""
+    try:
+        stream.write(data)
+    except (OSError, ValueError):  # the worker died early (killed, crashed): its exit code tells why
+        pass
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _read_head(proc: subprocess.Popen, out: bytearray, limit: int, overflow: threading.Event) -> None:
+    """Keeps the first ``limit`` bytes of stdout; past that the worker is killed and the rest is discarded."""
+    stream = proc.stdout
+    try:
+        while chunk := stream.read1(_READ_CHUNK):
+            if overflow.is_set():
+                continue
+            if len(out) + len(chunk) > limit:
+                overflow.set()
+                _kill(proc)
+                continue
+            out += chunk
+    except (OSError, ValueError):
+        pass
+
+
+def _read_tail(stream: Any, out: bytearray, keep: int) -> None:
+    """Keeps only the last ``keep`` bytes of stderr (a script can flood it, e.g. np.seterr(all='print'))."""
+    try:
+        while chunk := stream.read1(_READ_CHUNK):
+            out += chunk
+            if len(out) > 2 * keep:
+                del out[:-keep]
+    except (OSError, ValueError):
+        pass
+    if len(out) > keep:
+        del out[:-keep]
+
+
 def _launch(payload: bytes, timeout: float, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """Runs the worker with ``payload`` on stdin -> CompletedProcess(stdout <= MAX_STDOUT_BYTES, stderr tail).
+    Raises subprocess.TimeoutExpired after ``timeout`` s and OutputLimitExceeded when stdout is too big (the worker
+    is killed in both cases)."""
     SANDBOX_DIR.mkdir(parents=True, exist_ok=True)
     env = _worker_env()
     if extra_env:
         env.update(extra_env)
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-    return subprocess.run(
+    proc = subprocess.Popen(
         [sys.executable, "-I", str(WORKER_PATH)],
-        input=payload,
-        capture_output=True,
-        timeout=timeout,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         cwd=str(SANDBOX_DIR),
         env=env,
         creationflags=flags,
     )
+    out, err = bytearray(), bytearray()
+    overflow = threading.Event()
+    threads = [
+        threading.Thread(target=_read_head, args=(proc, out, MAX_STDOUT_BYTES, overflow), daemon=True),
+        threading.Thread(target=_read_tail, args=(proc.stderr, err, STDERR_TAIL_BYTES), daemon=True),
+        threading.Thread(target=_feed, args=(proc.stdin, payload), daemon=True),
+    ]
+    started: list[threading.Thread] = []
+    try:
+        for thread in threads:
+            thread.start()
+            started.append(thread)
+        proc.wait(timeout=timeout)
+    finally:
+        if proc.poll() is None:  # timeout, or interrupted while starting / waiting
+            _kill(proc)
+        for thread in started:
+            thread.join(timeout=5.0)  # the pipes reach EOF once the worker is gone
+        for thread, stream in zip(threads, (proc.stdout, proc.stderr, proc.stdin)):
+            if not thread.is_alive():  # never close a stream under a thread that is still blocked on it
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            pass
+    if overflow.is_set():
+        raise OutputLimitExceeded(f"más de {MAX_STDOUT_BYTES // (1024 * 1024)} MB")
+    return subprocess.CompletedProcess(proc.args, proc.returncode, bytes(out), bytes(err))
 
 
 def execute_payload(payload: dict[str, Any], timeout: float, extra_env: dict[str, str] | None = None) -> dict[str, Any]:
     """Runs a raw worker payload and returns the worker's result (or a timeout / launch error result).
-    ``extra_env`` exists for the sandbox tests only (run_script never passes it)."""
+    ``extra_env`` exists for the sandbox tests only (run_script never passes it). The worker's memory cap is
+    ``config.SCRIPT_MEMORY_MB`` unless the payload sets ``memory_mb`` (its environment has no NEXUS_* variables)."""
     try:
-        data = json.dumps(payload, allow_nan=False).encode("utf-8")
+        data = json.dumps({"memory_mb": config.SCRIPT_MEMORY_MB, **payload}, allow_nan=False).encode("utf-8")
     except (TypeError, ValueError) as exc:
         result = _empty_result()
         result["errors"] = [make_error("runtime", f"Datos de entrada no serializables: {exc}")]
@@ -150,6 +247,16 @@ def execute_payload(payload: dict[str, Any], timeout: float, extra_env: dict[str
                 "timeout",
                 f"El script superó el tiempo máximo de {timeout:g} s y se detuvo. "
                 "Revisa bucles infinitos o cálculos demasiado costosos.",
+            )
+        ]
+        return result
+    except OutputLimitExceeded as exc:
+        result = _empty_result()
+        result["errors"] = [
+            make_error(
+                "runtime",
+                f"El script generó una salida demasiado grande ({exc}) y se detuvo. "
+                "Reduce el número de velas, de plot() o de marcadores.",
             )
         ]
         return result

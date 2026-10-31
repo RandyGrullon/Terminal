@@ -148,15 +148,16 @@ def test_scan_run_persists_results_predictions_and_events(runtime_factory, monke
             assert all(r["symbol"] != "UNISWAP:PEPEWETH_A43FE1.USD" for r in results)
             keys = {"rank", "symbol", "description", "type", "price", "change_pct", "volume", "score", "prob_up",
                     "action", "confidence", "rating", "deep", "verdict", "gate_score", "direction", "regime", "sl",
-                    "tp1", "tp2", "expected_move_pct", "reasons"}
+                    "tp1", "tp2", "expected_move_pct", "reasons", "nexus_action", "opportunity"}
             assert set(results[0]) == keys
+            assert results[0]["opportunity"] is False and results[0]["nexus_action"] is None
             scores = [abs(r["score"]) * r["confidence"] for r in results]
             assert scores == sorted(scores, reverse=True)
             preds = await rt.db.fetchall("SELECT * FROM predictions WHERE source='scanner'")
             assert len(preds) == 4
             p = preds[0]
             assert p["model_key"] == "crypto|1h|14400" and p["target_at"] - p["created_at"] == 14400 * 1000
-            assert set(json.loads(p["features"])["x"]) <= set(sc.FEATURE_NAMES)
+            assert json.loads(p["features"])["v"] == 2 and set(sc.decode_features(p["features"])) <= set(sc.FEATURE_NAMES)
             assert {r["direction"] for r in preds} >= {1, -1}
             call = rt.hub.scan_calls[0]
             assert call["sort_by"] == "24h_vol|5" and call["filters"] and "RSI|60" in call["columns"]
@@ -202,9 +203,13 @@ def test_deep_mode_ranks_take_first_and_logs_gate(runtime_factory, monkeypatch):
     monkeypatch.setattr(nexus_config, "BACKGROUND", False)
     monkeypatch.setattr(nexus_config, "OFFLINE", False)
 
+    from app.util import now_s
+
+    bar = now_s() // 3600 * 3600  # the forming 1h bar: a live (not outdated) series
+
     def nexus_resp(long_verdict: str, short_verdict: str, score: float) -> dict:
         cur = make_current("BUY" if score > 0 else "SELL", long_verdict=long_verdict, short_verdict=short_verdict,
-                           score=score)
+                           score=score, time=bar)
         return {"ok": True, "current": cur, "prediction": {"expected_return_pct": 1.8}}
 
     async def scenario():
@@ -222,6 +227,7 @@ def test_deep_mode_ranks_take_first_and_logs_gate(runtime_factory, monkeypatch):
             first = results[0]
             assert first["symbol"] == "BINANCE:ETHUSDT" and first["deep"] and first["verdict"] == "TAKE"
             assert first["direction"] == "short" and first["expected_move_pct"] == 1.8
+            assert first["nexus_action"] == "SELL" and first["opportunity"] is True
             assert first["reasons"][0].startswith("Filtro TOMAR 78/100")
             btc = next(r for r in results if r["symbol"] == "BINANCE:BTCUSDT")
             assert btc["verdict"] == "AVOID" and btc["sl"] is not None
@@ -233,7 +239,7 @@ def test_deep_mode_ranks_take_first_and_logs_gate(runtime_factory, monkeypatch):
             assert json.loads(logs[0]["checks"]) == {"trend_alignment": 0, "risk_reward": 1, "volume": None} or \
                 json.loads(logs[0]["checks"])["risk_reward"] == 1
             msgs = [e["message"] for e in rt.bus.recent(level="scan")]
-            assert any("1 oportunidades TOMAR" in m and "BINANCE:ETHUSDT" in m for m in msgs)
+            assert any("1 oportunidad TOMAR" in m and "BINANCE:ETHUSDT" in m for m in msgs)
             assert any(m.startswith("Rechazadas por el filtro") for m in msgs)
             await svc.stop()
 

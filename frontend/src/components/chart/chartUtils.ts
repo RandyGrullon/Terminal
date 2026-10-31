@@ -2,7 +2,7 @@
 // tiny event emitter used to push high-frequency updates (crosshair, live ticks) to small components
 // without re-rendering the whole chart tree.
 import type { Candle, ChartMarker, NexusBars } from '../../api/types'
-import { ts } from '../../lib/chart'
+import { isSessionTf, ts, type ChartTf } from '../../lib/chart'
 import { fmtCompact } from '../../lib/format'
 
 export type ParamValue = number | boolean | string
@@ -68,21 +68,24 @@ export function withAlpha(color: string, alpha: number): string {
 
 // ----------------------------------------------------------------------------- time ordering
 
+// One cache per time mode: the same array maps to different chart times for intraday and 1d / 1w data.
 const ascCache = new WeakMap<readonly number[], number[] | null>()
+const ascCacheSession = new WeakMap<readonly number[], number[] | null>()
 
 /**
- * Indices whose chart time (`ts()`, shifted to the local clock) strictly increases.
+ * Indices whose chart time (`ts(t, tf)`: shifted to the local clock unless 1d / 1w) strictly increases.
  * lightweight-charts throws on duplicated / unordered times, which can happen when the local offset changes
  * (DST) or when a provider sends a bad row. Returns `null` when every index is fine (fast path, no allocation).
  */
-export function ascendingIndices(time: readonly number[]): number[] | null {
-  const cached = ascCache.get(time)
+export function ascendingIndices(time: readonly number[], tf?: ChartTf): number[] | null {
+  const cache = isSessionTf(tf) ? ascCacheSession : ascCache
+  const cached = cache.get(time)
   if (cached !== undefined) return cached
   let prev = -Infinity
   let keep: number[] | null = null
   for (let i = 0; i < time.length; i++) {
     const t = time[i]
-    const ct = typeof t === 'number' && Number.isFinite(t) ? (ts(t) as number) : Number.NaN
+    const ct = typeof t === 'number' && Number.isFinite(t) ? (ts(t, tf) as number) : Number.NaN
     if (ct > prev) {
       prev = ct
       if (keep) keep.push(i)
@@ -91,7 +94,7 @@ export function ascendingIndices(time: readonly number[]): number[] | null {
       for (let j = 0; j < i; j++) keep.push(j)
     }
   }
-  ascCache.set(time, keep)
+  cache.set(time, keep)
   return keep
 }
 
@@ -106,10 +109,10 @@ function isCandle(c: unknown): c is Candle {
 }
 
 /** Valid candles in strictly increasing chart-time order (copy). */
-export function cleanCandles(candles: readonly Candle[] | null | undefined): Candle[] {
+export function cleanCandles(candles: readonly Candle[] | null | undefined, tf?: ChartTf): Candle[] {
   if (!Array.isArray(candles) || candles.length === 0) return []
   const valid = candles.filter(isCandle).map((c) => (Number.isFinite(c.volume) ? c : { ...c, volume: 0 }))
-  return pick(valid, ascendingIndices(valid.map((c) => c.time))).slice()
+  return pick(valid, ascendingIndices(valid.map((c) => c.time), tf)).slice()
 }
 
 const BAR_KEYS = [
@@ -126,10 +129,10 @@ const BAR_KEYS = [
 ] as const
 
 /** NexusBars with every numeric array present (null-filled when missing) and strictly ordered times. */
-export function cleanBars(bars: NexusBars | null | undefined): NexusBars | null {
+export function cleanBars(bars: NexusBars | null | undefined, tf?: ChartTf): NexusBars | null {
   if (!bars || !Array.isArray(bars.time) || bars.time.length === 0) return null
   const n = bars.time.length
-  const idx = ascendingIndices(bars.time)
+  const idx = ascendingIndices(bars.time, tf)
   const complete =
     BAR_KEYS.every((k) => Array.isArray(bars[k]) && bars[k].length === n) &&
     Array.isArray(bars.action) &&
@@ -162,6 +165,17 @@ export function cleanBars(bars: NexusBars | null | undefined): NexusBars | null 
     pos_tp2: num(bars.pos_tp2),
     pos_tp3: num(bars.pos_tp3),
   }
+}
+
+/** NEXUS bars from `t0` (the first candle on screen) on: the NEXUS window is anchored to its learning snapshots, so
+ * it can start up to ~150 bars before the candles the chart loaded. Clean (ascending) bars expected. */
+export function clipBarsFrom(bars: NexusBars | null, t0: number | null | undefined): NexusBars | null {
+  if (!bars || !isFiniteNumber(t0)) return bars
+  const start = bars.time.findIndex((t) => t >= t0)
+  if (start <= 0) return bars // nothing before the candles (0), or no overlap at all (-1): leave it to the caller
+  const out = { ...bars } as Record<string, unknown>
+  for (const [key, value] of Object.entries(bars)) if (Array.isArray(value)) out[key] = value.slice(start)
+  return out as unknown as NexusBars
 }
 
 // ----------------------------------------------------------------------------- lookups

@@ -25,7 +25,7 @@ from app.sim.common import (
 from app.sim.evaluator import learning_summary, list_predictions, prediction_stats
 from app.sim.montecarlo import MonteCarloError, run_montecarlo
 from app.sim.paper import PaperError, PaperRejected
-from app.sim.scanner import ScanError
+from app.sim.scanner import ScanError, is_opportunity
 from app.sim.simulator import SimError
 from app.terminal import CommandContext, command, register_bool_flags
 from app.util import clamp, normalize_tf, now_ms
@@ -141,8 +141,8 @@ async def _results(ctx: CommandContext) -> None:
     if run is None:
         ctx.print("Todavía no hay escaneos. Prueba: scan crypto 1h --deep", "muted")
         return
-    if ctx.flag("take"):
-        rows = [r for r in rows if r.get("verdict") == "TAKE"]
+    if ctx.flag("take"):  # gate TOMAR with the NEXUS signal in that direction
+        rows = [r for r in rows if is_opportunity(r)]
     ctx.print(f"Escaneo #{run['id']} · {run['market']} {run['tf']} · {_ago(run['started_at'])} · "
               f"{run['n_symbols']} activos · {run.get('message') or ''}", "scan")
     if not rows:
@@ -152,6 +152,8 @@ async def _results(ctx: CommandContext) -> None:
     for r in rows[:n]:
         verdict = r.get("verdict")
         filt = f"{VERDICT_LABEL.get(verdict, verdict)} {r.get('gate_score') or 0:.0f}" if verdict else "—"
+        if verdict == "TAKE" and r.get("opportunity") is False:
+            filt = f"Favorable {r.get('gate_score') or 0:.0f} · sin señal NEXUS"
         table.append([
             r["rank"], r["symbol"], fmt_price(r.get("price")), fmt_pct(r.get("change_pct")),
             fmt_num(r.get("score"), 2, True), fmt_prob(r.get("prob_up")), ACTION_LABEL.get(r.get("action"), r.get("action")),
@@ -253,7 +255,7 @@ async def _backtest(ctx: CommandContext) -> None:
             run_backtest, cs, None,
             initial_capital=float(_setting(ctx, "risk.account_size", 10000.0)),
             risk_pct=float(_setting(ctx, "risk.per_trade_pct", 1.0)),
-            fee_pct=float(_setting(ctx, "risk.fee_pct", 0.1)),
+            fee_pct=None,  # the commission of the symbol's asset class (Ajustes: risk.fee_pct_by_class)
             slippage_pct=float(_setting(ctx, "risk.slippage_pct", 0.02)),
             use_gate=use_gate,
             include_candles=False,
@@ -270,9 +272,15 @@ async def _backtest(ctx: CommandContext) -> None:
         ctx.print(f"El filtro «¿Tomo esta operación?» {verb} {fmt_pct(abs(lift) if lift >= 0 else lift)} de retorno "
                   f"frente a tomar todas las señales.", "success" if lift >= 0 else "warn")
     if m.get("rejected_signals"):
-        wr = m.get("rejected_would_win_rate")
-        ctx.print(f"Señales rechazadas por el filtro: {m['rejected_signals']}"
-                  + (f" · de ellas habrían ganado {fmt_prob(wr)}" if wr is not None else ""), "info")
+        wr, judged = m.get("rejected_would_win_rate"), m.get("rejected_resolved")
+        detail = ""
+        if wr is not None:
+            detail = (f" · de las {judged} con resultado conocido habrían ganado {fmt_prob(wr)}" if judged
+                      else f" · de las que tienen resultado conocido habrían ganado {fmt_prob(wr)}")
+        ctx.print(f"Señales rechazadas por el filtro: {m['rejected_signals']}{detail}", "info")
+    fee_note = next((n for n in (result.get("params") or {}).get("notes") or [] if str(n).startswith("Comisión")), None)
+    if fee_note:
+        ctx.print(fee_note, "muted")
     ctx.print(DISCLAIMER, "muted")
     ctx.data = {"metrics": m, "ungated": u, "symbol": sym, "tf": tf}
     if ctx.rt.bus is not None:
@@ -566,7 +574,7 @@ async def _predictions(ctx: CommandContext) -> None:
         direction = {1: "↑", -1: "↓", 0: "="}.get(p["direction"], "=")
         if p["resolved"] and p["outcome_return_pct"] is not None:
             outcome = fmt_pct(p["outcome_return_pct"], 2)
-            ok = "✔" if p["correct"] else "✖"
+            ok = "—" if p["correct"] is None else "✔" if p["correct"] else "✖"  # — = move too small to judge
         elif p["resolved"]:
             outcome, ok = "sin precio", "—"
         else:
@@ -596,9 +604,20 @@ async def _learning(ctx: CommandContext) -> None:
         ctx.print("El escáner todavía no tiene modelo (ejecuta 'scan' y espera a que se resuelvan las predicciones)",
                   "muted")
     g = s["gate"]
-    ctx.print(f"Filtro de operaciones: {g['decisions']} decisiones · TOMAR {g['taken']} (acierto "
-              f"{fmt_prob(g.get('taken_win_rate'))}) · NO TOMAR {g['avoided']} (habrían perdido "
-              f"{fmt_prob(g.get('avoided_would_lose_rate'))})", "learn")
+
+    def judged(rate: Any, n: Any, what: str) -> str:
+        n = int(n or 0)
+        if rate is None or not n:
+            return "aún sin resultados conocidos"
+        return f"{what} {fmt_prob(rate)}, {round(rate * n)} de {n} con resultado conocido"
+
+    ctx.print(f"Filtro de operaciones: {g['decisions']} decisiones · TOMAR {g['taken']} ("
+              f"{judged(g.get('taken_win_rate'), g.get('taken_judged'), 'llegaron a TP1 antes del SL:')}) · "
+              f"NO TOMAR {g['avoided']} ("
+              f"{judged(g.get('avoided_would_lose_rate'), g.get('avoided_judged'), 'no habrían llegado a TP1:')})",
+              "learn")
+    if min(int(g.get("taken_judged") or 0), int(g.get("avoided_judged") or 0)) < 30:
+        ctx.print("Con menos de 30 resultados por grupo estas cifras aún no son evidencia sólida del filtro.", "muted")
     nm = s.get("nexus_models") or []
     if nm:
         ctx.print(f"Modelos NEXUS: {len(nm)}", "learn")

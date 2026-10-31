@@ -16,7 +16,7 @@ import { api, errorMessage } from '../api/client'
 import type { SearchResult } from '../api/types'
 import { fmtPct, fmtPrice, signTone, splitSymbol, toneColor } from '../lib/format'
 import { useApp } from '../store'
-import { Badge, Spinner } from './ui'
+import { Badge, Spinner, useFieldId } from './ui'
 import { isNum, typeLabel } from './markets/opsUtils'
 import './markets/symbolSearch.css'
 
@@ -53,6 +53,7 @@ export default function SymbolSearch({ onSelect, placeholder, autoFocus, compact
   const [error, setError] = useState<string | null>(null)
   const [active, setActive] = useState(0)
   const [pos, setPos] = useState<CSSProperties | null>(null)
+  const fieldId = useFieldId() // inside a <Field> (symbol pickers): its label focuses this input
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const listRef = useRef<HTMLUListElement | null>(null)
@@ -301,6 +302,7 @@ export default function SymbolSearch({ onSelect, placeholder, autoFocus, compact
       <Search size={compact ? 13 : 14} className="symsearch-ico" />
       <input
         ref={inputRef}
+        id={fieldId}
         className="input symsearch-input"
         value={q}
         autoFocus={autoFocus}

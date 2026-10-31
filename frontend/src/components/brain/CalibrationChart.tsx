@@ -2,7 +2,8 @@
 // model's probabilities can be taken at face value; point size grows with the number of predictions in the bin.
 import { memo, useMemo } from 'react'
 import type { CalibrationBin } from '../../api/types'
-import { fmtInt, fmtNum } from '../../lib/format'
+import { fmtNum } from '../../lib/format'
+import { plural } from '../../lib/plural'
 import { prob01 } from './learnFormat'
 
 const W = 300
@@ -70,7 +71,7 @@ function CalibrationChart({ bins, compact }: { bins: CalibrationBin[]; compact?:
           return (
             <circle key={i} className={`brain-cal-dot ${Math.abs(off) > 0.1 ? 'off' : ''}`} cx={x(p.p)} cy={y(p.o)} r={r}>
               <title>
-                {`Predicho ${fmtNum(p.p * 100, 0)} % · observado ${fmtNum(p.o * 100, 0)} % · ${fmtInt(p.n)} predicciones`}
+                {`Predicho ${fmtNum(p.p * 100, 0)} % · observado ${fmtNum(p.o * 100, 0)} % · ${plural(p.n, 'predicción', 'predicciones')}`}
               </title>
             </circle>
           )
@@ -84,7 +85,7 @@ function CalibrationChart({ bins, compact }: { bins: CalibrationBin[]; compact?:
       </svg>
       {!compact && (
         <div className="tiny muted brain-cal-foot">
-          {fmtInt(total)} predicciones en {pts.length} grupos
+          {plural(total, 'predicción', 'predicciones')} en {plural(pts.length, 'grupo', 'grupos')}
           {ece !== null && (
             <>
               {' '}

@@ -186,7 +186,7 @@ export default function NexusModelModal({ target, onClose }: Props) {
           <section className="col gap-2">
             <h4>Acierto y Brier recientes (ventana móvil)</h4>
             <div className="brain-chart-frame">
-              <TimelineChart points={rolling} height={240} />
+              <TimelineChart points={rolling} height={240} tf={target?.tf} />
             </div>
           </section>
         </div>

@@ -37,6 +37,14 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     }
   }, [attempt])
 
+  // The server was not reachable: try again by itself as soon as the browser is back online.
+  useEffect(() => {
+    if (state !== 'error') return
+    const onOnline = () => setAttempt((n) => n + 1)
+    window.addEventListener('online', onOnline)
+    return () => window.removeEventListener('online', onOnline)
+  }, [state])
+
   if (state === 'ready') return <>{children}</>
   if (state === 'loading') {
     return (

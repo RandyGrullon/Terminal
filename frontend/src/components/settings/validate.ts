@@ -2,7 +2,7 @@
 import type { Settings } from '../../api/types'
 import { TIMEFRAMES } from '../../api/types'
 import { fmtNum } from '../../lib/format'
-import type { FieldDef } from './schema'
+import { FEE_CLASS_LABEL, type FieldDef } from './schema'
 
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 const SYMBOL_RE = /^[A-Z0-9_.!&-]+(:[A-Z0-9_.!&/-]+)?$/i
@@ -59,6 +59,17 @@ export function validateField(def: FieldDef, value: unknown): string | null {
       const [a, b, c] = value as number[]
       return a < b && b < c ? null : 'Deben ir de menor a mayor: TP1 < TP2 < TP3'
     }
+    case 'fee_classes': {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return 'Valor no válido'
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        const name = FEE_CLASS_LABEL[k] ?? k
+        if (v === null || v === undefined || v === '') return `${name}: obligatorio`
+        if (!finite(v)) return `${name}: número no válido`
+        const e = rangeError(def, v)
+        if (e) return `${name}: ${e.charAt(0).toLowerCase()}${e.slice(1)}`
+      }
+      return null
+    }
     default:
       return null
   }
@@ -77,6 +88,13 @@ function canonical(v: unknown): string {
   if (finite(v)) return String(Math.round(v * 1e9) / 1e9)
   if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`
   if (typeof v === 'string') return JSON.stringify(v)
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>
+    return `{${Object.keys(o)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`)
+      .join(',')}}`
+  }
   return JSON.stringify(v ?? null)
 }
 

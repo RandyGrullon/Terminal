@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # NEXUS Terminal launcher for Linux/macOS: prepares the environment (once), builds the UI when it changes,
-# then starts the server (local SQLite DB + every service). Usage: ./start.sh [--dev] [--port N] [--no-browser]
+# then starts the server (local SQLite DB + every service).
+# Usage: bash start.sh [--dev] [--port N] [--no-browser]   (or ./start.sh when the file is executable)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,13 +34,14 @@ if [[ ! -x "$PY" ]]; then
   else fail "Python 3.11+ no encontrado"; fi
 fi
 
-REQ_HASH="$(sha "$BACKEND/requirements.txt")"
+# requirements-dev.txt = server dependencies (requirements.txt) + test tools (pytest)
+REQ_HASH="$(cat "$BACKEND/requirements.txt" "$BACKEND/requirements-dev.txt" | sha /dev/stdin)"
 if [[ "$(cat "$VENV/.req-hash" 2>/dev/null || true)" != "$REQ_HASH" ]]; then
   step "Instalando dependencias de Python"
   if command -v uv >/dev/null; then
-    uv pip install --python "$PY" -r "$BACKEND/requirements.txt"
+    uv pip install --python "$PY" -r "$BACKEND/requirements-dev.txt"
   else
-    "$PY" -m pip install --disable-pip-version-check -r "$BACKEND/requirements.txt"
+    "$PY" -m pip install --disable-pip-version-check -r "$BACKEND/requirements-dev.txt"
   fi
   echo "$REQ_HASH" > "$VENV/.req-hash"
 fi

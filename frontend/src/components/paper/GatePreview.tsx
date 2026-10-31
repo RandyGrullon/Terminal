@@ -1,11 +1,12 @@
 // Trade Gate preview shown BEFORE opening a demo order: verdict, one-line summary, key numbers, proposed levels
 // ("hasta aquí" stop and targets) and the top reasons for and against; the full checklist is one click away.
+// A TOMAR is shown as such only when NEXUS gives the matching entry signal; otherwise "Filtro favorable".
 import { memo } from 'react'
 import { ThumbsDown, ThumbsUp } from 'lucide-react'
-import type { GateResult, Timeframe } from '../../api/types'
+import type { GateResult, NexusAction, Timeframe } from '../../api/types'
 import { DIRECTION_LABEL, fmtBarTime, fmtNum, fmtPct, fmtPrice, fmtProb, fmtR, signTone, toneColor, verdictTone } from '../../lib/format'
-import { ErrorBox, Loading, VerdictBadge } from '../ui'
-import GateChecklist from '../nexus/GateChecklist'
+import { ErrorBox, Loading } from '../ui'
+import GateChecklist, { GateVerdictBadge, gateSignal, gateSummary, noSignalNote } from '../nexus/GateChecklist'
 import { isNum } from '../markets/opsUtils'
 import { distPct } from './paperUtils'
 
@@ -17,6 +18,9 @@ interface Props {
   error: string | null
   onRetry: () => void
   tf: Timeframe
+  /** NEXUS' current action for this symbol (null = no reading, undefined = not known yet). */
+  action?: NexusAction | null
+  actionLabel?: string | null
 }
 
 function Level({ label, value, entry, tone }: { label: string; value: number | null | undefined; entry: number | null; tone?: 'pos' | 'neg' }) {
@@ -50,25 +54,38 @@ function ReasonList({ items, kind }: { items: string[]; kind: 'for' | 'against' 
   )
 }
 
-function GatePreview({ gate, loading, error, onRetry, tf }: Props) {
+function GatePreview({ gate, loading, error, onRetry, tf, action, actionLabel }: Props) {
   if (!gate) {
     if (error) return <ErrorBox error={error} onRetry={onRetry} />
     if (loading) return <Loading label="Consultando el filtro…" />
     return <div className="tiny muted">Elige un símbolo para ver qué dice el filtro antes de abrir.</div>
   }
-  const tone = verdictTone(gate.verdict)
+  const sig = gateSignal(gate, action)
+  const tone = sig === 'favorable' ? 'info' : verdictTone(gate.verdict)
   const entry = isNum(gate.entry) ? gate.entry : null
   const pros = Array.isArray(gate.reasons_for) ? gate.reasons_for : []
   const cons = Array.isArray(gate.reasons_against) ? gate.reasons_against : []
+  const summary = gateSummary(gate, action)
   return (
     <div className={`pp-gate ${tone}`} style={loading ? { opacity: 0.6 } : undefined} aria-busy={loading}>
       <div className="row between wrap gap-2">
-        <VerdictBadge verdict={gate.verdict} score={gate.score} label={gate.verdict_label || undefined} large />
+        <GateVerdictBadge gate={gate} action={action} large />
         <span className="tiny muted">
           {DIRECTION_LABEL[gate.direction] ?? gate.direction} · {fmtBarTime(gate.time, tf)}
         </span>
       </div>
-      {gate.summary && <p className="pp-gate-summary">{gate.summary}</p>}
+      {summary && <p className="pp-gate-summary">{summary}</p>}
+      {sig === 'favorable' && (
+        <p className="tiny" style={{ margin: 0, color: 'var(--info)' }}>
+          {noSignalNote(gate.direction, actionLabel)}
+        </p>
+      )}
+      {sig === 'unconfirmed' && (
+        <p className="tiny muted" style={{ margin: 0 }}>
+          Es el veredicto del filtro: solo es una oportunidad si NEXUS también da señal de {gate.direction === 'long' ? 'compra' : 'venta'} (lo
+          ves en el gráfico).
+        </p>
+      )}
 
       <div className="pp-gnums">
         <div title="Probabilidad aprendida de alcanzar TP1 antes que el stop loss">
