@@ -146,3 +146,8 @@ DEFAULT_SETTINGS: dict = {
     "ui.timezone": "",  # IANA zone of the user's browser (set by the UI); used for clock times in messages
     "ui.chart_indicators": [],
 }
+
+# Feature modules contribute their own defaults (alerts, paper risk limits, real-time data, scanner model, validation).
+from app.settings_ext import EXTRA_DEFAULTS as _EXTRA_DEFAULTS  # noqa: E402
+
+DEFAULT_SETTINGS.update(_EXTRA_DEFAULTS)

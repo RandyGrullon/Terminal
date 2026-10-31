@@ -18,7 +18,7 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from app.config import APP_NAME, VERSION
+from app.config import APP_NAME, DEFAULT_SETTINGS, VERSION
 from app.runtime import rt
 from app.util import clean_json
 
@@ -42,6 +42,31 @@ BOOL_FLAGS: set[str] = {
     "deep", "force", "all", "json", "auto", "quiet", "verbose", "yes", "reset", "live",
     "gate", "nogate", "long", "short", "paused", "full", "help",
 }
+# Settings whose value is a credential (provider API keys, the Telegram bot token, the SMTP password...): the terminal
+# never prints them in clear and never writes them to the event log (table `events`, GET /api/events).
+SECRET_MARKERS = ("key", "token", "password", "passwd", "secret", "passphrase", "credential")
+SECRET_MASK = "••••••"
+
+
+def is_secret_setting(key: Any) -> bool:
+    """True for a settings key that holds a credential: its name contains one of SECRET_MARKERS."""
+    name = str(key or "").lower()
+    return any(marker in name for marker in SECRET_MARKERS)
+
+
+def loggable_command(text: str, name: str, canonical: str, args: list[str]) -> str:
+    """The command line as it may be logged. `settings <credential key> <value>` (also `key=value` as one word) keeps
+    the key and hides the value; a `settings` line that names a credential setting anywhere else (a slip such as
+    `config set alerts.smtp_password …`) is logged without its arguments. Every other line is logged as typed."""
+    if canonical != "settings":
+        return text
+    key, sep, _ = (args[0] if args else "").partition("=")
+    if is_secret_setting(key):
+        return f"{name} {key} {SECRET_MASK}" if sep or len(args) > 1 else f"{name} {key}"
+    credentials = {k for k in DEFAULT_SETTINGS if is_secret_setting(k)}
+    if any(token.partition("=")[0].strip("'\"-") in credentials for token in text.split()):
+        return f"{name} {SECRET_MASK}"
+    return text
 
 
 class CommandError(Exception):
@@ -196,6 +221,7 @@ async def execute(text: str, client_id: int | None = None) -> dict:
     if flags.get("help"):
         _describe(ctx, cmd)
         return _result(ctx, True)
+    logged = loggable_command(text, name, canonical, args)  # a credential typed here never reaches the event log
     started = time.perf_counter()
     try:
         await cmd.handler(ctx)
@@ -206,11 +232,11 @@ async def execute(text: str, client_id: int | None = None) -> dict:
     except Exception as exc:  # never let a command crash the socket
         ctx.print(f"Error ejecutando '{canonical}': {type(exc).__name__}: {exc}", "error")
         if rt.bus is not None:
-            rt.bus.emit("error", "terminal", f"Fallo en comando '{text}': {exc}", {"trace": traceback.format_exc(limit=6)})
+            rt.bus.emit("error", "terminal", f"Fallo en comando '{logged}': {exc}", {"trace": traceback.format_exc(limit=6)})
         ok = False
     elapsed = (time.perf_counter() - started) * 1000
     if rt.bus is not None and canonical not in ("clear", "help", "echo"):
-        rt.bus.emit("debug", "terminal", f"> {text} ({elapsed:.0f} ms)")
+        rt.bus.emit("debug", "terminal", f"> {logged} ({elapsed:.0f} ms)")
     return _result(ctx, ok)
 
 
@@ -297,21 +323,30 @@ async def _events(ctx: CommandContext) -> None:
 
 @command("settings", help="Ver o cambiar ajustes", usage="settings [clave] [valor]", group="Sistema", aliases=("ajustes", "config"))
 async def _settings(ctx: CommandContext) -> None:
-    key, value = ctx.arg(0), ctx.arg(1)
+    args = list(ctx.args)
+    if args and "=" in args[0]:  # `settings clave=valor` typed as one word: the same as `settings clave valor`
+        key, _, first = args[0].partition("=")
+        args = [key, *([first] if first else []), *args[1:]]
+    key, value = (args[0] if args else None), (args[1] if len(args) > 1 else None)
     if key is None:
         for k, v in sorted(rt.settings.all().items()):
-            if "key" in k and v:
-                v = "••••••"
-            ctx.print(f"{k:<32} {v}")
+            ctx.print(f"{k:<32} {_shown(k, v)}")
         return
     if value is None:
-        ctx.print(f"{key} = {rt.settings.get(key)}")
+        ctx.print(f"{key} = {_shown(key, rt.settings.get(key))}")
         return
     try:
-        new = await rt.settings.set(key, " ".join(ctx.args[1:]))
-    except (KeyError, ValueError) as exc:
+        new = await rt.settings.set(key, " ".join(args[1:]))
+    except KeyError as exc:
         ctx.fail(str(exc).strip("'\""))
-    ctx.print(f"✔ {key} = {new}", "success")
+    except ValueError as exc:  # its message repeats the value: not for a credential
+        ctx.fail(f"Valor no válido para {key}" if is_secret_setting(key) else str(exc).strip("'\""))
+    ctx.print(f"✔ {key} = {_shown(key, new)}", "success")
+
+
+def _shown(key: str, value: Any) -> Any:
+    """A setting's value as the terminal prints it: a credential that is set shows as SECRET_MASK."""
+    return SECRET_MASK if value and is_secret_setting(key) else value
 
 
 @command("db", help="Estadísticas de la base de datos local", usage="db [vacuum]", group="Sistema")

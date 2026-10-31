@@ -7,12 +7,18 @@ directory under ``backend/.tmp/sandbox`` and a hard timeout (the process is kill
 with hard limits (``MAX_STDOUT_BYTES`` of stdout, the last ``STDERR_TAIL_BYTES`` of stderr), so a script cannot
 make this process buffer an unbounded amount of data. Blocking: call it through ``asyncio.to_thread``. It never
 raises for user errors: they are reported in ``result["errors"]``.
+
+The worker reports the OS protections it applied (job object; on Linux no_new_privs, empty network namespace,
+closed descriptors, rlimits) under the internal key ``OS_ISOLATION_KEY``: this module removes it from the result
+(ScriptRunResult is unchanged), keeps the latest one for ``last_os_isolation()`` and logs it once, together with the
+server's own protection (``app.hardening``), as a system event (again only if it changes).
 """
 from __future__ import annotations
 
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -36,8 +42,13 @@ MAX_STDOUT_BYTES = 48 * 1024 * 1024  # the worker caps its own result at 40 MB (
 STDERR_TAIL_BYTES = 64 * 1024
 _READ_CHUNK = 64 * 1024
 _MARKER = RESULT_MARKER.encode("ascii")
+OS_ISOLATION_KEY = "_os_isolation"  # internal key of the worker result (= worker.OS_ISOLATION_KEY), never returned
 
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+_isolation_lock = threading.Lock()
+_isolation_last: dict[str, Any] | None = None
+_isolation_announced: str | None = None
+_ISOLATION_FIELD = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
 
 class OutputLimitExceeded(Exception):
@@ -118,6 +129,118 @@ def _parse_output(stdout: bytes | bytearray | None) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _plain(text: str, limit: int) -> str:
+    """At most ``limit`` printable characters (no line breaks or control characters reach the log)."""
+    return "".join(ch if ch.isprintable() else "?" for ch in text[:limit])
+
+
+def _clean_isolation(raw: Any) -> dict[str, Any] | None:
+    """The worker's protection report reduced to short, plain values. It is informative only (a script that took
+    over its worker could forge it), so nothing decides anything from it."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key, value in list(raw.items())[:24]:
+        if not isinstance(key, str) or not _ISOLATION_FIELD.fullmatch(key):
+            continue
+        if isinstance(value, bool):
+            out[key] = value
+        elif isinstance(value, int) and abs(value) < 10**6:
+            out[key] = value
+        elif isinstance(value, str):
+            out[key] = _plain(value, 60)
+        elif isinstance(value, list) and len(value) <= 8 and all(isinstance(v, str) for v in value):
+            out[key] = [_plain(v, 16) for v in value]
+    return out
+
+
+def _yes(value: Any) -> str:
+    return "sí" if value is True else "no"
+
+
+def describe_os_isolation(info: dict[str, Any], server: dict[str, Any] | None = None) -> str:
+    """One Spanish line listing every OS protection reported, active or not (it never claims an inactive one)."""
+    parts: list[str] = []
+    if "job_object" in info:
+        parts.append(f"objeto de trabajo de Windows (memoria, sin procesos hijos): {_yes(info['job_object'])}")
+    if "no_new_privs" in info:
+        parts.append(f"sin privilegios nuevos (no_new_privs): {_yes(info['no_new_privs'])}")
+    if "net_namespace" in info:
+        if info["net_namespace"] is True:  # IP only: a Unix socket with a path lives on the (shared) filesystem
+            parts.append("sin red IP (espacio de nombres de red vacío; los sockets Unix con ruta no se aíslan): sí")
+        else:
+            why = info.get("net_namespace_error") or "no disponible"
+            parts.append(f"sin red a nivel del sistema: no, este host no lo permite ({why}); la red solo la "
+                         "bloquean las capas de Python del sandbox")
+    if "fds_closed" in info:
+        parts.append(f"descriptores heredados cerrados: {info['fds_closed']}")
+    elif "fds_error" in info:
+        parts.append(f"descriptores heredados: no se pudieron revisar ({info['fds_error']})")
+    if "rlimits" in info:
+        parts.append(f"límites del sistema: {', '.join(info['rlimits']) or 'ninguno'}")
+    if "oom_score_adj" in info:
+        parts.append(f"prioridad OOM del worker: {_yes(info['oom_score_adj'])}")
+    if server and str(server.get("platform", "")).startswith("linux"):
+        parts.append("servidor no volcable (su /proc/<pid>/environ y mem no los lee otro proceso del mismo usuario): "
+                     f"{_yes(server.get('non_dumpable'))}")
+    if info.get("error"):
+        parts.append(f"error: {info['error']}")
+    platform = info.get("platform") or "?"
+    return f"Aislamiento del sistema de PyChart ({platform}): " + (" · ".join(parts) if parts else "sin datos")
+
+
+def _server_protections() -> dict[str, Any] | None:
+    try:
+        from app.hardening import server_protections
+
+        return server_protections()
+    except Exception:  # noqa: BLE001 - informative only
+        return None
+
+
+def _announce(message: str, data: dict[str, Any]) -> None:
+    """Best effort: a system event (console + terminal) when the app's event bus runs, else one stderr line (a bus
+    that was never started, e.g. a standby instance or a test runtime, would drop the event without a word)."""
+    try:
+        from app.runtime import rt
+
+        bus = rt.bus
+    except Exception:  # noqa: BLE001
+        bus = None
+    if bus is not None and getattr(bus, "running", True) is not False:
+        try:
+            bus.emit_threadsafe("system", "scripts", message, data)
+            return
+        except Exception:  # noqa: BLE001 - e.g. the loop of an old bus is closed
+            pass
+    try:
+        sys.stderr.write(message + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _note_isolation(raw: Any) -> None:
+    """Keeps the worker's report for last_os_isolation() and logs it once (again only when it changes)."""
+    global _isolation_last, _isolation_announced
+    info = _clean_isolation(raw)
+    if info is None:
+        return
+    server = _server_protections()
+    message = describe_os_isolation(info, server)
+    with _isolation_lock:
+        _isolation_last = info
+        if message == _isolation_announced:
+            return
+        _isolation_announced = message
+    _announce(message, {"worker": info, "server": server})
+
+
+def last_os_isolation() -> dict[str, Any] | None:
+    """OS protections reported by the latest worker that returned a result (None before the first one)."""
+    with _isolation_lock:
+        return dict(_isolation_last) if _isolation_last is not None else None
+
+
 def _last_line(stderr: bytes | None) -> str:
     lines = [ln.strip() for ln in (stderr or b"").decode("utf-8", errors="replace").splitlines() if ln.strip()]
     return lines[-1][:300] if lines else ""
@@ -183,12 +306,16 @@ def _launch(payload: bytes, timeout: float, extra_env: dict[str, str] | None = N
         env.update(extra_env)
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     proc = subprocess.Popen(
-        [sys.executable, "-I", str(WORKER_PATH)],
+        # -I: isolated (no PYTHON* variables, no user site, no script dir on sys.path). -B: no __pycache__ writes,
+        # because -I also ignores PYTHONDONTWRITEBYTECODE and the worker would write next to the code before its
+        # audit hook is armed (it still reads existing bytecode, e.g. the image's precompiled code).
+        [sys.executable, "-I", "-B", str(WORKER_PATH)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=str(SANDBOX_DIR),
         env=env,
+        close_fds=True,  # the default, stated: only the three pipes reach the worker (which closes any other itself)
         creationflags=flags,
     )
     out, err = bytearray(), bytearray()
@@ -275,6 +402,11 @@ def execute_payload(payload: dict[str, Any], timeout: float, extra_env: dict[str
             message += " Posible exceso de memoria o terminación forzada."
         result["errors"] = [make_error("runtime", f"{message} {detail}".strip())]
         return result
+    report = parsed.pop(OS_ISOLATION_KEY, None)  # internal: never part of ScriptRunResult
+    try:
+        _note_isolation(report)
+    except Exception:  # noqa: BLE001 - logging the protections must never break a run
+        pass
     return parsed
 
 

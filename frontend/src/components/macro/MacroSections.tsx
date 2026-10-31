@@ -1,7 +1,7 @@
 // Compact rows of the semáforo panel: the key metrics (≤ 6) and the high-impact events (≤ 5).
 import type { MacroEvent, MacroMetric } from '../../api/types'
 import { toneColor } from '../../lib/format'
-import { countdownTone, fmtCountdown, fmtEventWhen } from './macroFormat'
+import { countdownTone, fmtCountdown, fmtEventWhen, isApproxTime, officialNote, sourceLabel } from './macroFormat'
 import { IMPACT_LABEL, METRIC_TONE } from './macroModel'
 
 export function MacroMetrics(props: { metrics: MacroMetric[] }) {
@@ -37,7 +37,9 @@ export function eventValues(ev: MacroEvent): string {
 export function eventTooltip(ev: MacroEvent): string {
   const values = eventValues(ev)
   const original = ev.title && ev.title !== ev.title_es ? `\n${ev.title}` : ''
-  return `${ev.title_es}${original}\n${IMPACT_LABEL[ev.impact]} · ${ev.currency || '—'}${values ? `\n${values}` : ''}`
+  const source = ev.source ? `\nFuente: ${sourceLabel(ev.source)}` : ''
+  const approx = isApproxTime(ev) ? '\nHora aproximada: se publica al terminar la reunión' : ''
+  return `${ev.title_es}${original}\n${IMPACT_LABEL[ev.impact]} · ${ev.currency || '—'}${values ? `\n${values}` : ''}${source}${approx}`
 }
 
 export function MacroEvents(props: { events: MacroEvent[]; now: number }) {
@@ -46,7 +48,7 @@ export function MacroEvents(props: { events: MacroEvent[]; now: number }) {
       {props.events.map((ev) => {
         const secs = ev.time - props.now / 1000
         const tone = countdownTone(secs)
-        const values = eventValues(ev)
+        const values = eventValues(ev) || officialNote(ev)
         return (
           <div key={ev.id} className={`mp-event imp-${ev.impact}${secs < -60 ? ' past' : ''}`} title={eventTooltip(ev)}>
             <span className="mp-event-when mono">{fmtEventWhen(ev.time, props.now)}</span>

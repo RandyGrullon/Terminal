@@ -120,13 +120,15 @@ def test_local_quick_from_candles():
 
 
 def _rows() -> list[dict]:
-    return [
+    # 8 % daily volatility: moves larger than the neutral band are expected, so the reads are directional
+    rows = [
         scan_row("BINANCE:BTCUSDT", value=2e9),
         scan_row("BINANCE:ETHUSDT", value=1e9, bullish=False),
         scan_row("BINANCE:SOLUSDT", value=5e8, rating=0.8),
         scan_row("UNISWAP:PEPEWETH_A43FE1.USD", value=9e9),
         scan_row("BINANCE:DOGEUSDT", value=4e8, rating=0.05, change=0.0),
     ]
+    return [{**r, "Volatility.D": 8.0} for r in rows]
 
 
 def test_scan_run_persists_results_predictions_and_events(runtime_factory, monkeypatch):
@@ -157,7 +159,12 @@ def test_scan_run_persists_results_predictions_and_events(runtime_factory, monke
             assert len(preds) == 4
             p = preds[0]
             assert p["model_key"] == "crypto|1h|14400" and p["target_at"] - p["created_at"] == 14400 * 1000
-            assert json.loads(p["features"])["v"] == 2 and set(sc.decode_features(p["features"])) <= set(sc.FEATURE_NAMES)
+            stored = json.loads(p["features"])  # packed v4: base features + extras + the scan's context
+            assert stored["v"] == 4 and stored["s"] == sc.CONTEXT_SIG and stored["g"] == sc.EXTRA_SIG
+            assert len(p["features"]) < 220  # ≈ 0,2 KB per row (JSON lists of the same values: ≈ 0,45 KB)
+            known = set(sc.FEATURE_NAMES) | set(sc.EXTRA_NAMES) | set(sc.CONTEXT_NAMES)
+            decoded = sc.decode_features(p["features"])  # 4 rows: too few for breadth, the regime is always there
+            assert set(decoded) <= known and {f"reg_{r}" for r in sc.REGIMES} <= set(decoded)
             assert {r["direction"] for r in preds} >= {1, -1}
             call = rt.hub.scan_calls[0]
             assert call["sort_by"] == "24h_vol|5" and call["filters"] and "RSI|60" in call["columns"]

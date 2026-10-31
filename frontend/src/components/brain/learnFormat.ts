@@ -20,7 +20,8 @@ export function fmtRate(v: number | null | undefined, digits = 1): string {
   return p === null ? '—' : fmtPct(p, digits, false)
 }
 
-/** Hit-rate tone: green when clearly better than a coin flip, red when worse. */
+/** Rate tone with explicit thresholds (percent units). Not for prediction hit rates: those have three outcomes and
+ *  are judged against their own reference (skill.ts), never against a fixed 50 %. */
 export function rateTone(v: number | null | undefined, good = 55, bad = 50): Tone {
   const p = ratePct(v)
   if (p === null) return 'muted'
@@ -29,11 +30,12 @@ export function rateTone(v: number | null | undefined, good = 55, bad = 50): Ton
   return 'warn'
 }
 
-/** Brier score (0 = perfect, 0.25 = coin flip): lower is better. */
-export function brierTone(b: number | null | undefined): Tone {
-  if (!finite(b)) return 'muted'
-  if (b <= 0.235) return 'pos'
-  if (b > 0.255) return 'neg'
+/** Brier tone against its climatology (always the period's up rate): green when clearly better, red when worse. Without
+ *  a reference it stays neutral (0,25 is only the Brier of always saying 50 %, not the chance level). */
+export function brierTone(b: number | null | undefined, ref?: number | null): Tone {
+  if (!finite(b) || !finite(ref) || ref <= 0) return 'muted'
+  if (b <= ref * 0.97) return 'pos'
+  if (b > ref * 1.03) return 'neg'
   return 'warn'
 }
 

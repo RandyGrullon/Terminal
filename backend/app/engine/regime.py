@@ -41,13 +41,21 @@ def raw_regime(f: Features) -> np.ndarray:
     return out
 
 
-def detect_regime(f: Features) -> np.ndarray:
-    """Regime codes with hysteresis: a new trend/range regime must hold CONFIRM_BARS bars (volatile switches at once)."""
+def detect_regime(f: Features, init: tuple[int, int, int, int] | None = None,
+                  states: bool = False) -> np.ndarray | tuple[np.ndarray, list[int], list[int]]:
+    """Regime codes with hysteresis: a new trend/range regime must hold CONFIRM_BARS bars (volatile switches at once).
+
+    `init` = (bar k, regime, pending regime, pending count): the hysteresis state after bar k (stored by an
+    earlier run) replaces the one computed here, so a resumed run continues the same sequence. `states` = also
+    return the pending regime and count after every bar (what a snapshot stores)."""
     raw = raw_regime(f).tolist()
     out = [UNKNOWN] * len(raw)
+    pend = [UNKNOWN] * len(raw)
+    cnt = [0] * len(raw)
     cur = UNKNOWN
     pending = UNKNOWN
     count = 0
+    k = int(init[0]) if init is not None else -1
     for i, r in enumerate(raw):
         if r == UNKNOWN:
             cur, pending, count = UNKNOWN, UNKNOWN, 0
@@ -60,8 +68,13 @@ def detect_regime(f: Features) -> np.ndarray:
                 pending, count = r, 1
             if count >= CONFIRM_BARS:
                 cur, pending, count = r, UNKNOWN, 0
+        if i == k:
+            cur, pending, count = int(init[1]), int(init[2]), int(init[3])
         out[i] = cur
-    return np.asarray(out, dtype=np.int64)
+        pend[i] = pending
+        cnt[i] = count
+    codes = np.asarray(out, dtype=np.int64)
+    return (codes, pend, cnt) if states else codes
 
 
 def regime_detail(f: Features, i: int) -> str:

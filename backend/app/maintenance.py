@@ -5,7 +5,8 @@ The scanner writes one prediction per scanned asset and run (~16 k rows a day wi
 its resolved rows are kept for a month only: totals, hit rates, calibration and the daily charts come from the
 `prediction_daily` aggregates (app.sim.evaluator), which are kept much longer. Scan results are kept for the latest
 runs only, and NEXUS memories of symbols nobody has analysed for months are dropped (re-learned from history if the
-symbol is opened again)."""
+symbol is opened again), together with the semáforo vetoes and bar-close gate decisions of that symbol/timeframe.
+Finished demo orders (filled, cancelled, expired) are kept for a year; pending ones are never touched."""
 from __future__ import annotations
 
 import asyncio
@@ -25,6 +26,14 @@ DAILY_AGG_DAYS = 730  # prediction_daily rows
 SCAN_DAYS = 45  # scan_runs (one small row per run)
 SCAN_RESULT_RUNS = 100  # scan_results are kept for the newest runs only (≈ 1 day of background scans)
 NEXUS_MODEL_DAYS = 90  # model_state kind='nexus' not updated for this long
+# model_state kinds kept per NEXUS memory (key "SYMBOL|tf", app.engine.service VETO_KIND / GATE_KIND): the entries the
+# semáforo vetoed and the bar-close gate decisions that every later run replays at their bars, so the history shown
+# does not repaint. Their own updated_at only moves when a new one is recorded, so a symbol watched for months can
+# have an old row that is still in use: a row goes only when it is NEXUS_MODEL_DAYS old AND no 'nexus' memory of the
+# same key is left (nobody analysed that symbol/timeframe for that long, or its memory was reset and never rebuilt).
+# The next analysis then starts cold from history anyway.
+NEXUS_DECISION_KINDS = ("nexus_veto", "nexus_gate")
+PAPER_ORDER_DAYS = 365  # demo orders no longer pending (filled / cancelled / expired), by their last update
 
 
 class Maintenance:
@@ -81,8 +90,16 @@ class Maintenance:
         )
         if keep_from is not None:  # results of older runs (the run rows themselves stay, with their summary)
             await db.execute("DELETE FROM scan_results WHERE run_id < ?", (int(keep_from),))
-        await db.execute("DELETE FROM model_state WHERE kind = 'nexus' AND updated_at < ?",
-                         (ms - NEXUS_MODEL_DAYS * DAY * 1000,))
+        model_cutoff = ms - NEXUS_MODEL_DAYS * DAY * 1000
+        await db.execute("DELETE FROM model_state WHERE kind = 'nexus' AND updated_at < ?", (model_cutoff,))
+        kinds = ", ".join(f"'{kind}'" for kind in NEXUS_DECISION_KINDS)
+        await db.execute(  # after the memories above: the decisions of a memory dropped right now go with it
+            f"DELETE FROM model_state WHERE kind IN ({kinds}) AND updated_at < ? AND NOT EXISTS "
+            "(SELECT 1 FROM model_state m WHERE m.kind = 'nexus' AND m.key = model_state.key)",
+            (model_cutoff,),
+        )
+        await db.execute("DELETE FROM paper_orders WHERE status <> 'pending' AND updated_at < ?",
+                         (ms - PAPER_ORDER_DAYS * DAY * 1000,))
         self.last_run = ms
         if self.rt.bus is not None:
             self.rt.bus.emit("debug", "system", "Mantenimiento de datos completado (retención aplicada)")

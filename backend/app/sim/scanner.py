@@ -1,11 +1,25 @@
 """Market scanner & market-wide learning (ScannerService, `rt.scanner`).
 
 Quick mode (every asset of a market): one TradingView scan pulling technical columns at several timeframes →
-normalised features → online logistic model per "market|tf|horizon_s" (AdaGrad + L2, persisted in
-`model_state` kind='scanner') → P(up) and score = 2p−1. While the model is cold (< 200 resolved outcomes) its
-probability is blended with a rule-based prior (ratings + trend alignment + momentum) and the reasons say so.
+normalised features + market-wide context of that scan (BTC/ETH trend and momentum, breadth over 1h/4h/1d,
+dispersion, market regime) → scanner model v2 per "market|tf|horizon_s" (`ScannerModel`, persisted in `model_state`
+kind='scanner'):
+- direction: P(up) from a scan-level part (bias + context + regime intercepts) and a cross-sectional part (the
+  asset's features minus the scan's mean, so a market-wide shift of every indicator is never read as 150 separate
+  signals); magnitude: P(|move| > neutral band) from a volatility prior (Volatility.D scaled to the horizon) plus
+  learned corrections. The prediction is the outcome with the highest expected hit rate: up (P(up)), down
+  (1 − P(up)) or neutral (P(move inside the band)) — neutral when the expected move is small versus the band;
+- learning: one scan = one lesson for the scan-level part (its mean error), one lesson per row (capped) for the
+  cross-sectional part, every lesson weighted by Δt / horizon (overlapping 4 h windows are mostly the same market
+  move); plain SGD with forgetting of the scan-level weights (adapts to regime changes, no vanishing step);
+- causal Platt recalibration per model key, applied only after a minimum sample (rows and independent lessons);
+- while the cross-sectional part is cold it is blended with a rule-based prior (ratings + trend alignment +
+  momentum) centred on the scan's median, and the reasons say so; the prior's market-wide tilt is never used (the
+  market view comes only from the learned scan-level part, which starts at zero).
 Every scanned asset gets a `predictions` row that the PredictionEvaluator resolves after `scanner.horizon_s`,
-feeding the model (feedback loop → honest out-of-sample hit rate).
+feeding the model (feedback loop → honest out-of-sample hit rate, always compared with the baseline: the most
+frequent outcome of the period, see app.sim.evaluator.skill_report). The legacy v1 model (`OnlineLogit`, one SGD
+step per row) is kept for the offline replay that compares both designs on the same stored features.
 
 Deep mode: the top candidates with real history run the full NEXUS engine + Trade Gate (`rt.nexus.analyze`) →
 verdict TOMAR / ESPERAR / NO TOMAR, SL/TP, regime, expected move; every gate decision is logged in `gate_log`.
@@ -16,6 +30,7 @@ skipped: no verdict and no gate_log row.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import math
 import re
@@ -145,28 +160,120 @@ RESULT_DEFAULTS: dict[str, Any] = {
 }
 
 
-def encode_features(feats: dict[str, float]) -> str:
-    """Compact `predictions.features` JSON: values in FEATURE_NAMES order (4 decimals, null when missing)."""
-    values = [None if safe_float(feats.get(n)) is None else round(float(feats[n]), 4) for n in FEATURE_NAMES]
-    return json_dumps({"v": 2, "f": FEATURE_SIG, "x": values})
+# Row values of the v2 model that are not base features (volatility scale and liquidity for the magnitude model).
+EXTRA_FEATURES: list[tuple[str, str]] = [
+    ("vol_d_log", "Volatilidad diaria (log, sin recortar)"),
+    ("atr_log", "ATR diario / precio (log)"),
+    ("bbw_log", "Ancho de las Bandas de Bollinger (log)"),
+    ("liq_log", "Volumen negociado (log)"),
+]
+EXTRA_NAMES = [name for name, _ in EXTRA_FEATURES]
+EXTRA_SIG = hashlib.sha1(",".join(EXTRA_NAMES).encode("utf-8")).hexdigest()[:8]
+# Market-wide context of one scan (the same for every row of that scan).
+REGIMES = ("trend_up", "trend_down", "range", "volatile")
+REGIME_TEXT = {"trend_up": "alcista", "trend_down": "bajista", "range": "lateral", "volatile": "volátil"}
+CONTEXT_FEATURES: list[tuple[str, str]] = [
+    ("ctx_breadth_1h", "Amplitud del mercado 1h (activos al alza)"),
+    ("ctx_breadth_4h", "Amplitud del mercado 4h"),
+    ("ctx_breadth_1d", "Amplitud del mercado diaria"),
+    ("ctx_mean_4h", "Movimiento medio del mercado 4h"),
+    ("ctx_dispersion", "Dispersión entre activos (4h, log)"),
+    ("ctx_majors_trend", "Tendencia de los principales (BTC/ETH)"),
+    ("ctx_majors_mom", "Momento de los principales (BTC/ETH)"),
+    ("ctx_majors_vol", "Volatilidad de los principales (log)"),
+] + [(f"reg_{r}", f"Régimen de mercado {REGIME_TEXT[r]}") for r in REGIMES]
+CONTEXT_NAMES = [name for name, _ in CONTEXT_FEATURES]
+CONTEXT_SIG = hashlib.sha1(",".join(CONTEXT_NAMES).encode("utf-8")).hexdigest()[:8]
+
+
+def _r4(v: Any) -> float | None:
+    f = safe_float(v)
+    return None if f is None or not math.isfinite(f) else round(f, 4)
+
+
+PACK_SCALE = 10_000  # fixed point with 4 decimals, the precision of the JSON lists
+PACK_NULL = -32768  # a missing value
+PACK_MAX = 32767 / PACK_SCALE  # ±3.2767: every stored value is clipped to ±3 already
+
+
+def _pack(values: list[float | None]) -> str:
+    """Values as little-endian int16 fixed point (4 decimals, PACK_NULL when missing), base64."""
+    q = [PACK_NULL if v is None else int(round(clamp(v, -PACK_MAX, PACK_MAX) * PACK_SCALE)) for v in values]
+    return base64.b64encode(np.asarray(q, dtype="<i2").tobytes()).decode("ascii")
+
+
+def _unpack(text: Any) -> list[float | None] | None:
+    if not isinstance(text, str):
+        return None
+    try:
+        raw = base64.b64decode(text.encode("ascii"), validate=True)
+    except (ValueError, UnicodeError):  # binascii.Error is a ValueError
+        return None
+    if not raw or len(raw) % 2:
+        return None
+    return [None if v == PACK_NULL else v / PACK_SCALE for v in np.frombuffer(raw, dtype="<i2").tolist()]
+
+
+def encode_features(feats: dict[str, float], context: dict[str, float] | None = None) -> str:
+    """Compact `predictions.features`.
+
+    v2 (base features only) = JSON list in FEATURE_NAMES order (4 decimals, null when missing). v4 (what a scan
+    stores: base features + EXTRA_NAMES + the scan's context in CONTEXT_NAMES order) = the same values packed as
+    little-endian int16 fixed point in base64 ("q", see `_pack`), with the signature of each list ("f", "g" and, with
+    a context, "s"): ≈ 0,2 KB per row instead of ≈ 0,45 KB as JSON lists (v3), so a week of scans can be kept for
+    the offline replay, which rebuilds exactly what the model saw (same 4 decimals)."""
+    values = [_r4(feats.get(n)) for n in FEATURE_NAMES]
+    extras = [_r4(feats.get(n)) for n in EXTRA_NAMES]
+    if context is None and all(v is None for v in extras):
+        return json_dumps({"v": 2, "f": FEATURE_SIG, "x": values})
+    out: dict[str, Any] = {"v": 4, "f": FEATURE_SIG, "g": EXTRA_SIG}
+    packed = values + extras
+    if context:
+        out["s"] = CONTEXT_SIG
+        packed += [_r4(context.get(n)) for n in CONTEXT_NAMES]
+    out["q"] = _pack(packed)
+    return json_dumps(out)
+
+
+def _decode_packed(data: dict) -> dict[str, float] | None:
+    """v4: base features, then extras and context when their signatures match the current lists."""
+    vals = _unpack(data.get("q"))
+    if vals is None or data.get("f") != FEATURE_SIG or len(vals) < len(FEATURE_NAMES):
+        return None
+    out = {name: v for name, v in zip(FEATURE_NAMES, vals) if v is not None}
+    rest = vals[len(FEATURE_NAMES):]
+    if data.get("g") == EXTRA_SIG and len(rest) >= len(EXTRA_NAMES):
+        out.update({name: v for name, v in zip(EXTRA_NAMES, rest) if v is not None})
+        ctx = rest[len(EXTRA_NAMES):]
+        if data.get("s") == CONTEXT_SIG and len(ctx) == len(CONTEXT_NAMES):
+            out.update({name: v for name, v in zip(CONTEXT_NAMES, ctx) if v is not None})
+    return out or None
 
 
 def decode_features(raw: Any) -> dict[str, float] | None:
-    """Feature dict from `predictions.features` (compact v2 list or legacy {"x": {name: value}}); None if unusable."""
+    """Feature dict from `predictions.features` (packed v4, compact v2/v3 lists or legacy {"x": {name: value}}); None
+    if unusable. v3/v4 rows also return their extras and context values (names never collide with FEATURE_NAMES); a
+    part whose signature does not match the current lists is left out."""
     data = json_loads(raw, None)
     if not isinstance(data, dict):
         return None
+    if "q" in data:
+        return _decode_packed(data)
     x = data.get("x")
     if isinstance(x, list):
         if data.get("f") != FEATURE_SIG or len(x) != len(FEATURE_NAMES):
             return None
         out = {name: float(v) for name, v in zip(FEATURE_NAMES, x) if safe_float(v) is not None}
+        for key, sig_key, sig, names in (("e", "g", EXTRA_SIG, EXTRA_NAMES), ("c", "s", CONTEXT_SIG, CONTEXT_NAMES)):
+            part = data.get(key)
+            if isinstance(part, list) and data.get(sig_key) == sig and len(part) == len(names):
+                out.update({name: float(v) for name, v in zip(names, part) if safe_float(v) is not None})
         return out or None
-    if isinstance(x, dict):
-        return x or None
+    if isinstance(x, dict):  # legacy dicts: only their finite numbers (a corrupt value never reaches the models)
+        return _finite_dict(x) or None
     if "x" in data or "v" in data:
         return None  # a versioned payload without a usable vector
-    return data or None  # oldest format: the feature dict itself
+    return _finite_dict(data) or None  # oldest format: the feature dict itself
 
 
 def _f(row: dict, key: str) -> float | None:
@@ -193,9 +300,10 @@ def extract_features(row: dict) -> tuple[dict[str, float], float]:
     vol_d = _f(row, "Volatility.D")
     if (atr is None or atr <= 0) and close and vol_d:
         atr = close * vol_d / 100.0
-    if atr is not None and atr <= 0:
+    # absurd (subnormal) scales count as missing: their scaled forms below would underflow to 0 and divide by zero
+    if atr is not None and atr <= 1e-300:
         atr = None
-    if vol_d is not None and vol_d <= 0:
+    if vol_d is not None and vol_d <= 1e-12:
         vol_d = None
     atr_h = atr * math.sqrt(60 / 1440) if atr else None
     atr_4h = atr * math.sqrt(240 / 1440) if atr else None
@@ -272,6 +380,42 @@ def extract_features(row: dict) -> tuple[dict[str, float], float]:
     return feats, completeness
 
 
+def extract_extras(row: dict) -> dict[str, float]:
+    """EXTRA_NAMES values of a scan row: the unclipped daily volatility, ATR / price, Bollinger width and traded value
+    (log scales; missing columns → value absent). They feed the magnitude model (how far the price may move)."""
+    out: dict[str, float] = {}
+
+    def put_log(name: str, ratio: float) -> None:
+        # a ratio that underflows to 0 (absurd or subnormal quotes) is left out: one odd row never stops a whole scan
+        if ratio > 0:
+            out[name] = _clip(math.log(ratio))
+
+    close = _f(row, "close")
+    vol_d = _f(row, "Volatility.D")
+    if vol_d is not None and vol_d > 0:
+        put_log("vol_d_log", vol_d / 5.0)
+    atr = _f(row, "ATR")
+    if atr is not None and atr > 0 and close is not None and close > 0:
+        put_log("atr_log", atr / close * 100.0 / 5.0)
+    up, lo = _f(row, "BB.upper"), _f(row, "BB.lower")
+    if up is not None and lo is not None and up > lo and close is not None and close > 0:
+        put_log("bbw_log", (up - lo) / close * 100.0 / 10.0)
+    value = _f(row, CRYPTO_VALUE_COL)
+    if value is None:
+        value = _f(row, STOCK_VALUE_COL)
+    if value is None and close is not None and _f(row, "volume") is not None:
+        value = close * float(_f(row, "volume") or 0.0)
+    if value is not None and value > 0:
+        out["liq_log"] = _clip((math.log10(value) - 7.0) / 2.0)
+    return out
+
+
+def flat_band_pct(horizon_s: float) -> float:
+    """|return| (%) below which a neutral prediction (direction 0) counts as correct (≈ 0.5 % at 4 h)."""
+    hours = max(float(horizon_s), 60.0) / 3600.0
+    return float(clamp(0.25 * math.sqrt(hours), 0.1, 1.5))
+
+
 def primary_suffix(tf: str) -> str:
     return TF_SUFFIX.get(tf, "|60")
 
@@ -310,7 +454,7 @@ def rule_prior(feats: dict[str, float], tf: str) -> float:
     return float(clamp(sum(w * c for w, c in comps) / total_w, -1.0, 1.0))
 
 
-# ----------------------------------------------------------------------------- online logistic model
+# ----------------------------------------------------------------------------- legacy v1 model (offline replay only)
 
 
 def _sigmoid(z: float) -> float:
@@ -319,7 +463,9 @@ def _sigmoid(z: float) -> float:
 
 
 class OnlineLogit:
-    """Online logistic regression (AdaGrad + L2) on the scanner features. JSON-serialisable."""
+    """Legacy v1 scanner model: online logistic regression (AdaGrad + L2), one SGD step per resolved row on the raw
+    features. Replaced by `ScannerModel` (v2) for live predictions; kept so the offline replay can measure both designs
+    on the same stored features. JSON-serialisable."""
 
     RECENT = 200
 
@@ -339,7 +485,10 @@ class OnlineLogit:
     def vector(self, feats: dict[str, Any]) -> np.ndarray:
         out = np.zeros(len(self.names))
         for i, name in enumerate(self.names):
-            v = safe_float(feats.get(name))
+            v = feats.get(name)
+            if v is None:
+                continue
+            v = v if v.__class__ is float and math.isfinite(v) else safe_float(v)
             if v is not None:
                 out[i] = clamp(v, -3.0, 3.0)
         return out
@@ -432,18 +581,742 @@ def model_key(market: str, tf: str, horizon_s: int) -> str:
     return f"{market}|{tf}|{int(horizon_s)}"
 
 
-async def load_scanner_model(db: Any, key: str) -> OnlineLogit:
+def parse_model_key(key: str) -> tuple[str, str, int]:
+    """(market, tf, horizon_s) of a scanner model key ("crypto|1h|14400"); defaults for malformed keys."""
+    parts = str(key or "").split("|")
+    market = parts[0] if parts and parts[0] else "crypto"
+    tf = parts[1] if len(parts) > 1 and parts[1] else "1h"
+    try:
+        horizon = int(parts[2]) if len(parts) > 2 else 14400
+    except ValueError:
+        horizon = 14400
+    return market, tf, max(60, horizon)
+
+
+async def load_scanner_model(db: Any, key: str) -> "ScannerModel":
     row = await db.fetchone("SELECT state FROM model_state WHERE kind='scanner' AND key=?", (key,))
-    return OnlineLogit.from_state(json_loads(row["state"]) if row else None)
+    return ScannerModel.from_state(json_loads(row["state"]) if row else None, key=key)
 
 
-async def save_scanner_model(db: Any, key: str, model: OnlineLogit) -> None:
+async def save_scanner_model(db: Any, key: str, model: "ScannerModel | OnlineLogit") -> None:
     await db.execute(
         "INSERT INTO model_state(kind, key, state, updates, trained_until, updated_at) VALUES ('scanner', ?, ?, ?, ?, ?) "
         "ON CONFLICT(kind, key) DO UPDATE SET state=excluded.state, updates=excluded.updates, "
         "trained_until=excluded.trained_until, updated_at=excluded.updated_at",
         (key, json_dumps(model.to_state()), model.updates, model.trained_until, now_ms()),
     )
+
+
+# ----------------------------------------------------------------------------- market context of one scan
+
+MIN_CONTEXT_ROWS = 5
+MAJOR_BASES = ("BTC", "ETH")
+MAJORS_FALLBACK_N = 5  # other markets: the most liquid assets of the scan stand for "the majors"
+REGIME_VOL_LOG = math.log(2.0)  # majors' daily volatility ≥ 6 % (3 % × 2): volatile market
+REGIME_SHOCK_4H = 1.5  # the universe moved ≥ 1.5 volatility units on average over 4 h: volatile market
+REGIME_TREND = 0.3
+
+
+def _mean(vals: list[float]) -> float | None:
+    return sum(vals) / len(vals) if vals else None
+
+
+def _vol_d(feats: dict[str, float]) -> float | None:
+    """Daily volatility (%) of a row: the unclipped extra, else the base feature (capped at 20 %), else ATR / price.
+    The logs are read within the ±3 every stored vector holds (a legacy or corrupt row cannot overflow exp())."""
+    if "vol_d_log" in feats:
+        return 5.0 * math.exp(_clip(feats["vol_d_log"]))
+    if "volatility" in feats:
+        return max(5.0 * (feats["volatility"] + 1.0), 0.05)
+    if "atr_log" in feats:
+        return 5.0 * math.exp(_clip(feats["atr_log"]))
+    return None
+
+
+def _trend_score(f: dict[str, float]) -> float | None:
+    parts = [math.tanh(f[k]) for k in ("ema_60", "ema_240", "px_ema50", "sma_cross") if k in f]
+    if "rec_240" in f:
+        parts.append(f["rec_240"])
+    return _mean(parts)
+
+
+def _mom_score(f: dict[str, float]) -> float | None:
+    m = _mean([f[k] for k in ("chg_60", "chg_240", "macd_60") if k in f])
+    return math.tanh(m / 1.5) if m is not None else None
+
+
+def major_indices(symbols: list[str], market: str) -> list[int]:
+    """Rows that stand for the market: BTC and ETH in crypto, else the most liquid assets (the scan is sorted)."""
+    if market == "crypto":
+        idx = [i for i, s in enumerate(symbols) if crypto_base({}, str(s or "")) in MAJOR_BASES]
+        if idx:
+            return idx
+    return list(range(min(MAJORS_FALLBACK_N, len(symbols))))
+
+
+def classify_regime(ctx: dict[str, float]) -> str:
+    """trend_up | trend_down | range | volatile (the engine's vocabulary) from the scan context."""
+    if ctx.get("ctx_majors_vol", 0.0) >= REGIME_VOL_LOG or abs(ctx.get("ctx_mean_4h", 0.0)) >= REGIME_SHOCK_4H:
+        return "volatile"
+    trend = 0.5 * ctx.get("ctx_majors_trend", 0.0) + 0.5 * ctx.get("ctx_breadth_1d", 0.0)
+    if trend >= REGIME_TREND:
+        return "trend_up"
+    if trend <= -REGIME_TREND:
+        return "trend_down"
+    return "range"
+
+
+def market_context(feats_list: list[dict[str, float]], symbols: list[str], market: str) -> dict[str, float]:
+    """Context of one scan from its rows' features: breadth (share of assets up over 1h / 4h / 1d mapped to −1..1),
+    mean and dispersion of the 4 h move, trend / momentum / volatility of the majors and the regime one-hot. Built
+    from the features only, so the offline replay rebuilds the same values."""
+    ctx: dict[str, float] = {}
+
+    def breadth(key: str) -> float | None:
+        vals = [f[key] for f in feats_list if key in f]
+        if len(vals) < MIN_CONTEXT_ROWS:
+            return None
+        return 2.0 * sum(1 for v in vals if v > 0) / len(vals) - 1.0
+
+    for name, key in (("ctx_breadth_1h", "chg_60"), ("ctx_breadth_4h", "chg_240"), ("ctx_breadth_1d", "chg_d")):
+        v = breadth(key)
+        if v is not None:
+            ctx[name] = round(v, 4)
+    chg = [f["chg_240"] for f in feats_list if "chg_240" in f]
+    if len(chg) >= MIN_CONTEXT_ROWS:
+        arr = np.asarray(chg, dtype=float)
+        ctx["ctx_mean_4h"] = round(float(arr.mean()), 4)
+        ctx["ctx_dispersion"] = round(_clip(math.log(max(float(arr.std()), 0.05))), 4)
+    majors = [feats_list[i] for i in major_indices(symbols, market) if i < len(feats_list)]
+    for name, fn in (("ctx_majors_trend", _trend_score), ("ctx_majors_mom", _mom_score)):
+        m = _mean([v for v in (fn(f) for f in majors) if v is not None])
+        if m is not None:
+            ctx[name] = round(float(clamp(m, -1.0, 1.0)), 4)
+    vols = [v for v in (_vol_d(f) for f in majors) if v is not None and v > 0]
+    if vols:
+        ctx["ctx_majors_vol"] = round(_clip(math.log(float(np.median(vols)) / 3.0)), 4)
+    regime = classify_regime(ctx)
+    for r in REGIMES:
+        ctx[f"reg_{r}"] = 1.0 if r == regime else 0.0
+    return ctx
+
+
+def context_regime(ctx: dict[str, float] | None) -> str | None:
+    for r in REGIMES:
+        if (ctx or {}).get(f"reg_{r}", 0.0) >= 0.5:
+            return r
+    return None
+
+
+def context_text(ctx: dict[str, float] | None, market: str) -> str | None:
+    """'Mercado: 62 % de los activos al alza en 4 h · BTC/ETH en tendencia alcista · régimen alcista'."""
+    if not ctx:
+        return None
+    parts: list[str] = []
+    b4 = ctx.get("ctx_breadth_4h")
+    if b4 is not None:
+        parts.append(f"{fmt_prob((b4 + 1.0) / 2.0)} de los activos al alza en 4 h")
+    trend = ctx.get("ctx_majors_trend")
+    if trend is not None:
+        who = "BTC/ETH" if market == "crypto" else "los más líquidos"
+        word = "alcista" if trend >= 0.25 else "bajista" if trend <= -0.25 else "sin tendencia clara"
+        parts.append(f"{who} {'en tendencia ' + word if word != 'sin tendencia clara' else word}")
+    regime = context_regime(ctx)
+    if regime:
+        parts.append(f"régimen {REGIME_TEXT[regime]}")
+    return ("Mercado: " + " · ".join(parts)) if parts else None
+
+
+# ----------------------------------------------------------------------------- scanner model v2: building blocks
+
+MODEL_VERSION = 2
+DIR_COMMON = list(CONTEXT_NAMES)  # scan-level inputs of the direction model (+ its bias)
+DIR_ROW = [n for n in FEATURE_NAMES if n != "volatility"] + ["beta_x_mkt"]  # cross-sectional (demeaned) inputs
+MAG_COMMON = ["ctx_majors_vol", "ctx_dispersion", "ctx_abs_mean_4h"] + [f"reg_{r}" for r in REGIMES]
+MAG_ROW = ["mag_prior", "atr_log", "bbw_log", "liq_log", "rel_vol", "abs_chg_60", "abs_chg_240", "abs_chg_d",
+           "abs_bb_pos"]
+MAG_RAW = ("mag_prior",)  # absolute input (not demeaned): each asset's own volatility prior
+# the row inputs whose scan mean the model uses (beta_x_mkt is built from vol_rel)
+MEAN_INPUTS = tuple(dict.fromkeys(["vol_rel" if n == "beta_x_mkt" else n for n in DIR_ROW] + MAG_ROW))
+DERIVED_LABELS = {
+    "beta_x_mkt": "Volatilidad relativa × movimiento del mercado 4h",
+    "ctx_abs_mean_4h": "Tamaño del movimiento del mercado 4h",
+    "mag_prior": "Movimiento esperado por la volatilidad",
+    "abs_chg_60": "Tamaño del cambio 1h",
+    "abs_chg_240": "Tamaño del cambio 4h",
+    "abs_chg_d": "Tamaño del cambio diario",
+    "abs_bb_pos": "Distancia al centro de Bollinger",
+}
+MAG_KAPPA = 0.5  # σ of the move over the horizon ≈ 0.5 × Volatility.D × √(horizon / 1 día) (measured on crypto scans)
+ROW_CAP = 50  # cross-sectional lessons per scan at most: assets of one sector still move together
+MIN_TIME_WEIGHT = 1.0 / 64.0
+COLD_LESSONS = 30.0  # independent market lessons (Σ Δt / horizon) before the scan-level part is fully trusted
+COLD_ROW_LESSONS = 1500.0  # cross-sectional lessons before the row part is fully trusted (≈ 30 windows × 50)
+CAL_MIN_ROWS = 300  # Platt recalibration applies only after this many resolved rows ...
+CAL_MIN_LESSONS = 3.0  # ... and this many independent horizon windows
+# While the row part is cold, the rule prior fills in for it, centred on the scan's median: only its cross-sectional
+# part (this asset vs. the typical asset of the scan) is used. Its market-wide tilt (every asset looks bearish after a
+# drop) is unvalidated market timing and is ignored: the market view comes only from the learned scan-level part,
+# which starts at zero.
+PRIOR_REL_K = 1.0
+RECENT_SCANS = 96  # per-scan outcome summaries kept for the "acierto reciente" line (≈ 1 day at 15 min)
+CONTEXT_MAX_AGE_MS = 6 * 3600 * 1000  # quick reads use the last scan's context while it is this recent
+STRAGGLER_MIN_ROWS = 10  # rows of an already learned scan that resolve later: learned only in groups this large
+W_MAX = 4.0
+
+
+def _sigmoid_arr(z: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-np.clip(z, -30.0, 30.0)))
+
+
+def mag_prior_logit(vol_d: float | None, horizon_s: float) -> float | None:
+    """logit P(|move| > neutral band) for a Gaussian move with σ = MAG_KAPPA × vol_d × √(horizon / 1 día)."""
+    if vol_d is None or vol_d <= 0:
+        return None
+    sigma = MAG_KAPPA * vol_d * math.sqrt(max(float(horizon_s), 60.0) / 86400.0)
+    p = math.erfc(flat_band_pct(horizon_s) / (sigma * math.sqrt(2.0)))
+    p = clamp(p, 0.02, 0.98)
+    return math.log(p / (1.0 - p))
+
+
+def decide_direction(p_up: float, p_move: float) -> int:
+    """The outcome with the highest expected hit rate under the judge rule: up is right when the return is > 0
+    (P = p_up), down when < 0 (1 − p_up), neutral when |return| ≤ band (1 − p_move)."""
+    if 1.0 - p_move > max(p_up, 1.0 - p_up):
+        return 0
+    return 1 if p_up >= 0.5 else -1
+
+
+class StructuredLogit:
+    """Online logistic model split into a scan-level part (bias + context, identical for every row of one scan) and a
+    row-level part (the asset's inputs; demeaned ones are relative to the scan's mean). One scan update:
+
+    - the scan-level weights learn from the scan's mean error: one market move is ONE lesson, not one per asset;
+    - the row weights learn from the cross-sectional deviations (e_i − ē)(x_i − x̄): one lesson per row, at most
+      ROW_CAP per scan;
+    - every lesson is weighted by the time it adds (Δt / horizon): scans 15 min apart judged over 4 h windows are
+      mostly the same move;
+    - plain SGD (no step that decays to zero), L2 towards an anchor and forgetting of the active scan-level weights
+      (half-life in lessons): a stale market bias fades and adaptation to a new regime does not stall.
+    """
+
+    def __init__(self, common: list[str], row: list[str], *, raw: tuple[str, ...] = (), anchor: dict | None = None,
+                 lr_common: float = 0.2, lr_row: float = 0.004, l2_common: float = 0.1, l2_row: float = 0.2,
+                 half_life: float = 15.0):
+        self.common = list(common)
+        self.row = list(row)
+        self.raw = tuple(raw)
+        self.anchor_r = np.array([float((anchor or {}).get(n, 0.0)) for n in self.row])
+        self.wc = np.zeros(len(self.common))
+        self.wr = self.anchor_r.copy()
+        self.b = 0.0
+        self.lr_c, self.lr_r = float(lr_common), float(lr_row)
+        self.l2_c, self.l2_r = float(l2_common), float(l2_row)
+        self.half_life = float(half_life)
+        self.lessons = 0.0
+        self.row_lessons = 0.0
+
+    def parts(self, c: np.ndarray, r: np.ndarray) -> tuple[float, np.ndarray]:
+        """(scan-level logit, row-level logits)."""
+        return self.b + float(self.wc @ c), r @ self.wr
+
+    def step(self, c: np.ndarray, r: np.ndarray, y: np.ndarray, lessons_c: float, lessons_r: float) -> np.ndarray:
+        zc, zr = self.parts(c, r)
+        p = _sigmoid_arr(zc + zr)
+        e = p - y
+        eb = float(e.mean())
+        rb = r.mean(axis=0)
+        g_cross = ((e - eb)[:, None] * (r - rb)).mean(axis=0)
+        # Scan-level inputs that are 0 in this scan (another regime's intercept) are neither regularised nor forgotten:
+        # each regime keeps what it learned until it comes back.
+        active = c != 0
+        self.b -= self.lr_c * lessons_c * (eb + self.l2_c * self.b)
+        self.wc -= self.lr_c * lessons_c * (eb * c + self.l2_c * self.wc * active)
+        self.wr -= self.lr_r * (lessons_c * eb * rb + lessons_r * (g_cross + self.l2_r * (self.wr - self.anchor_r)))
+        keep = 0.5 ** (lessons_c / self.half_life)
+        self.b *= keep
+        self.wc[active] *= keep
+        np.clip(self.wc, -W_MAX, W_MAX, out=self.wc)
+        np.clip(self.wr, -W_MAX, W_MAX, out=self.wr)
+        self.b = float(clamp(self.b, -W_MAX, W_MAX))
+        self.lessons += lessons_c
+        self.row_lessons += lessons_r
+        return p
+
+    def weights(self) -> dict[str, float]:
+        out = {n: float(w) for n, w in zip(self.common, self.wc)}
+        out.update({n: float(w) for n, w in zip(self.row, self.wr)})
+        return out
+
+    def to_state(self) -> dict:
+        return {"common": self.common, "row": self.row, "wc": [round(float(v), 6) for v in self.wc],
+                "wr": [round(float(v), 6) for v in self.wr], "b": round(self.b, 6),
+                "lessons": round(self.lessons, 5), "row_lessons": round(self.row_lessons, 4)}
+
+    def load(self, state: Any) -> None:
+        """Weights by name (a later change of the input lists keeps what still matches)."""
+        if not isinstance(state, dict):
+            return
+        for names, key, target in ((state.get("common") or [], "wc", self.wc), (state.get("row") or [], "wr", self.wr)):
+            values = state.get(key) or []
+            index = {n: i for i, n in enumerate(self.common if key == "wc" else self.row)}
+            for j, name in enumerate(names):
+                i = index.get(name)
+                if i is not None and j < len(values) and safe_float(values[j]) is not None:
+                    target[i] = float(clamp(float(values[j]), -W_MAX, W_MAX))
+        self.b = float(clamp(safe_float(state.get("b"), 0.0) or 0.0, -W_MAX, W_MAX))
+        self.lessons = max(float(safe_float(state.get("lessons"), 0.0) or 0.0), 0.0)
+        self.row_lessons = max(float(safe_float(state.get("row_lessons"), 0.0) or 0.0), 0.0)
+
+
+class Platt:
+    """Causal Platt recalibration p = σ(a·z + b) of one model key. Learned prequentially (each resolved scan is scored
+    with the current a, b before they learn from it) with the model's lesson weights (b: one lesson per scan; a: also
+    the cross-sectional part). Applied only after CAL_MIN_ROWS rows and CAL_MIN_LESSONS independent windows; until
+    then p = σ(z)."""
+
+    LR = 0.05
+    L2 = 0.05
+
+    def __init__(self) -> None:
+        self.a = 1.0
+        self.b = 0.0
+        self.rows = 0
+        self.lessons = 0.0
+
+    def active(self) -> bool:
+        return self.rows >= CAL_MIN_ROWS and self.lessons >= CAL_MIN_LESSONS
+
+    def prob(self, z: np.ndarray) -> np.ndarray:
+        return _sigmoid_arr(self.a * z + self.b if self.active() else z)
+
+    def update(self, z: np.ndarray, y: np.ndarray, lessons_c: float, lessons_r: float) -> None:
+        if not len(z):
+            return
+        p = _sigmoid_arr(self.a * z + self.b)
+        e = p - y
+        eb, zb = float(e.mean()), float(z.mean())
+        ga_cross = float(((e - eb) * (z - zb)).mean())
+        self.b -= self.LR * lessons_c * (eb + self.L2 * self.b)
+        self.a -= self.LR * (lessons_c * eb * zb + lessons_r * (ga_cross + self.L2 * (self.a - 1.0)))
+        self.a = float(clamp(self.a, 0.0, 2.0))
+        self.b = float(clamp(self.b, -2.0, 2.0))
+        self.rows += int(len(z))
+        self.lessons += float(lessons_c)
+
+    def to_state(self) -> dict:
+        return {"a": round(self.a, 6), "b": round(self.b, 6), "rows": self.rows, "lessons": round(self.lessons, 5)}
+
+    @classmethod
+    def from_state(cls, state: Any) -> "Platt":
+        cal = cls()
+        if isinstance(state, dict):
+            cal.a = float(clamp(safe_float(state.get("a"), 1.0) or 0.0, 0.0, 2.0))
+            cal.b = float(clamp(safe_float(state.get("b"), 0.0) or 0.0, -2.0, 2.0))
+            cal.rows = max(int(safe_float(state.get("rows"), 0) or 0), 0)
+            cal.lessons = max(float(safe_float(state.get("lessons"), 0.0) or 0.0), 0.0)
+        return cal
+
+
+@dataclass
+class LearnSample:
+    """One resolved scanner prediction handed to the model by the evaluator."""
+
+    key: str
+    feats: dict
+    up: int  # 1 when the return was > 0
+    label_time: int | None = None  # unix s of the target
+    created_ms: int | None = None  # the scan it belongs to
+    ret_pct: float | None = None
+    symbol: str = ""
+    direction: int | None = None  # the prediction that was recorded
+    correct: int | None = None  # its verdict (1 / 0)
+
+
+def as_sample(item: Any) -> LearnSample | None:
+    """LearnSample from a LearnSample, a dict or the legacy tuple (model_key, features, label_up, label_time_s)."""
+    if isinstance(item, LearnSample):
+        return item
+    if isinstance(item, dict) and item.get("key"):
+        names = LearnSample.__dataclass_fields__
+        return LearnSample(**{k: v for k, v in item.items() if k in names})
+    if isinstance(item, (tuple, list)) and len(item) >= 4:
+        key, feats, label, label_time = item[:4]
+        lt = safe_float(label_time)
+        return LearnSample(key=str(key), feats=dict(feats or {}), up=1 if label else 0,
+                           label_time=int(lt) if lt is not None else None)
+    return None
+
+
+@dataclass
+class Batch:
+    """Inputs of one scan (or of single rows read with a remembered scan context)."""
+
+    inputs: list[dict]
+    ctx: dict
+    c_dir: np.ndarray
+    r_dir: np.ndarray
+    c_mag: np.ndarray
+    r_mag: np.ndarray
+    prior: np.ndarray
+    prior_center: float  # median rule prior of the scan (0 for an asset read on its own)
+    means: dict[str, float]
+
+
+def column_means(inputs: list[dict], names: tuple[str, ...] | None = None) -> dict[str, float]:
+    """Mean of every input over the rows that have it (`names`: only these inputs; their values are finite floats,
+    as `ScannerModel.row_inputs` builds them)."""
+    if names is not None:
+        out: dict[str, float] = {}
+        for k in names:
+            total, count = 0.0, 0
+            for x in inputs:
+                v = x.get(k)
+                if v is not None:
+                    total += v
+                    count += 1
+            if count:
+                out[k] = total / count
+        return out
+    sums: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for x in inputs:
+        for k, v in x.items():
+            if isinstance(v, (int, float)) and math.isfinite(v):
+                sums[k] = sums.get(k, 0.0) + float(v)
+                counts[k] = counts.get(k, 0) + 1
+    return {k: sums[k] / counts[k] for k in sums}
+
+
+def _finite_dict(feats: dict | None) -> dict[str, float]:
+    """The finite numeric values of a feature dict as floats (fast path for floats, safe_float for the rest)."""
+    out: dict[str, float] = {}
+    for k, v in (feats or {}).items():
+        if v.__class__ is float:
+            if math.isfinite(v):
+                out[k] = v
+        else:
+            f = safe_float(v)
+            if f is not None:
+                out[k] = f
+    return out
+
+
+def _horizon_text(horizon_s: float) -> str:
+    h = float(horizon_s)
+    if h >= 86400 and h % 86400 == 0:
+        n = int(h // 86400)
+        return f"{n} {_plural(n, 'día', 'días')}"
+    if h >= 3600:
+        return f"{fmt_num(h / 3600.0, 0 if h % 3600 == 0 else 1)} h"
+    return f"{int(h // 60)} min"
+
+
+class ScannerModel:
+    """Scanner model v2 of one key "market|tf|horizon_s": direction (StructuredLogit + Platt), magnitude
+    (StructuredLogit with a volatility prior + Platt), the context of the last scan (for single-symbol reads) and a
+    per-scan summary of the recent verified outcomes. JSON-serialisable (model_state kind='scanner')."""
+
+    def __init__(self, key: str = "crypto|1h|14400"):
+        self.key = str(key)
+        self.market, self.tf, self.horizon_s = parse_model_key(self.key)
+        self.dir = StructuredLogit(DIR_COMMON, DIR_ROW, lr_common=0.3, half_life=12.0)
+        self.mag = StructuredLogit(MAG_COMMON, MAG_ROW, raw=MAG_RAW, anchor={"mag_prior": 1.0}, lr_common=0.3,
+                                   half_life=12.0)
+        self.cal_dir = Platt()
+        self.cal_mag = Platt()
+        self.updates = 0
+        self.scans = 0
+        self.skipped = 0
+        self.trained_until: int | None = None
+        self.last_learned_ms: int | None = None
+        self.memory: dict | None = None
+        self.recent: list[list[float]] = []
+
+    @property
+    def band_pct(self) -> float:
+        return flat_band_pct(self.horizon_s)
+
+    def alpha_common(self) -> float:
+        return min(self.dir.lessons / COLD_LESSONS, 1.0)
+
+    def alpha_row(self) -> float:
+        return min(self.dir.row_lessons / COLD_ROW_LESSONS, 1.0)
+
+    def blend_alpha(self) -> float:
+        return min(self.alpha_common(), self.alpha_row())
+
+    # ------------------------------------------------------------------ inputs and prediction
+
+    def row_inputs(self, feats: dict) -> dict:
+        x = _finite_dict(feats)
+        vd = _vol_d(x)
+        if vd is not None:
+            x["vol_rel"] = math.log(vd / 5.0)
+            prior = mag_prior_logit(vd, self.horizon_s)
+            if prior is not None:
+                x["mag_prior"] = prior
+        for k in ("chg_60", "chg_240", "chg_d", "bb_pos"):
+            if k in x:
+                x[f"abs_{k}"] = abs(x[k])
+        x["prior"] = rule_prior(x, self.tf)
+        return x
+
+    def batch(self, feats_list: list[dict], ctx: dict | None, means: dict | None = None, *,
+              absolute: bool = False) -> Batch:
+        """Model inputs of rows read together. Row inputs are relative to `means` (default: the rows' own column
+        means, i.e. the scan); `absolute` reads them as they are (a single asset with no scan to compare with)."""
+        ctx = _finite_dict(ctx)
+        inputs = [self.row_inputs(f) for f in feats_list]
+        if absolute:
+            means = {}
+        elif not means:
+            means = column_means(inputs, MEAN_INPUTS)
+        else:
+            means = dict(means)
+        base = 0.0 if absolute else None  # the reference of an input without a mean
+        n = len(inputs)
+        mom = math.tanh(ctx.get("ctx_mean_4h", 0.0))
+        r_dir = np.zeros((n, len(DIR_ROW)))
+        r_mag = np.zeros((n, len(MAG_ROW)))
+        default_prior = means.get("mag_prior", 0.0)
+        for i, x in enumerate(inputs):
+            for j, name in enumerate(DIR_ROW):
+                src = "vol_rel" if name == "beta_x_mkt" else name
+                v, mu = x.get(src), means.get(src, base)
+                if v is not None and mu is not None:
+                    r_dir[i, j] = (v - mu) * (mom if name == "beta_x_mkt" else 1.0)
+            for j, name in enumerate(MAG_ROW):
+                v = x.get(name)
+                mu = means.get(name, base)
+                if name in MAG_RAW:
+                    r_mag[i, j] = v if v is not None else default_prior
+                elif v is not None and mu is not None:
+                    r_mag[i, j] = v - mu
+        c_dir = np.array([ctx.get(name, 0.0) for name in DIR_COMMON])
+        ctx_mag = {**ctx, "ctx_abs_mean_4h": abs(ctx.get("ctx_mean_4h", 0.0))}
+        c_mag = np.array([ctx_mag.get(name, 0.0) for name in MAG_COMMON])
+        prior = np.array([x["prior"] for x in inputs]) if n else np.zeros(0)
+        if absolute:
+            center = 0.0
+        elif means.get("prior_center") is not None:
+            center = float(means["prior_center"])
+        else:
+            center = float(np.median(prior)) if n else 0.0
+        means["prior_center"] = center
+        return Batch(inputs, ctx, c_dir, r_dir, c_mag, r_mag, prior, center, means)
+
+    def predict(self, b: Batch) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(served direction logit, P(up), P(|move| > band)) per row of the batch: the learned scan-level part (the
+        market view, zero until it has learned) + the row part, blended with the cross-sectional rule prior while
+        the row part is cold; then the Platt recalibration once it has its minimum sample."""
+        zc, zr = self.dir.parts(b.c_dir, b.r_dir)
+        a_r = self.alpha_row()
+        z = zc + a_r * zr + (1.0 - a_r) * PRIOR_REL_K * (b.prior - b.prior_center)
+        p_up = np.clip(self.cal_dir.prob(z), 0.01, 0.99)
+        mc, mr = self.mag.parts(b.c_mag, b.r_mag)
+        p_move = np.clip(self.cal_mag.prob(mc + mr), 0.01, 0.99)
+        return z, p_up, p_move
+
+    # ------------------------------------------------------------------ learning
+
+    def _time_weight(self, created_ms: int | None) -> float:
+        if self.last_learned_ms is None or created_ms is None:
+            return 1.0
+        dt = (created_ms - self.last_learned_ms) / 1000.0
+        return float(clamp(dt / self.horizon_s, MIN_TIME_WEIGHT, 1.0))
+
+    def learn_scan(self, samples: list[LearnSample], batch: Batch | None = None) -> int:
+        """One resolved scan: prequential scoring (calibrators, recent summary), then the structured updates of both
+        models. Rows of an already learned scan that resolve later are learned only in groups of at least
+        STRAGGLER_MIN_ROWS (with the minimum weight). `batch` = the inputs of exactly these rows, in this order, when
+        the caller already built them (the offline replay); else they are rebuilt. Returns the rows learned."""
+        if not samples:
+            return 0
+        created = samples[0].created_ms
+        if created is None and samples[0].label_time is not None:
+            created = (int(samples[0].label_time) - self.horizon_s) * 1000
+        n = len(samples)
+        straggler = self.last_learned_ms is not None and created is not None and created <= self.last_learned_ms
+        if straggler and n < STRAGGLER_MIN_ROWS:
+            self.skipped += n
+            return 0
+        w = MIN_TIME_WEIGHT if straggler else self._time_weight(created)
+        if batch is not None and len(batch.inputs) == n:
+            b = batch
+        else:
+            feats_list = [s.feats or {} for s in samples]
+            first = feats_list[0]
+            ctx = {k: first[k] for k in CONTEXT_NAMES if k in first}
+            if context_regime(ctx) is None:  # rows stored without their context (v2 encoding): rebuilt from the scan
+                ctx = market_context(feats_list, [s.symbol for s in samples], self.market)
+            b = self.batch(feats_list, ctx)
+        y = np.array([1.0 if s.up else 0.0 for s in samples])
+        lessons_r = w * min(n, ROW_CAP)
+        z, _, _ = self.predict(b)
+        self.cal_dir.update(z, y, w, lessons_r)
+        self.dir.step(b.c_dir, b.r_dir, y, w, lessons_r)
+        idx = [i for i, s in enumerate(samples) if s.ret_pct is not None]
+        flat = -1
+        if idx:
+            band = self.band_pct
+            yb = np.array([1.0 if abs(float(samples[i].ret_pct)) > band else 0.0 for i in idx])
+            r_mag = b.r_mag[idx]
+            mc, mr = self.mag.parts(b.c_mag, r_mag)
+            lessons_m = w * min(len(idx), ROW_CAP)
+            self.cal_mag.update(mc + mr, yb, w, lessons_m)
+            self.mag.step(b.c_mag, r_mag, yb, w, lessons_m)
+            flat = int(len(idx) - yb.sum()) if len(idx) == n else -1
+        judged = [s.correct for s in samples if s.correct is not None]
+        hits = int(sum(1 for c in judged if c)) if len(judged) == n else -1
+        entry = [int(created or 0), n, hits, int(y.sum()), flat, round(w, 5)]
+        if straggler:  # part of a scan already counted: merged into its summary while it is still there
+            for i in range(len(self.recent) - 1, -1, -1):
+                prev = self.recent[i]
+                if prev[0] == entry[0]:
+                    self.recent[i] = [prev[0], prev[1] + n, prev[2] + hits if prev[2] >= 0 and hits >= 0 else -1,
+                                      prev[3] + entry[3], prev[4] + flat if prev[4] >= 0 and flat >= 0 else -1, prev[5]]
+                    break
+        else:
+            self.recent.append(entry)
+            del self.recent[:-RECENT_SCANS]
+            self.scans += 1
+        self.updates += n
+        if created is not None:
+            self.last_learned_ms = max(self.last_learned_ms or 0, int(created))
+        times = [int(s.label_time) for s in samples if s.label_time is not None]
+        if times:
+            self.trained_until = max(self.trained_until or 0, max(times))
+        return n
+
+    def remember(self, b: Batch, created_ms: int) -> None:
+        """Context and column means of the latest scan: single-symbol reads are placed in that market."""
+        keep = set(DIR_ROW) | set(MAG_ROW) | {"vol_rel", "prior_center"}
+        self.memory = {"t": int(created_ms), "ctx": {k: round(v, 4) for k, v in b.ctx.items()},
+                       "means": {k: round(v, 5) for k, v in b.means.items() if k in keep}}
+
+    def remembered(self, now: int) -> tuple[dict | None, dict | None, int | None]:
+        """(context if still recent, column means, age in ms) of the last scan."""
+        mem = self.memory if isinstance(self.memory, dict) else None
+        if not mem:
+            return None, None, None
+        age = max(0, int(now) - int(safe_float(mem.get("t"), 0) or 0))
+        ctx = mem.get("ctx") if age <= CONTEXT_MAX_AGE_MS else None
+        return ctx, mem.get("means") or None, age
+
+    # ------------------------------------------------------------------ honest status texts
+
+    def recent_summary(self) -> dict | None:
+        """Recorded hits of the recent resolved scans vs. the reference (always the most frequent outcome)."""
+        rows = [r for r in self.recent if r[2] >= 0 and r[4] >= 0 and r[1] > 0]
+        if not rows:
+            return None
+        n = int(sum(r[1] for r in rows))
+        up = int(sum(r[3] for r in rows))
+        options = [(up, "siempre «alcista»"), (n - up, "siempre «bajista»"), (int(sum(r[4] for r in rows)),
+                                                                           "siempre «neutral»")]
+        ref_hits, ref_label = max(options, key=lambda o: o[0])
+        return {"n": n, "hits": int(sum(r[2] for r in rows)), "ref_hits": int(ref_hits), "ref_label": ref_label,
+                "windows": float(sum(r[5] for r in rows))}
+
+    def status_text(self) -> str:
+        lessons = fmt_num(self.dir.lessons, 1)
+        if self.blend_alpha() < 1.0:
+            rules = ": se combina con reglas técnicas" if self.alpha_row() < 1.0 else ""
+            return (f"Modelo en aprendizaje ({lessons}/{COLD_LESSONS:.0f} ventanas de mercado independientes · "
+                    f"{fmt_num(self.updates, 0)} resultados){rules}")
+        cal = " · recalibrado (Platt)" if self.cal_dir.active() else ""
+        return (f"Modelo entrenado con {fmt_num(self.updates, 0)} resultados ({lessons} ventanas de mercado "
+                f"independientes){cal}")
+
+    def recent_text(self) -> str | None:
+        s = self.recent_summary()
+        if not s:
+            return None
+        n = s["n"]
+        text = (f"Acierto reciente {fmt_num(s['hits'], 0)} de {fmt_num(n, 0)} ({fmt_prob(s['hits'] / n)}) · "
+                f"referencia {fmt_prob(s['ref_hits'] / n)} ({s['ref_label']})")
+        if s["windows"] < MIN_INDEPENDENT_WINDOWS:
+            text += f" · solo {fmt_num(s['windows'], 1)} ventanas independientes: sin conclusión todavía"
+        return text
+
+    def weight_table(self) -> list[dict]:
+        """Learned direction weights (the asset's features, its volatility × market move and the market context)."""
+        w = self.dir.weights()
+        names = list(FEATURE_NAMES) + ["beta_x_mkt"] + list(CONTEXT_NAMES)
+        labels = {**FEATURE_LABELS, **dict(CONTEXT_FEATURES), **DERIVED_LABELS}
+        return sorted(({"name": n, "label": labels.get(n, n), "weight": round(w.get(n, 0.0), 6)} for n in names),
+                      key=lambda f: -abs(f["weight"]))
+
+    # ------------------------------------------------------------------ persistence
+
+    def to_state(self) -> dict:
+        return {
+            "version": MODEL_VERSION, "key": self.key, "dir": self.dir.to_state(), "mag": self.mag.to_state(),
+            "cal_dir": self.cal_dir.to_state(), "cal_mag": self.cal_mag.to_state(), "updates": self.updates,
+            "scans": self.scans, "skipped": self.skipped, "trained_until": self.trained_until,
+            "last_learned_ms": self.last_learned_ms, "memory": self.memory, "recent": self.recent,
+        }
+
+    @classmethod
+    def from_state(cls, state: Any, key: str | None = None) -> "ScannerModel":
+        """A v1 (OnlineLogit) state starts a fresh v2 model: its weights were learned from the raw, correlated rows.
+        The history of its predictions stays in the statistics."""
+        st = state if isinstance(state, dict) else {}
+        model = cls(key or st.get("key") or "crypto|1h|14400")
+        if int(safe_float(st.get("version"), 1) or 1) < MODEL_VERSION:
+            return model
+        model.dir.load(st.get("dir"))
+        model.mag.load(st.get("mag"))
+        model.cal_dir = Platt.from_state(st.get("cal_dir"))
+        model.cal_mag = Platt.from_state(st.get("cal_mag"))
+        model.updates = int(safe_float(st.get("updates"), 0) or 0)
+        model.scans = int(safe_float(st.get("scans"), 0) or 0)
+        model.skipped = int(safe_float(st.get("skipped"), 0) or 0)
+        for attr in ("trained_until", "last_learned_ms"):
+            v = safe_float(st.get(attr))
+            setattr(model, attr, int(v) if v is not None else None)
+        model.memory = st.get("memory") if isinstance(st.get("memory"), dict) else None
+        recent = []
+        for item in st.get("recent") or []:
+            if isinstance(item, (list, tuple)) and len(item) == 6 and all(safe_float(v) is not None for v in item):
+                recent.append([int(item[0]), int(item[1]), int(item[2]), int(item[3]), int(item[4]), float(item[5])])
+        model.recent = recent[-RECENT_SCANS:]
+        return model
+
+
+MIN_INDEPENDENT_WINDOWS = 30  # no conclusion about skill with fewer independent horizon windows (n ≥ 30 rule)
+
+
+async def train_scanner_models(db: Any, samples: list[Any], models: dict[str, ScannerModel] | None = None
+                               ) -> dict[str, ScannerModel]:
+    """Group resolved samples by model key and scan (oldest first), learn each scan once and save the touched
+    models. `models` is the caller's cache (ScannerService) or None (loaded from the database)."""
+    cache = models if models is not None else {}
+    groups: dict[str, dict[int, list[LearnSample]]] = {}
+    for item in samples:
+        s = as_sample(item)
+        if s is None:
+            continue
+        created = s.created_ms
+        if created is None:
+            _, _, horizon = parse_model_key(s.key)
+            created = (int(s.label_time) - horizon) * 1000 if s.label_time is not None else 0
+        groups.setdefault(s.key, {}).setdefault(int(created), []).append(s)
+    touched: dict[str, ScannerModel] = {}
+    for key, by_scan in groups.items():
+        model = cache.get(key)
+        if model is None:
+            model = cache[key] = await load_scanner_model(db, key)
+        for created in sorted(by_scan):
+            for s in by_scan[created]:
+                if s.created_ms is None:
+                    s.created_ms = created
+            model.learn_scan(by_scan[created])
+        touched[key] = model
+    for key, model in touched.items():
+        await save_scanner_model(db, key, model)
+    return touched
 
 
 # ----------------------------------------------------------------------------- evaluation of one row
@@ -463,6 +1336,8 @@ class QuickEval:
     model_updates: int
     blend: float
     reasons_meta: dict[str, Any] = field(default_factory=dict)
+    prob_move: float | None = None  # v2: P(|move| > neutral band)
+    direction: int = 0  # the recorded prediction: 1 up, -1 down, 0 neutral
 
 
 def _directional_signals(feats: dict[str, float]) -> list[float]:
@@ -475,12 +1350,15 @@ def evaluate_features(
     completeness: float,
     tf: str,
     model: OnlineLogit | None,
+    x: np.ndarray | None = None,
+    prior: float | None = None,
 ) -> tuple[float, float, float, float]:
-    """(prob_up, score, confidence, blend_alpha) from features, the learned model and the rule prior."""
-    prior = rule_prior(feats, tf)
+    """(prob_up, score, confidence, blend_alpha) from features, the learned model and the rule prior (legacy v1
+    reading). `x` = model.vector(feats) and `prior` = rule_prior(feats, tf) when the caller already has them."""
+    prior = rule_prior(feats, tf) if prior is None else prior
     p_prior = 0.5 + 0.25 * prior
     alpha = model.blend_alpha() if model is not None else 0.0
-    p_model = model.predict(model.vector(feats)) if model is not None else 0.5
+    p_model = model.predict(model.vector(feats) if x is None else x) if model is not None else 0.5
     p = alpha * p_model + (1.0 - alpha) * p_prior
     p = float(clamp(p, 0.01, 0.99))
     score = 2.0 * p - 1.0
@@ -581,7 +1459,11 @@ def build_reasons(row: dict, feats: dict[str, float], tf: str, score: float, mod
     return reasons
 
 
-def evaluate_row(row: dict, tf: str, model: OnlineLogit | None) -> QuickEval | None:
+def evaluate_row(row: dict, tf: str, model: "ScannerModel | OnlineLogit | None",
+                 now: int | None = None) -> QuickEval | None:
+    """One row: the v2 model (placed in the market with the context of its last scan) or the legacy v1 reading."""
+    if isinstance(model, ScannerModel):
+        return evaluate_single(row, model, now if now is not None else now_ms())
     price = _f(row, "close")
     if price is None or price <= 0:
         return None
@@ -603,6 +1485,130 @@ def evaluate_row(row: dict, tf: str, model: OnlineLogit | None) -> QuickEval | N
         model_updates=model.updates if model is not None else 0,
         blend=alpha,
     )
+
+
+# ----------------------------------------------------------------------------- evaluation with the v2 model
+
+DIRECTION_ACTION = {1: "BUY", -1: "SELL", 0: "WAIT"}
+MAX_SHALLOW_REASONS = 9
+
+
+def _prepare_rows(rows: list[dict]) -> list[tuple[dict, dict, float]]:
+    """(row, base features + extras, completeness) of the rows with a price and at least one feature."""
+    out = []
+    for row in rows:
+        price = _f(row, "close")
+        if price is None or price <= 0:
+            continue
+        feats, completeness = extract_features(row)
+        if completeness <= 0:
+            continue
+        feats.update(extract_extras(row))
+        out.append((row, feats, completeness))
+    return out
+
+
+def _confidence_v2(direction: int, p_up: float, p_move: float, feats: dict, completeness: float,
+                   model: ScannerModel) -> float:
+    """Strength of the chosen outcome (its expected hit rate above 50 %) × agreement of the technical signals ×
+    completeness × maturity of the model."""
+    q = (1.0 - p_move) if direction == 0 else (p_up if direction > 0 else 1.0 - p_up)
+    strength = clamp((q - 0.5) * 5.0, 0.0, 1.0)
+    if direction:
+        signs = _directional_signals(feats)
+        agreement = sum(1 for s in signs if s == direction) / len(signs) if signs else 0.5
+        agree = 0.4 + 0.6 * agreement
+    else:
+        agree = 0.7
+    maturity = 0.6 + 0.4 * model.alpha_common()
+    return float(clamp(strength * agree * math.sqrt(max(completeness, 0.0)) * maturity, 0.0, 1.0))
+
+
+def build_reasons_v2(row: dict, feats: dict, direction: int, p_up: float, p_move: float, model: ScannerModel,
+                     ctx: dict | None, *, ctx_note: str | None = None, max_for: int = 4,
+                     max_against: int = 2) -> list[str]:
+    cands = _reason_candidates(row, feats, model.tf)
+    band = f"±{fmt_num(model.band_pct, 2)} %"
+    horizon = _horizon_text(model.horizon_s)
+    reasons: list[str] = []
+    if direction == 0:
+        reasons.append(f"Movimiento esperado pequeño: P(moverse más de {band} en {horizon}) {fmt_prob(p_move)} → "
+                       "predicción neutral (acierta si el precio queda dentro de esa banda)")
+        reasons += [c[2] for c in sorted(cands, key=lambda c: -c[1])[:3]]
+    else:
+        favor = sorted((c for c in cands if c[0] * direction > 0), key=lambda c: -c[1])
+        against = sorted((c for c in cands if c[0] * direction < 0), key=lambda c: -c[1])
+        reasons += [c[2] for c in favor[:max_for]]
+        reasons += [f"En contra: {c[2]}" for c in against[:max_against]]
+        reasons.append(f"P↑ {fmt_prob(p_up)} en {horizon} · P(moverse más de {band}) {fmt_prob(p_move)}")
+    tail: list[str] = []
+    text = context_text(ctx, model.market)
+    if text:
+        tail.append(text + (f" ({ctx_note})" if ctx_note else ""))
+    elif ctx_note:
+        tail.append(f"Mercado: {ctx_note}")
+    tail.append(model.status_text())
+    recent = model.recent_text()
+    if recent:
+        tail.append(recent)
+    return reasons[: max(MAX_SHALLOW_REASONS - len(tail), 1)] + tail
+
+
+def _quick_eval(row: dict, feats: dict, completeness: float, model: ScannerModel, p_up: float, p_move: float,
+                ctx: dict | None, ctx_note: str | None) -> QuickEval:
+    direction = decide_direction(p_up, p_move)
+    reasons = build_reasons_v2(row, feats, direction, p_up, p_move, model, ctx, ctx_note=ctx_note)
+    return QuickEval(
+        score=round(2.0 * p_up - 1.0, 4),
+        prob_up=round(p_up, 4),
+        action=DIRECTION_ACTION[direction],
+        confidence=round(_confidence_v2(direction, p_up, p_move, feats, completeness, model), 4),
+        rating=primary_rating(row, model.tf),
+        price=_f(row, "close"),
+        reasons=reasons,
+        features={k: round(v, 5) for k, v in feats.items()},
+        completeness=completeness,
+        model_updates=model.updates,
+        blend=model.blend_alpha(),
+        prob_move=round(p_move, 4),
+        direction=direction,
+    )
+
+
+def evaluate_scan(rows: list[dict], model: ScannerModel) -> tuple[list[tuple[dict, QuickEval]], dict, Batch | None]:
+    """Every valid row of one scan read together: the scan's context and column means place each asset in its
+    market. Returns ([(row, QuickEval)], context, batch)."""
+    prepared = _prepare_rows(rows)
+    if not prepared:
+        return [], {}, None
+    symbols = [str(r.get("symbol") or "").upper() for r, _, _ in prepared]
+    feats_list = [f for _, f, _ in prepared]
+    ctx = market_context(feats_list, symbols, model.market)
+    b = model.batch(feats_list, ctx)
+    _, p_up, p_move = model.predict(b)
+    out = [(row, _quick_eval(row, f, comp, model, float(p_up[i]), float(p_move[i]), ctx, None))
+           for i, (row, f, comp) in enumerate(prepared)]
+    return out, ctx, b
+
+
+def evaluate_single(row: dict, model: ScannerModel, now: int) -> QuickEval | None:
+    """One symbol read with the context and column means of the market's last scan; without any scan yet the asset
+    is read on its own (absolute values) and the reasons say there is no market context."""
+    prepared = _prepare_rows([row])
+    if not prepared:
+        return None
+    row, feats, comp = prepared[0]
+    ctx, means, age = model.remembered(now)
+    if ctx is not None:
+        note = f"contexto del último escaneo, {_age_text(age / 1000.0)}"
+    elif age is not None:
+        note = f"sin escaneo reciente del mercado en {model.tf} (el último, {_age_text(age / 1000.0)})"
+    else:
+        # the context is kept per model key (market, timeframe and horizon): a 4 h read has none from the 1 h scans
+        note = f"sin escaneos de este mercado en {model.tf} todavía: se lee el activo sin contexto"
+    b = model.batch([feats], ctx or {}, means, absolute=means is None)
+    _, p_up, p_move = model.predict(b)
+    return _quick_eval(row, feats, comp, model, float(p_up[0]), float(p_move[0]), ctx or {}, note)
 
 
 # ----------------------------------------------------------------------------- local fallback (candles)
@@ -807,7 +1813,7 @@ class ScannerService:
         self._tasks: set[asyncio.Task] = set()
         self._scan_lock = asyncio.Lock()
         self._model_lock = asyncio.Lock()
-        self._models: dict[str, OnlineLogit] = {}
+        self._models: dict[str, ScannerModel] = {}
         self._quick_cache = TTLCache(QUICK_TTL_S, maxsize=1024)
         self._column_mode: dict[str, tuple[int, float]] = {}
         self._running_runs: dict[tuple[str, str], int] = {}
@@ -822,7 +1828,7 @@ class ScannerService:
         try:
             rows = await self.rt.db.fetchall("SELECT key, state FROM model_state WHERE kind='scanner'")
             for row in rows:
-                self._models[row["key"]] = OnlineLogit.from_state(json_loads(row["state"]))
+                self._models[row["key"]] = ScannerModel.from_state(json_loads(row["state"]), key=row["key"])
             last = await self.rt.db.fetchval("SELECT MAX(started_at) FROM scan_runs WHERE status='done'")
             self._last_run_ms = int(last) if last else None
             # runs left 'running' by a previous process can never finish
@@ -883,27 +1889,25 @@ class ScannerService:
     def horizon_s(self) -> int:
         return int(max(60, int(self._settings("scanner.horizon_s", 14400) or 14400)))
 
-    def get_model_sync(self, key: str) -> OnlineLogit | None:
+    def get_model_sync(self, key: str) -> ScannerModel | None:
         return self._models.get(key)
 
-    async def get_model(self, key: str) -> OnlineLogit:
+    async def get_model(self, key: str) -> ScannerModel:
         model = self._models.get(key)
         if model is None:
             model = await load_scanner_model(self.rt.db, key)
             self._models[key] = model
         return model
 
-    async def learn_batch(self, samples: list[tuple[str, dict, int, int | None]]) -> dict[str, OnlineLogit]:
-        """SGD steps on the scanner models: samples = [(model_key, features, label_up, label_time_s)]."""
-        touched: dict[str, OnlineLogit] = {}
+    async def learn_batch(self, samples: list[Any]) -> dict[str, ScannerModel]:
+        """Learn resolved predictions: LearnSample items (or legacy (model_key, features, label_up, label_time_s)
+        tuples). Grouped by model key and scan, oldest scan first: each scan is one structured update."""
         async with self._model_lock:
-            for key, feats, label, label_time in samples:
-                model = await self.get_model(key)
-                model.update(model.vector(feats or {}), 1 if label else 0, label_time)
-                touched[key] = model
-            for key, model in touched.items():
-                await save_scanner_model(self.rt.db, key, model)
-        return touched
+            return await train_scanner_models(self.rt.db, samples, self._models)
+
+    async def _save_model(self, key: str, model: ScannerModel) -> None:
+        async with self._model_lock:
+            await save_scanner_model(self.rt.db, key, model)
 
     # ------------------------------------------------------------------ scanning
 
@@ -1024,10 +2028,8 @@ class ScannerService:
         target = created + horizon * 1000
         results: list[dict] = []
         pred_rows: list[tuple] = []
-        for row in rows:
-            ev = evaluate_row(row, tf, model)
-            if ev is None:
-                continue
+        evals, ctx, batch = evaluate_scan(rows, model)
+        for row, ev in evals:
             symbol = str(row.get("symbol")).upper()
             results.append(
                 {
@@ -1057,10 +2059,9 @@ class ScannerService:
                     "opportunity": False,
                 }
             )
-            direction = 1 if ev.action == "BUY" else -1 if ev.action == "SELL" else 0
             pred_rows.append(
-                ("scanner", symbol, tf, key, created, target, ev.price, direction, ev.prob_up, ev.score,
-                 encode_features(ev.features))
+                ("scanner", symbol, tf, key, created, target, ev.price, ev.direction, ev.prob_up, ev.score,
+                 encode_features(ev.features, ctx))
             )
         if pred_rows:
             await self.rt.db.executemany(
@@ -1068,6 +2069,13 @@ class ScannerService:
                 "prob_up, score, features) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 pred_rows,
             )
+        if batch is not None:  # context of this scan: single-symbol reads of this market are placed in it
+            model.remember(batch, created)
+            try:
+                await self._save_model(key, model)
+            except Exception as exc:
+                if self._log.should_log("model-save", 300):
+                    self._emit("warn", f"No se pudo guardar el contexto del escáner: {exc}")
         self._publish({"event": "progress", "run_id": run_id, "progress": 0.5 if deep else 0.9,
                        "message": f"{len(results)} activos evaluados"})
         deep_done = 0
@@ -1075,7 +2083,7 @@ class ScannerService:
             deep_done = await self._deep(run_id, results, tf, deep_top, market)
         rank_rows(results)
         await self._persist_results(run_id, results)
-        summary = self._summary(market, tf, results, deep and deep_done > 0)
+        summary = self._summary(market, tf, results, deep and deep_done > 0, context_regime(ctx))
         await self._finish_run(run_id, "done", summary, len(results))
         self._last_run_ms = created
         self._publish({"event": "done", "run_id": run_id, "progress": 1.0, "message": summary})
@@ -1094,10 +2102,11 @@ class ScannerService:
         if nexus is None or hub is None:
             self._emit("warn", "Modo profundo no disponible: el motor NEXUS no está cargado")
             return 0
+        # Directional reads first; neutral ones (a move smaller than the band is expected) only fill the remaining
+        # slots, so a quiet market still gets its strongest candidates analysed (NEXUS then picks the direction).
         candidates = sorted(
-            [r for r in results if r["action"] != "WAIT"],
-            key=lambda r: abs(r["score"]) * (0.5 + 0.5 * r["confidence"]),
-            reverse=True,
+            results,
+            key=lambda r: (r["action"] == "WAIT", -abs(r["score"]) * (0.5 + 0.5 * r["confidence"])),
         )
         chosen: list[dict] = []
         for row in candidates[: deep_top * 4]:
@@ -1178,7 +2187,7 @@ class ScannerService:
         )
 
     @staticmethod
-    def _summary(market: str, tf: str, results: list[dict], deep: bool) -> str:
+    def _summary(market: str, tf: str, results: list[dict], deep: bool, regime: str | None = None) -> str:
         n = len(results)
         head = f"Escaneo {market} {tf}: {n} {_plural(n, 'activo', 'activos')}"
         if deep:
@@ -1195,9 +2204,13 @@ class ScannerService:
             return f"{head} · ninguna oportunidad TOMAR: el filtro recomienda esperar"
         buys = sum(1 for r in results if r["action"] == "BUY")
         sells = sum(1 for r in results if r["action"] == "SELL")
-        best = results[0] if results else None
+        flats = n - buys - sells
+        best = next((r for r in results if r["action"] != "WAIT"), None)  # ranked: the strongest directional read
         best_txt = f" · mejor: {best['symbol']} (p↑ {fmt_prob(best['prob_up'])})" if best else ""
-        return f"{head} · {buys} alcistas · {sells} bajistas{best_txt}"
+        regime_txt = f" · régimen {REGIME_TEXT[regime]}" if regime in REGIME_TEXT else ""
+        return (f"{head} · {buys} {_plural(buys, 'alcista', 'alcistas')} · {sells} {_plural(sells, 'bajista', 'bajistas')}"
+                f" · {flats} {_plural(flats, 'neutral', 'neutrales')}"
+                f"{regime_txt}{best_txt}")
 
     # ------------------------------------------------------------------ queries
 
@@ -1271,7 +2284,7 @@ class ScannerService:
                 if rows:
                     horizon = self.horizon_s()
                     model = await self.get_model(model_key(market, tf, horizon))
-                    ev = evaluate_row(rows[0], tf, model)
+                    ev = evaluate_single(rows[0], model, now_ms())
                     if ev is not None:
                         result = {
                             "symbol": symbol, "tf": tf, "score": ev.score, "prob_up": ev.prob_up,
@@ -1300,27 +2313,42 @@ class ScannerService:
         return result
 
     def quick_score_rows(self, rows: list[dict], market: str | None = None, tf: str | None = None) -> list[tuple[float, float] | None]:
-        """(score, prob_up) per TradingView row (used by /api/universe). Sync, in-memory model only."""
+        """(score, prob_up) per TradingView row (used by /api/universe). Sync, in-memory model only: the rows are read
+        with the context and column means of the market's last scan (or among themselves when there is none)."""
         try:
             tf_n = normalize_tf(tf or self._settings("scanner.tf", "1h"))
         except ValueError:
             tf_n = "1h"
         key = model_key((market or "crypto").lower(), tf_n, self.horizon_s())
-        model = self._models.get(key)
-        out: list[tuple[float, float] | None] = []
-        for row in rows or []:
+        model = self._models.get(key) or ScannerModel(key)
+        out: list[tuple[float, float] | None] = [None] * len(rows or [])
+        valid: list[int] = []
+        feats_list: list[dict] = []
+        for i, row in enumerate(rows or []):
             try:
                 if not isinstance(row, dict) or (_f(row, "close") or 0) <= 0:
-                    out.append(None)
                     continue
                 feats, completeness = extract_features(row)
                 if completeness <= 0:
-                    out.append(None)
                     continue
-                p, score, _, _ = evaluate_features(feats, completeness, tf_n, model)
-                out.append((round(score, 4), round(p, 4)))
+                feats.update(extract_extras(row))
+                valid.append(i)
+                feats_list.append(feats)
             except Exception:
-                out.append(None)
+                continue
+        if not valid:
+            return out
+        try:
+            ctx, means, _ = model.remembered(now_ms())
+            if ctx is None:
+                symbols = [str((rows[i] or {}).get("symbol") or "").upper() for i in valid]
+                ctx = market_context(feats_list, symbols, model.market)
+            _, p_up, _ = model.predict(model.batch(feats_list, ctx, means))
+            for j, i in enumerate(valid):
+                p = float(p_up[j])
+                out[i] = (round(2.0 * p - 1.0, 4), round(p, 4))
+        except Exception:
+            pass
         return out
 
     # ------------------------------------------------------------------ background loop
@@ -1471,11 +2499,15 @@ def result_row(rec: dict) -> dict:
 
 
 def rank_rows(rows: list[dict]) -> None:
-    """Oportunidades TOMAR first (by gate score), then |score| × confidence."""
+    """Oportunidades TOMAR first (by gate score), then the directional reads and last the neutral ones (ESPERAR: a
+    move smaller than the neutral band is expected), each by |score| × confidence. A confident neutral call can have
+    a large |score| (P↑ 70 % with P(move inside the band) 80 %), but it is not a candidate: it never heads the table
+    or the run summary's "mejor"."""
 
     def key(r: dict) -> tuple:
         take = is_opportunity(r)
-        return (0 if take else 1, -(r.get("gate_score") or 0.0) if take else 0.0,
+        neutral = not take and r.get("action") == "WAIT"
+        return (0 if take else 1, -(r.get("gate_score") or 0.0) if take else 0.0, 1 if neutral else 0,
                 -abs(r.get("score") or 0.0) * (r.get("confidence") or 0.0))
 
     rows.sort(key=key)

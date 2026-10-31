@@ -6,6 +6,7 @@
 // Numbers are never NaN/Infinity on the wire: missing values are null.
 // All user-facing strings (labels, messages, reasons) are in Spanish.
 // =============================================================================
+import type { PaperOrder, PaperRisk } from './types-paper-orders'
 
 export type Timeframe = '1m' | '3m' | '5m' | '15m' | '30m' | '1h' | '2h' | '4h' | '6h' | '12h' | '1d' | '1w'
 export const TIMEFRAMES: Timeframe[] = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d', '1w']
@@ -64,6 +65,12 @@ export interface Quote {
   open: number | null
   ts: number // real time of this price (ms), not the time of the request
   stale?: boolean // true when the price is older than ~2 min: never show or use it as a live price
+  // Optional freshness fields (absent on older servers and on SIM quotes; see types-realtime.ts and
+  // components/markets/freshness.ts for how the UI words them):
+  source?: string // binance | okx | coinbase | kraken | kucoin | twelvedata | polygon | alphavantage | tradingview | cache
+  realtime?: boolean // true only when the source serves real-time data on the user's plan and the price is recent
+  delay_s?: number // delay of the price in seconds: announced by TradingView or measured for an API-key price
+  market_open?: boolean // as reported by the provider; false = the last price of a closed market
 }
 
 export interface MarketInfo {
@@ -682,6 +689,81 @@ export interface LearningSummary {
   timeline: { time: number; hit_rate: number; brier: number; n: number }[] // one point per UTC day (time = 00:00 UTC)
 }
 
+// GET /api/learning/skill?source=scanner|nexus&days=7&model_key= (days <= 0 = every stored row) -> SkillReport.
+// A prediction has three outcomes (up, down, neutral inside the flat band), so 50 % is NOT the chance level: the
+// reference is always predicting the most frequent outcome of the same rows, `chance` is the hit rate of the same mix
+// of calls if they were unrelated to the outcomes, and the Brier score is compared with climatology. 95 % intervals
+// are clustered by independent horizon windows; nothing is concluded below `min_windows` (30) of them.
+// Helpers and the UI live in components/brain/skill.ts.
+
+export type SkillVerdict = 'none' | 'insufficient' | 'no_edge' | 'better' | 'worse'
+export type OutcomeKind = 'up' | 'down' | 'flat'
+
+export interface SkillReference {
+  kind: OutcomeKind
+  label: string // "siempre «alcista»"
+  hits: number
+  accuracy: number
+}
+
+export interface SkillDirection {
+  direction: 1 | -1 | 0
+  label: string
+  n: number
+  hits: number
+  accuracy: number | null
+  base_rate: number | null // share of all rows whose outcome makes this call right
+}
+
+export interface SkillDaily {
+  time: number // UTC day (unix s) of the target
+  n: number
+  hit_rate: number
+  reference: number
+  reference_kind: OutcomeKind
+  brier: number
+  brier_ref: number
+}
+
+export interface SkillGroup {
+  id: string // "scanner:crypto|1h|14400" | "scanner" | "nexus" | "all"
+  label: string
+  source: string | null
+  model_key: string | null
+  n: number
+  hits: number
+  accuracy: number | null
+  windows: number // independent horizon windows
+  horizon: string | null
+  window?: string | null // length of one of those windows (a group that mixes horizons uses its longest one; >= 1 h)
+  outcomes: { up: number; down: number; flat: number }
+  reference: SkillReference | null
+  chance: number | null
+  skill_pp: number | null // accuracy − reference, percentage points
+  skill_ci: [number, number] | null
+  brier: number | null
+  brier_ref: number | null // climatology
+  bss: number | null // Brier skill score (1 − Brier / climatology)
+  bss_ci: [number, number] | null
+  ece_pp: number | null
+  reliability: number | null
+  resolution: number | null
+  by_direction: SkillDirection[]
+  daily: SkillDaily[]
+  verdict: SkillVerdict
+  verdict_text: string
+  brier_text: string | null
+}
+
+export interface SkillReport {
+  generated_at: number // ms
+  days: number | null
+  since: number | null // ms: first target time covered (null = every stored row)
+  min_windows: number
+  groups: SkillGroup[]
+  notes: string[]
+}
+
 // ----------------------------------------------------------------------------- PyChart scripting
 
 export interface ScriptMeta {
@@ -796,7 +878,8 @@ export interface Health {
   version: string
   uptime_s: number
   server_time: number
-  db: { path: string; size_bytes: number; dialect?: 'sqlite' | 'postgres' }
+  // schema_version: latest applied database migration (backend/app/migrations; optional, newer servers)
+  db: { path: string; size_bytes: number; dialect?: 'sqlite' | 'postgres'; schema_version?: number | null }
   // 'required' only in the anonymous liveness answer of cloud mode ({ok, version, auth, role, server_time}).
   auth?: 'none' | 'supabase' | 'required'
   // single = the only instance · leader = the active instance on a shared PostgreSQL · standby = waiting for the
@@ -818,6 +901,7 @@ export interface DbStats {
   path: string
   size_bytes: number
   tables: Record<string, number>
+  dialect?: 'sqlite' | 'postgres' // optional: newer servers
 }
 
 // ----------------------------------------------------------------------------- market conditions (macro semáforo)
@@ -834,8 +918,34 @@ export interface MacroEvent {
   impact: 'high' | 'medium' | 'low' | 'holiday'
   forecast: string | null
   previous: string | null
-  source: string // forexfactory | federalreserve
+  source: string // forexfactory | federalreserve | bls | bea | ecb | boe | boj
   countdown_s: number // seconds until the event (negative = already happened)
+}
+
+/** One source of the economic calendar (GET /api/macro/calendar `coverage.sources`). `live` = fetched from the source
+ *  (ForexFactory, BLS, BEA); otherwise a curated official schedule (FOMC, ECB, BoE, BoJ). */
+export interface MacroCalendarSource {
+  id: string
+  label: string
+  live: boolean
+  ok: boolean
+  updated_at: number | null // ms of the last good fetch (null for curated schedules)
+  until: number | null // unix s: last date this source covers
+  error: string | null // Spanish reason of the last failed refresh
+}
+
+/** How far each source reaches: the weekly feed ends at `weekly_until`; after it only the official dates remain. */
+export interface MacroCalendarCoverage {
+  weekly_until: number | null // unix s
+  weekly_stale: boolean
+  verified: string | null // YYYY-MM-DD: day the curated official dates were checked on their official pages
+  sources: MacroCalendarSource[]
+}
+
+/** GET /api/macro/calendar?days=1..60&impact=high,medium|all&currency=USD,EUR (`coverage` is absent on older servers). */
+export interface MacroCalendarResponse {
+  events: MacroEvent[]
+  coverage?: MacroCalendarCoverage
 }
 
 export interface MacroMetric {
@@ -877,7 +987,17 @@ export type ServerMessage =
   | { type: 'hello'; version: string; server_time: number; topics: string[] }
   | { type: 'event'; event: NexusEvent }
   | ({ type: 'command_result'; id: string } & CommandResult)
-  | { type: 'candle'; symbol: string; tf: Timeframe; candle: Candle; closed: boolean }
+  | {
+      type: 'candle'
+      symbol: string
+      tf: Timeframe
+      candle: Candle
+      closed: boolean
+      // where the live price comes from (optional, same meaning as in Quote; see RealtimeCandleMessage)
+      source?: string
+      realtime?: boolean
+      delay_s?: number
+    }
   | { type: 'nexus'; symbol: string; tf: Timeframe; current: NexusCurrent; markers: ChartMarker[] }
   | {
       type: 'sim'
@@ -888,10 +1008,17 @@ export type ServerMessage =
       markers?: ChartMarker[]
       positions?: Position[]
     }
-  | { type: 'paper'; account: PaperAccount; positions: Position[] }
+  // orders / risk: pending demo orders and the portfolio risk of account 1 (optional: absent on older servers)
+  | { type: 'paper'; account: PaperAccount; positions: Position[]; orders?: PaperOrder[]; risk?: PaperRisk | null }
   | { type: 'scanner'; event: 'started' | 'progress' | 'done' | 'error'; run_id: number; progress?: number; message?: string }
   | { type: 'macro'; conditions: MarketConditions; alert?: MacroAlert | null }
   | ({ type: 'ui' } & UiAction)
   | { type: 'pong' }
 
 export type ServerMessageType = ServerMessage['type']
+
+// ----------------------------------------------------------------------------- feature extensions (one file each)
+export * from './types-alerts'
+export * from './types-validation'
+export * from './types-paper-orders'
+export * from './types-realtime'

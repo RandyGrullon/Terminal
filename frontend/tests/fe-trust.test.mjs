@@ -315,7 +315,10 @@ test('trade check: order buttons say the demo order is at market', () => {
   const html = render(M.TradeCheck, { symbol: 'BINANCE:BTCUSDT', tf: '1h', current: current(), onPreview: noop })
   assert.ok(html.includes('Comprar (demo, a mercado)'))
   assert.ok(html.includes('Vender (demo, a mercado)'))
-  assert.ok(html.includes('siempre a mercado'))
+  // Pending limit / stop demo orders exist now: only the buy / sell buttons are always at market, so the note says
+  // exactly that (the old "Órdenes simuladas y siempre a mercado" would claim it of every demo order).
+  assert.ok(html.includes('comprar y vender van siempre a mercado y tu entrada no fija el precio'))
+  assert.ok(!html.includes('Órdenes simuladas y siempre a mercado'))
 })
 
 // ----------------------------------------------------------------------------- gate-take-without-signal (I8)

@@ -1,11 +1,15 @@
-"""Economic calendar: the ForexFactory weekly JSON feed (plain request, honest UA) merged with the official FOMC
-schedule. The last good copy lives in model_state(kind='macro', key='calendar') so the semáforo keeps working
-offline and across restarts; it is stale once the cached week has ended."""
+"""Economic calendar: the ForexFactory weekly JSON feed (plain request, honest UA) merged with the official release
+calendars (FOMC in fomc.py; BLS, BEA, ECB, BoE and BoJ in official.py / schedules.py), deduplicated by currency,
+release and time. The last good feed copy lives in model_state(kind='macro', key='calendar') so the semáforo keeps
+working offline and across restarts; it is stale once the cached week has ended. ForexFactory only publishes the
+current week (ff_calendar_nextweek.json answered HTTP 404 on 2026-10-31), so later weeks come from the official
+calendars alone: their high-impact releases, without forecast / previous."""
 from __future__ import annotations
 
 import datetime as dt
 import hashlib
 import json
+import re
 from typing import Any
 
 from app.macro import fomc
@@ -24,6 +28,21 @@ EVENT_FIELDS = ("id", "title", "title_es", "currency", "time", "impact", "foreca
 FOMC_FEED_TITLES = {
     "fomc_decision": frozenset({"FOMC Statement", "Federal Funds Rate"}),
     "fomc_press": frozenset({"FOMC Press Conference"}),
+}
+# Feed titles (same currency) that are the same release as an official event of each kind (official.py).
+FEED_MATCH: dict[str, re.Pattern[str]] = {
+    "us_cpi": re.compile(r"^(Core )?CPI (m/m|y/y)$"),
+    "us_nfp": re.compile(r"^(Non-Farm Employment Change|Unemployment Rate|Average Hourly Earnings m/m)$"),
+    "us_ppi": re.compile(r"^(Core )?PPI (m/m|y/y)$"),
+    "us_jolts": re.compile(r"^JOLTS Job Openings$"),
+    "us_eci": re.compile(r"^Employment Cost Index q/q$"),
+    "us_gdp": re.compile(r"^(Advance |Prelim |Final )?GDP (Price Index )?q/q$"),
+    "us_pce": re.compile(r"^((Core )?PCE Price Index (m/m|y/y)|Personal (Income|Spending) m/m)$"),
+    "ecb_decision": re.compile(r"^(Main Refinancing Rate|Deposit Facility Rate|Monetary Policy Statement)$"),
+    "ecb_press": re.compile(r"^ECB Press Conference$"),
+    "boe_decision": re.compile(r"^(Official Bank Rate|MPC Official Bank Rate Votes|Monetary Policy Summary"
+                               r"|(BOE )?Monetary Policy Report)$"),
+    "boj_decision": re.compile(r"^(BOJ Policy Rate|BOJ Outlook Report|Monetary Policy Statement)$"),
 }
 SEP_NOTE = "con proyecciones económicas"
 DEDUPE_WINDOW_S = 2 * 3600
@@ -102,26 +121,50 @@ def with_sep_note(title_es: str) -> str:
     return f"{title_es} ({SEP_NOTE})"
 
 
-def merge_fomc(events: list[dict], start_s: int | None = None, end_s: int | None = None) -> list[dict]:
-    """Feed events + official FOMC events in [start_s, end_s]. When the feed already lists the same FOMC event
-    (same kind, ±2 h) the feed copy wins (it carries forecast/previous) and inherits the SEP note."""
+def feed_matches(kind: Any, title: str) -> bool:
+    """Is the feed title `title` the same release as an official event of `kind`?"""
+    if kind in FOMC_FEED_TITLES:
+        return title in FOMC_FEED_TITLES[kind]
+    pattern = FEED_MATCH.get(str(kind))
+    return bool(pattern and pattern.match(title))
+
+
+def merge_extra(events: list[dict], extra: list[dict]) -> list[dict]:
+    """Feed events + official events (FOMC, BLS, BEA, ECB, BoE, BoJ), sorted by time.
+
+    An official event the feed already lists (same currency and release, ±2 h) is dropped: the feed copy carries
+    forecast / previous (an FOMC copy also becomes high impact and inherits the SEP note). Two official copies of one
+    release (live and curated, same kind and currency, ±2 h) are kept once: the first one in `extra` wins."""
     out = [dict(e) for e in events]
-    for ev in fomc.fomc_events(start_s, end_s):
-        titles = FOMC_FEED_TITLES[ev["kind"]]
-        dupes = [
-            e for e in out
-            if e.get("source") == SOURCE and e.get("currency") == "USD" and e.get("title") in titles
-            and abs(int(e["time"]) - ev["time"]) <= DEDUPE_WINDOW_S
-        ]
-        if not dupes:
-            out.append(ev)
+    feed = [e for e in out if e.get("source") == SOURCE]
+    ids = {str(e.get("id")) for e in out}
+    kept: list[dict] = []
+    for ev in extra:
+        t, kind, currency = int(ev["time"]), ev.get("kind"), ev.get("currency")
+        if str(ev.get("id")) in ids:
             continue
-        for e in dupes:
-            e["impact"] = "high"
-            if ev["sep"]:
-                e["title_es"] = with_sep_note(str(e.get("title_es") or e["title"]))
+        dupes = [e for e in feed if e.get("currency") == currency and abs(int(e["time"]) - t) <= DEDUPE_WINDOW_S
+                 and feed_matches(kind, str(e.get("title") or ""))]
+        if dupes:
+            if str(kind).startswith("fomc_"):
+                for e in dupes:
+                    e["impact"] = "high"
+                    if ev.get("sep"):
+                        e["title_es"] = with_sep_note(str(e.get("title_es") or e["title"]))
+            continue
+        if any(o.get("kind") == kind and o.get("currency") == currency and abs(int(o["time"]) - t) <= DEDUPE_WINDOW_S
+               for o in kept):
+            continue
+        kept.append(dict(ev))
+        ids.add(str(ev.get("id")))
+    out.extend(kept)
     out.sort(key=sort_key)
     return out
+
+
+def merge_fomc(events: list[dict], start_s: int | None = None, end_s: int | None = None) -> list[dict]:
+    """Feed events + official FOMC events in [start_s, end_s] (see merge_extra)."""
+    return merge_extra(events, fomc.fomc_events(start_s, end_s))
 
 
 def public_event(ev: dict, now_s: int) -> dict:

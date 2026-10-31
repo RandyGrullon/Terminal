@@ -217,7 +217,8 @@ def row_info(row: dict, market: str | None = None) -> dict:
 def row_quote(row: dict, ts_ms: int) -> dict:
     """Quote (types.ts) from a scan row with QUOTE_COLUMNS. ``ts`` is when TradingView returned it; ``delay_s`` is
     added only when TradingView announces delayed data (e.g. 900 for NASDAQ/NYSE without a real-time feed), so the UI
-    never presents a 15-minute-old price as live."""
+    never presents a 15-minute-old price as live, and ``realtime: True`` only when it announces streaming data (no
+    key when `update_mode` is missing: nothing is claimed)."""
     quote = {
         "symbol": str(row.get("symbol") or "").upper(),
         "price": num(row.get("close")),
@@ -232,6 +233,8 @@ def row_quote(row: dict, ts_ms: int) -> dict:
     delay = delay_seconds(row.get("update_mode"))
     if delay:
         quote["delay_s"] = int(delay)
+    elif delay == 0:
+        quote["realtime"] = True
     return quote
 
 

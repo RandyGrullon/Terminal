@@ -6,7 +6,9 @@ history built locally: every `recorder.interval_s` seconds ONE batched TradingVi
 merged into the `candles` table (source "recorder"). Other timeframes are resampled from these by the hub: TradingView's
 1h/4h bars follow each exchange's session (US stocks start at 13:30 UTC), so they are rebuilt from 15m bars to keep
 the UTC-aligned buckets of the rest of the app. Bars are stamped in market time (TradingView announces a delay of
-10-15 min for many exchanges, see tradingview_parse.row_current_bars).
+10-15 min for many exchanges, see tradingview_parse.row_current_bars) and placed by content with the lag estimated
+from observed rollovers (app.data.stamping.BarStamper, shared with the hub's snapshot feed), so data arriving later
+or earlier than announced neither lands under the wrong minute nor creates bars after the close.
 """
 from __future__ import annotations
 
@@ -14,7 +16,8 @@ import asyncio
 from typing import Any
 
 from app import config
-from app.util import RateLimitedLog, floor_time, now_ms, safe_float, tf_seconds
+from app.data.stamping import PLACE_RANK, BarStamper, same_bar, signature  # noqa: F401  (re-exported)
+from app.util import RateLimitedLog, floor_time, now_ms, safe_float
 
 RECORDER_TFS: tuple[str, ...] = ("1m", "5m", "15m", "1d")
 # timeframes not recorded directly -> recorded timeframe they are resampled from (UTC-aligned buckets)
@@ -25,8 +28,10 @@ MIN_INTERVAL_S = 5.0
 MAX_SYMBOLS = 200
 START_DELAY_S = 3.0
 # A TradingView bar that rolls over this soon after our bucket opened is the previous bar still finishing (feed
-# jitter around the announced delay), not a session boundary.
+# jitter around the announced delay), not a session boundary (hub snapshots of the timeframes not recorded).
 ROLLOVER_JITTER_S = 90.0
+# recorded timeframes in placement order (coarse first: their rollovers decide corrections of the 1m run)
+PLACE_ORDER: tuple[str, ...] = tuple(sorted(RECORDER_TFS, key=lambda t: PLACE_RANK.get(t, 9)))
 
 # Snapshots of the same TradingView bar are merged: the stored open is kept, highs/lows only widen, close follows the
 # source and volume only grows. A snapshot of ANOTHER TradingView bar (different open or lower volume: TradingView
@@ -74,16 +79,6 @@ def normalize_candle(c: Any) -> dict | None:
     }
 
 
-def signature(c: dict) -> tuple[float, float, float, float, float]:
-    return (c["open"], c["high"], c["low"], c["close"], c["volume"])
-
-
-def same_bar(stored: tuple[float, ...], new: tuple[float, ...]) -> bool:
-    """True when two snapshots belong to the same TradingView bar (its open never changes, its volume never
-    drops)."""
-    return stored[0] == new[0] and new[4] >= stored[4]
-
-
 class CandleRecorder:
     """Owned and started by the MarketDataHub (only when BACKGROUND and not OFFLINE)."""
 
@@ -92,7 +87,10 @@ class CandleRecorder:
         self._task: asyncio.Task | None = None
         self._log = RateLimitedLog()
         self._recording: set[str] = set()
-        self._last_snap: dict[tuple[str, str], Snapshot] = {}
+        self.stamper = BarStamper(self.last_recorded, self._relocate, self._shifted)
+        # TradingView bar followed per (symbol, tf); clearing it = restart semantics (re-seeded from the database)
+        self._last_snap = self.stamper.tracks
+        self._written: dict[tuple[str, str], tuple[int, tuple]] = {}  # (bucket, signature) last written per key
         self.cycles = 0
         self.bars = 0
         self.skipped_stale = 0
@@ -140,6 +138,9 @@ class CandleRecorder:
             "bars": self.bars,
             "skipped_stale": self.skipped_stale,
             "skipped_rollover": self.skipped_rollover,
+            "lag_s": dict(list(self.stamper.lags().items())[:50]),
+            "corrections": self.stamper.corrections,
+            "relocated": self.stamper.moved,
             "last_symbols": self.last_symbols,
             "last_cycle_at": self.last_cycle_at,
             "last_error": self.last_error,
@@ -204,68 +205,114 @@ class CandleRecorder:
                     f"Grabador local: empezando a grabar {symbol} ({', '.join(RECORDER_TFS)}) desde TradingView",
                     source="recorder",
                 )
-        keep = set(symbols)
-        for key in [k for k in self._last_snap if k[0] not in keep]:
-            self._last_snap.pop(key, None)
+        keep = set(symbols) | set(self.hub.subscribed_symbols())
+        self.stamper.forget(keep)
+        for key in [k for k in self._written if k[0] not in keep]:
+            self._written.pop(key, None)
         self.hub._emit("debug", f"Grabador: {len(rows)} velas de {len(live)}/{len(symbols)} símbolos", source="recorder")
         return {"symbols": len(symbols), "bars": len(rows)}
 
     async def collect(self, data: dict, symbols: list[str]) -> list[tuple[str, str, dict]]:
-        """Rows to upsert from a current_bars() answer. Skips unchanged bars and stale snapshots (a closed market
-        repeating the last bar with a newer timestamp). When TradingView's bar rolls over inside one of our buckets,
-        the snapshot replaces the stored bar right after the bucket opened (the stored one was the previous bar,
-        late because of feed jitter) and is dropped later on (TradingView's session starts before our bucket ends,
-        e.g. the forex day at 17:00 New York): bars of two different TradingView bars are never blended."""
+        """Rows to upsert from a current_bars() answer, placed by app.data.stamping.BarStamper: the bar already
+        followed keeps its bucket however late it arrives (no phantom bars after the close), a new TradingView bar
+        goes to the next bucket (clock corrected by the estimated lag after gaps), a rollover inside one of our
+        buckets replaces the stored bar right after the bucket opened and is dropped later on (e.g. the forex day at
+        17:00 New York), and late copies of an earlier bar merge into it. Unchanged bars and stale repeats (a closed
+        market re-stamping its last bar) are skipped: bars of two different TradingView bars are never blended."""
         out: list[tuple[str, str, dict]] = []
         for symbol in symbols:
             bars = data.get(symbol)
             if not isinstance(bars, dict):
                 continue
-            for tf in RECORDER_TFS:
+            for tf in PLACE_ORDER:
                 raw = bars.get(tf)
                 c = normalize_candle(raw)
                 if c is None:
                     continue
                 c["time"] = floor_time(c["time"], tf)
+                asof = safe_float(raw.get("asof"), float(c["time"])) if isinstance(raw, dict) else float(c["time"])
+                placed = await self.stamper.place(symbol, tf, c, asof)
+                if placed.bucket is None:
+                    if placed.reason == "rollover":
+                        self.skipped_rollover += 1
+                    continue
                 key = (symbol, tf)
-                from_db = key not in self._last_snap  # first snapshot since (re)start: compared with the DB bar
-                if from_db:
-                    self._last_snap[key] = await self.last_stored(symbol, tf)
-                prev_time, prev_sig = self._last_snap[key]
                 sig = signature(c)
-                if prev_sig is not None and sig == prev_sig:
-                    if c["time"] > prev_time:
+                stamp, c["time"] = c["time"], placed.bucket
+                if placed.status == "old":  # a late copy of an earlier bar: merged into it (open kept)
+                    out.append((symbol, tf, c))
+                    continue
+                if self._written.get(key) == (placed.bucket, sig):
+                    if stamp > placed.bucket:
                         self.skipped_stale += 1
                     continue  # nothing new (same bar unchanged, or a stale repeat of the last bar)
-                if c["time"] < prev_time:
-                    continue  # out-of-order snapshot
-                if prev_sig is not None:
-                    tf_s = tf_seconds(tf)
-                    asof = safe_float(raw.get("asof"))
-                    early = asof is not None and asof - c["time"] < min(tf_s / 2.0, ROLLOVER_JITTER_S)
-                    same = same_bar(prev_sig, sig)
-                    if c["time"] == prev_time and not same:
-                        if not early:
-                            self.skipped_rollover += 1
-                            continue
-                        c["_replace"] = True
-                    elif same and c["time"] > prev_time and (early or from_db or c["time"] - prev_time > tf_s):
-                        # still the stored TradingView bar: finishing right after our bucket rolled (feed jitter),
-                        # or frozen since (restart while the market is closed) -> complete it, no new bar
-                        c["time"] = prev_time
-                self._last_snap[key] = (c["time"], sig)
+                if placed.status == "replace":
+                    c["_replace"] = True
+                self._written[key] = (placed.bucket, sig)
                 out.append((symbol, tf, c))
         return out
+
+    async def last_recorded(self, symbol: str, tf: str) -> Snapshot:
+        """(time, signature) of the newest bar the recorder stored for (symbol, tf) (seed of the stamper)."""
+        return await self._db_last(symbol, tf, recorder_only=True)
+
+    async def _relocate(self, symbol: str, tf: str, start: int, end: int, d: int) -> int:
+        """Move the recorder bars of (symbol, tf) in [start, end] by d seconds in one transaction (a run the lag
+        estimate showed to be whole buckets off). Returns the number of bars moved, or -1 when nothing was moved
+        because another stored bar is in the way (it would be lost or blended) or the database failed: the stamper
+        then keeps the run where it is."""
+        db = self.rt.db
+        if db is None or not d:
+            return 0
+        sel = ("SELECT time, open, high, low, close, volume FROM candles WHERE symbol = ? AND tf = ? AND time >= ? "
+               "AND time <= ? AND source = 'recorder' ORDER BY time")
+        args = (symbol, tf, int(start), int(end))
+        try:
+            async with db.transaction() as tx:
+                rows = await tx.fetchall(sel, args)
+                if not rows:
+                    return 0
+                lo, hi = int(start) + int(d), int(end) + int(d)
+                blocking = await tx.fetchone(
+                    "SELECT time FROM candles WHERE symbol = ? AND tf = ? AND time >= ? AND time <= ? "
+                    "AND NOT (time >= ? AND time <= ? AND source = 'recorder') LIMIT 1",
+                    (symbol, tf, lo, hi, int(start), int(end)),
+                )
+                if blocking is not None:
+                    return -1
+                await tx.execute("DELETE FROM candles WHERE symbol = ? AND tf = ? AND time >= ? AND time <= ? "
+                                 "AND source = 'recorder'", args)
+                await tx.executemany(MERGE_UPSERT_SQL, [
+                    (symbol, tf, int(r["time"]) + int(d), r["open"], r["high"], r["low"], r["close"], r["volume"],
+                     "recorder") for r in rows
+                ])
+        except Exception as exc:
+            if self._log.should_log(f"relocate:{symbol}:{tf}", 600):
+                self.hub._emit("warn", f"Grabador local: no se pudieron corregir las velas de {symbol} {tf} ({exc})",
+                               source="recorder")
+            return -1
+        self.hub._emit("info", f"Grabador local: {len(rows)} velas de {symbol} {tf} recolocadas "
+                               f"{'+' if d > 0 else '−'}{abs(int(d))} s (TradingView llega con otro retraso del "
+                               "anunciado)", source="recorder")
+        return len(rows)
+
+    def _shifted(self, symbol: str, tf: str, d: int) -> None:
+        """The stamper moved the current run of (symbol, tf): forget what was written and tell the live feed."""
+        self._written.pop((symbol, tf), None)
+        hook = getattr(self.hub, "_stamp_shifted", None)
+        if callable(hook):
+            hook(symbol, tf, d)
 
     async def last_stored(self, symbol: str, tf: str) -> Snapshot:
         """(time, OHLCV signature) of the newest stored bar of (symbol, tf); (0, None) when there is none."""
         return await self._db_last(symbol, tf)
 
-    async def _db_last(self, symbol: str, tf: str) -> Snapshot:
+    async def _db_last(self, symbol: str, tf: str, recorder_only: bool = False) -> Snapshot:
+        only = " AND source = 'recorder'" if recorder_only else ""
         try:
             row = await self.rt.db.fetchone(
-                "SELECT time, open, high, low, close, volume FROM candles WHERE symbol = ? AND tf = ? "
-                "ORDER BY time DESC LIMIT 1",
+                "SELECT time, open, high, low, close, volume FROM candles WHERE symbol = ? AND tf = ?"
+                f"{only} ORDER BY time DESC LIMIT 1",
                 (symbol, tf),
             )
         except Exception:
@@ -276,14 +323,17 @@ class CandleRecorder:
         return (int(row["time"]), signature(c)) if c else (0, None)
 
     async def store(self, rows: list[tuple[str, str, dict]]) -> None:
-        """Merge snapshots into the `candles` table (rows flagged `_replace` by collect() overwrite the stored bar)."""
+        """Merge snapshots into the `candles` table. A bar the stamper placed over a stored bar of another
+        TradingView bar ("replace": the stored one was the previous bar, stamped late) overwrites it on its first
+        write, from the recorder cycle or from the live feed's closed bar (rows flagged `_replace` too)."""
         if not rows:
             return
         merge: list[tuple] = []
         replace: list[tuple] = []
         for s, tf, c in rows:
             params = (s, tf, int(c["time"]), c["open"], c["high"], c["low"], c["close"], c["volume"], "recorder")
-            (replace if c.get("_replace") else merge).append(params)
+            flagged = self.stamper.take_replace(s, tf, int(c["time"]), c["open"]) or c.get("_replace")
+            (replace if flagged else merge).append(params)
         if merge:
             await self.rt.db.executemany(MERGE_UPSERT_SQL, merge)
         if replace:

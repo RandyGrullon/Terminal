@@ -1,4 +1,5 @@
-// Spanish formatting for the market-conditions widgets: countdowns, local event times and compact event names.
+// Spanish formatting for the market-conditions widgets: countdowns, local event times, compact event names and the
+// source of each calendar event.
 import type { MacroEvent, MarketConditions } from '../../api/types'
 import type { Tone } from '../../lib/format'
 import { blackoutActive, pickNextEvent } from './macroModel'
@@ -17,6 +18,46 @@ const FLAGS: Record<string, string> = {
 
 export function currencyFlag(currency: string): string {
   return FLAGS[currency.toUpperCase()] ?? ''
+}
+
+// Calendar sources (MacroEvent.source): the weekly ForexFactory feed and the official calendars.
+const SOURCES: Record<string, { tag: string; label: string }> = {
+  forexfactory: { tag: 'FF', label: 'ForexFactory (calendario semanal)' },
+  federalreserve: { tag: 'Fed', label: 'Fed: calendario oficial del FOMC' },
+  bls: { tag: 'BLS', label: 'BLS: calendario oficial (empleo, IPC, IPP, JOLTS)' },
+  bea: { tag: 'BEA', label: 'BEA: calendario oficial (PIB, inflación PCE)' },
+  ecb: { tag: 'BCE', label: 'BCE: calendario oficial de reuniones' },
+  boe: { tag: 'BoE', label: 'Banco de Inglaterra: calendario oficial del MPC' },
+  boj: { tag: 'BoJ', label: 'Banco de Japón: calendario oficial (sin hora fija)' },
+}
+
+/** Short source tag: "BLS", "BCE", "Fed"... ("FF" for the weekly feed). */
+export function sourceTag(source: string): string {
+  const key = source.trim().toLowerCase()
+  return SOURCES[key]?.tag ?? (key ? key.toUpperCase() : '—')
+}
+
+/** Spanish description of the source of an event. */
+export function sourceLabel(source: string): string {
+  const key = source.trim().toLowerCase()
+  return SOURCES[key]?.label ?? (key ? `Fuente: ${source.trim()}` : 'Fuente desconocida')
+}
+
+/** The event comes from an official release calendar (not from the weekly feed). */
+export function isOfficialSource(source: string): boolean {
+  const key = source.trim().toLowerCase()
+  return key !== '' && key !== 'forexfactory'
+}
+
+/** The time is only a reference: the Bank of Japan publishes its decision when the meeting ends. */
+export function isApproxTime(ev: MacroEvent): boolean {
+  return ev.source.trim().toLowerCase() === 'boj'
+}
+
+/** Note for an official event without forecast / previous: "Fecha oficial · BLS" (+ "hora aproximada"). */
+export function officialNote(ev: MacroEvent): string {
+  if (!isOfficialSource(ev.source)) return ''
+  return `Fecha oficial · ${sourceTag(ev.source)}${isApproxTime(ev) ? ' · hora aproximada' : ''}`
 }
 
 /** Compact countdown for pills and badges: "45 s", "24 min", "3 h 5 min", "17 h", "2 d 4 h", "39 d". */
@@ -98,6 +139,19 @@ export function fmtDayHeader(timeSec: number, nowMs: number): string {
   if (diff === 0) return `Hoy · ${long}`
   if (diff === 1) return `Mañana · ${long}`
   return capitalize(long)
+}
+
+/** Short local day: "lun 02/11". */
+export function fmtShortDay(ms: number): string {
+  const d = new Date(ms)
+  const wd = d.toLocaleDateString('es-ES', { weekday: 'short' }).replace('.', '')
+  return `${wd} ${d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' })}`
+}
+
+/** "2026-10-31" -> "31/10/2026" (other text is returned as is). */
+export function fmtIsoDay(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso.trim())
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : iso
 }
 
 /** "14:30" when the time is today, otherwise "Vie 14:30". */

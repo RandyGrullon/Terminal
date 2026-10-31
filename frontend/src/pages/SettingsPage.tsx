@@ -1,5 +1,6 @@
 // "Ajustes": every NEXUS setting grouped with Spanish labels and help, dirty tracking, per-field revert, saving only
-// the changed keys, plus system status, local database and about.
+// the changed keys, plus system status, local database and about. The "Alertas" group also shows the alerts card
+// (channel state, test message, desktop notifications) and renders its plain-text fields itself.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RefreshCw, RotateCcw, Save, Settings as SettingsIcon, TriangleAlert } from 'lucide-react'
 import { api, errorMessage } from '../api/client'
@@ -7,15 +8,24 @@ import type { Health, Settings } from '../api/types'
 import { useApp } from '../store'
 import { Button, Card, ErrorBox, Loading, Modal } from '../components/ui'
 import AboutCard from '../components/settings/AboutCard'
+import AlertsCard from '../components/settings/AlertsCard'
 import DbCard from '../components/settings/DbCard'
 import GateZones from '../components/settings/GateZones'
 import SettingField from '../components/settings/SettingField'
 import SystemCard from '../components/settings/SystemCard'
 import { FALLBACK_MARKETS, FIELD_BY_KEY, GROUPS, type FieldDef } from '../components/settings/schema'
+import { validateAlertField } from '../components/settings/schema-alerts'
 import { crossValidate, keyInMessage, sameValue, validateField } from '../components/settings/validate'
 import '../components/settings/settings.css'
 
 const FIELDS: FieldDef[] = GROUPS.flatMap((g) => g.fields)
+const ALERTS_GROUP = 'alerts'
+
+/** Client-side error of a field: the alerts' own rules first, then the generic ones of its kind. */
+function fieldError(def: FieldDef, value: unknown): string | null {
+  const own = validateAlertField(def.key, value)
+  return own !== undefined ? own : validateField(def, value)
+}
 
 /** Unsaved edits survive switching pages (the page component is unmounted by the shell). */
 let pendingEdits: Settings | null = null
@@ -25,6 +35,10 @@ function outgoing(def: FieldDef | undefined, v: unknown): unknown {
   switch (def.kind) {
     case 'secret':
       return typeof v === 'string' ? v.trim() : ''
+    case 'text':
+      return typeof v === 'string' ? v.trim() : ''
+    case 'password':
+      return typeof v === 'string' ? v : '' // as typed: a passphrase may start or end with a space
     case 'symbols':
       return Array.isArray(v) ? Array.from(new Set(v.map((s) => String(s).trim().toUpperCase()).filter(Boolean))) : []
     default:
@@ -44,6 +58,7 @@ export default function SettingsPage() {
   const [markets, setMarkets] = useState<{ id: string; name: string }[]>(FALLBACK_MARKETS)
   const [version, setVersion] = useState<string | null>(null)
   const [confirmReload, setConfirmReload] = useState(false)
+  const [savedTick, setSavedTick] = useState(0)
 
   const load = useCallback(async (restorePending: boolean) => {
     setLoading(true)
@@ -96,7 +111,7 @@ export default function SettingsPage() {
     const out: Record<string, string> = {}
     for (const f of FIELDS) {
       if (!dirtySet.has(f.key)) continue
-      const e = validateField(f, values[f.key])
+      const e = fieldError(f, values[f.key])
       if (e) out[f.key] = e
     }
     const cross = crossValidate(values)
@@ -178,6 +193,7 @@ export default function SettingsPage() {
       setLoaded(s)
       setValues(s)
       setServerErrors({})
+      setSavedTick((t) => t + 1)
       notify(`Ajustes guardados (${dirtyKeys.length})`, 'success')
     } catch (e) {
       const msg = errorMessage(e)
@@ -335,6 +351,11 @@ export default function SettingsPage() {
                   ))}
                 </div>
               </Card>
+              {g.id === ALERTS_GROUP && (
+                <div style={{ marginTop: 12 }}>
+                  <AlertsCard dirtyCount={g.fields.filter((f) => dirtySet.has(f.key)).length} savedTick={savedTick} />
+                </div>
+              )}
             </div>
           ))}
         </div>

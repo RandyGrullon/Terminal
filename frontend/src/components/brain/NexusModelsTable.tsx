@@ -5,7 +5,12 @@ import type { LearningSummary } from '../../api/types'
 import { fmtBarTime, fmtInt } from '../../lib/format'
 import { useApp } from '../../store'
 import { Button, Empty, IconButton } from '../ui'
-import { brierTone, fmtBrier, fmtRate, rateTone } from './learnFormat'
+import { fmtBrier, fmtRate } from './learnFormat'
+
+// No green/red against a fixed 50 % / 0,25: the engine's sign hit rate is only meaningful against the share of rising
+// bars of the same period (see "Habilidad frente a la referencia" for the verified predictions).
+const RATE_TITLE = 'Acierto de la dirección (sube / baja) del propio motor; compáralo con la frecuencia de subidas, no con un 50 %'
+const BRIER_TITLE = 'Brier del motor: 0 perfecto; 0,25 = decir siempre 50 % (la referencia real es la climatología del periodo)'
 
 type Row = LearningSummary['nexus_models'][number]
 type SortKey = 'symbol' | 'updates' | 'hit_rate' | 'brier' | 'trained_until'
@@ -79,8 +84,12 @@ function NexusModelsTable({ rows, onView, onReset }: Props) {
               <td className="mono">{r.symbol}</td>
               <td className="mono">{r.tf}</td>
               <td className="num">{fmtInt(r.updates)}</td>
-              <td className={`num ${rateTone(r.hit_rate)}`}>{fmtRate(r.hit_rate)}</td>
-              <td className={`num ${brierTone(r.brier)}`}>{fmtBrier(r.brier)}</td>
+              <td className="num" title={RATE_TITLE}>
+                {fmtRate(r.hit_rate)}
+              </td>
+              <td className="num" title={BRIER_TITLE}>
+                {fmtBrier(r.brier)}
+              </td>
               <td className="num">{fmtBarTime(r.trained_until, r.tf)}</td>
               <td className="num">
                 <div className="row gap-1 end">

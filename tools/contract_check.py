@@ -1,5 +1,9 @@
 """Contract checker: calls every REST endpoint of a running NEXUS server and compares the JSON responses with
-the TypeScript interfaces in frontend/src/api/types.ts (missing keys, unexpected keys, NaN, HTTP errors).
+the TypeScript interfaces in frontend/src/api/types.ts and the feature files next to it (types-*.ts, re-exported by
+types.ts): missing keys, unexpected keys, NaN, HTTP errors.
+
+Read-only on purpose: it never calls POST /api/alerts/test (it would message the user's Telegram or email), POST
+/api/validation/run (a background job that downloads data) nor places or cancels demo orders.
 
 Usage (server must be running):
     backend/.venv/Scripts/python.exe tools/contract_check.py [--base http://127.0.0.1:8420] [--symbol BINANCE:BTCUSDT]
@@ -18,6 +22,11 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 TYPES_TS = ROOT / "frontend" / "src" / "api" / "types.ts"
+# Response types that still live next to their UI (used only when src/api does not define them yet)
+UI_TYPE_FILES = {"SkillReport": ROOT / "frontend" / "src" / "components" / "brain" / "skill.ts"}
+# GET /api/macro/calendar `coverage` (documented keys; used while src/api has no MacroCalendarCoverage type)
+CALENDAR_COVERAGE_KEYS = ("weekly_until", "weekly_stale", "verified", "sources")
+CALENDAR_SOURCE_KEYS = ("id", "label", "live", "ok", "updated_at", "until", "error")
 
 
 # ----------------------------------------------------------------------------- types.ts parser
@@ -55,6 +64,32 @@ def parse_interfaces(src: str) -> dict[str, dict[str, bool]]:
         merged.update(out[name])
         out[name] = merged
     return out
+
+
+def type_files(types_ts: Path = TYPES_TS) -> list[Path]:
+    """types.ts and its feature files (types-*.ts in the same folder), in a stable order."""
+    return [types_ts, *sorted(types_ts.parent.glob("types-*.ts"))]
+
+
+def load_interfaces(types_ts: Path = TYPES_TS) -> tuple[dict[str, dict[str, bool]], list[str]]:
+    """(interfaces of src/api, notes). A response type still defined only next to its UI (UI_TYPE_FILES) is taken
+    from there and named in the notes, so its endpoint is checked anyway."""
+    ifaces = parse_interfaces("\n".join(p.read_text(encoding="utf-8") for p in type_files(types_ts)))
+    notes = []
+    for name, path in UI_TYPE_FILES.items():
+        if name in ifaces or not path.is_file():
+            continue
+        extra = parse_interfaces(path.read_text(encoding="utf-8"))
+        added = sorted(k for k in extra if k not in ifaces)
+        if name in extra:
+            ifaces.update({k: extra[k] for k in added})
+            try:
+                where = path.relative_to(ROOT).as_posix()
+            except ValueError:
+                where = path.as_posix()
+            notes.append(f"{name} (y {len(added) - 1} tipos más) aún en {where}, no en src/api (regla 6: tipos "
+                         "canónicos en types.ts)")
+    return ifaces, notes
 
 
 # ----------------------------------------------------------------------------- checks
@@ -107,6 +142,35 @@ def check_list(rep: Report, ifaces: dict, iface: str, arr: Any, where: str, samp
         check_obj(rep, ifaces, iface, item, f"{where}[{i}]")
 
 
+def check_all(rep: Report, ifaces: dict, iface: str, arr: Any, where: str, group: str | None = None) -> None:
+    """Every item of a list against `iface` (keys exactly: missing = FAIL, extra = WARN), one row per distinct
+    result; `group` names the field that tells the items apart in that row (e.g. the event's source)."""
+    if not isinstance(arr, list):
+        rep.add("FAIL", where, f"se esperaba lista de {iface}, llegó {type(arr).__name__}")
+        return
+    if not arr:
+        rep.add("WARN", where, f"lista vacía ({iface})")
+        return
+    seen: dict[tuple[str, str], tuple[list[int], list[str]]] = {}
+    for item in arr:
+        tmp = Report()
+        check_obj(tmp, ifaces, iface, item, "")
+        status, _, detail = tmp.rows[0]
+        label = str(item.get(group)) if group and isinstance(item, dict) else ""
+        count, names = seen.setdefault((status, detail), ([0], []))
+        count[0] += 1
+        if label and label not in names:
+            names.append(label)
+    for (status, detail), (count, names) in seen.items():
+        rep.add(status, f"{where} ({count[0]} de {len(arr)}" + (f": {', '.join(names)}" if names else "") + ")",
+                detail)
+
+
+def check_keys(rep: Report, name: str, keys: tuple[str, ...], obj: Any, where: str) -> None:
+    """Like check_obj for a documented shape without a TypeScript interface (every key required)."""
+    check_obj(rep, {name: {k: False for k in keys}}, name, obj, where)
+
+
 def no_nan(text: str) -> bool:
     try:
         json.loads(text, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))
@@ -123,8 +187,10 @@ def main() -> int:
     ap.add_argument("--skip-slow", action="store_true")
     args = ap.parse_args()
 
-    ifaces = parse_interfaces(TYPES_TS.read_text(encoding="utf-8"))
+    ifaces, notes = load_interfaces()
     rep = Report()
+    for note in notes:
+        rep.add("WARN", "types", note)
     client = httpx.Client(base_url=args.base, timeout=180)
     sym, tf = args.symbol, args.tf
 
@@ -161,6 +227,26 @@ def main() -> int:
     if d:
         check_obj(rep, ifaces, "DbStats", d, "db/stats")
 
+    # external alerts (status only: POST /api/alerts/test would message the user) and validation (no run: it is a
+    # background job that downloads data)
+    d = call("GET", "/api/alerts/status")
+    if d:
+        check_obj(rep, ifaces, "AlertsStatus", d, "alerts.status")
+        check_list(rep, ifaces, "AlertChannelStatus", d.get("channels"), "alerts.channels", 2)
+    d = call("GET", "/api/validation/status")
+    if d:
+        check_obj(rep, ifaces, "ValidationStatus", d, "validation.status")
+        if d.get("job"):
+            check_obj(rep, ifaces, "ValidationJob", d["job"], "validation.status.job")
+    d = call("GET", "/api/validation/latest")
+    if d:
+        check_obj(rep, ifaces, "ValidationLatestResponse", d, "validation.latest")
+        if d.get("report"):
+            check_obj(rep, ifaces, "ValidationReport", d["report"], "validation.latest.report")
+            check_obj(rep, ifaces, "ValidationSummary", d["report"].get("summary"), "validation.latest.summary")
+        else:
+            rep.add("WARN", "validation.latest", "sin informe guardado todavía (report = null)")
+
     # market
     d = call("GET", "/api/markets")
     if d:
@@ -189,6 +275,29 @@ def main() -> int:
     d = call("GET", "/api/watchlist")
     if d:
         check_list(rep, ifaces, "WatchItem", d.get("items"), "watchlist", 2)
+    d = call("GET", "/api/realtime")
+    if d:
+        check_obj(rep, ifaces, "RealtimeStatus", d, "realtime")
+        check_list(rep, ifaces, "RealtimeProvider", d.get("providers"), "realtime.providers")
+        if d.get("symbols"):
+            check_list(rep, ifaces, "RealtimeSymbol", d["symbols"], "realtime.symbols", 2)
+    d = call("GET", "/api/macro/calendar", params={"days": 14})
+    if d:
+        if "MacroCalendarResponse" in ifaces:
+            check_obj(rep, ifaces, "MacroCalendarResponse", d, "macro.calendar")
+        check_all(rep, ifaces, "MacroEvent", d.get("events"), "macro.calendar.events", group="source")
+        cov = d.get("coverage")
+        if cov is not None:
+            if "MacroCalendarCoverage" in ifaces:
+                check_obj(rep, ifaces, "MacroCalendarCoverage", cov, "macro.calendar.coverage")
+            else:
+                check_keys(rep, "CalendarCoverage", CALENDAR_COVERAGE_KEYS, cov, "macro.calendar.coverage")
+            sources = cov.get("sources") if isinstance(cov, dict) else None
+            if "MacroCalendarSource" in ifaces:
+                check_all(rep, ifaces, "MacroCalendarSource", sources, "macro.calendar.coverage.sources", group="id")
+            else:
+                check_all(rep, {"CalendarSource": {k: False for k in CALENDAR_SOURCE_KEYS}}, "CalendarSource",
+                          sources, "macro.calendar.coverage.sources", group="id")
 
     # nexus / gate / indicators
     for s in (sym, "SIM:NEXUS"):
@@ -265,6 +374,15 @@ def main() -> int:
     if d:
         check_obj(rep, ifaces, "PaperSnapshot", d, "paper")
         check_obj(rep, ifaces, "PaperAccount", d.get("account"), "paper.account")
+    d = call("GET", "/api/paper/orders", params={"status": "all", "limit": 20})  # pending + the latest closed ones
+    if d:
+        check_keys(rep, "PaperOrdersResponse", ("orders",), d, "paper.orders")
+        check_list(rep, ifaces, "PaperOrder", d.get("orders"), "paper.orders.orders", 3)
+    d = call("GET", "/api/paper/risk")
+    if d:
+        check_obj(rep, ifaces, "PaperRisk", d, "paper.risk")
+        if d.get("groups"):
+            check_list(rep, ifaces, "PaperRiskGroup", d["groups"], "paper.risk.groups", 2)
     d = call("GET", "/api/scanner/runs")
     if d:
         check_list(rep, ifaces, "ScanRun", d.get("runs"), "scanner.runs", 1)
@@ -283,6 +401,20 @@ def main() -> int:
     d = call("GET", "/api/learning/summary")
     if d:
         check_obj(rep, ifaces, "LearningSummary", d, "learning")
+    for days in (7, 0):  # the UI asks for 7 days, 24 h or every stored row (days=0)
+        d = call("GET", "/api/learning/skill", params={"days": days})
+        if d:
+            w = f"learning.skill days={days}"
+            check_obj(rep, ifaces, "SkillReport", d, w)
+            check_list(rep, ifaces, "SkillGroup", d.get("groups"), w + ".groups", 1)
+            g = next((g for g in d.get("groups") or [] if isinstance(g, dict) and g.get("n")), None)
+            if g is not None:
+                if g.get("reference"):
+                    check_obj(rep, ifaces, "SkillReference", g["reference"], w + ".reference")
+                check_list(rep, ifaces, "SkillDirection", g.get("by_direction"), w + ".by_direction", 1)
+                check_list(rep, ifaces, "SkillDaily", g.get("daily"), w + ".daily", 1)
+    if call("GET", "/api/learning/skill", params={"source": "otra"}, expect=400) is not None:
+        rep.add("OK", "learning.skill source=otra", "HTTP 400 (fuente no válida)")
 
     # scripts
     d = call("GET", "/api/scripts")
@@ -305,7 +437,8 @@ def main() -> int:
         rep.add("OK" if not d.get("ok") else "FAIL", "scripts.security", "import os rechazado" if not d.get("ok") else "¡import os aceptado!")
 
     # terminal
-    for text in ("help", f"signal {sym}", f"check {sym} long", "status", "positions", "watchlist-signals"):
+    for text in ("help", f"signal {sym}", f"check {sym} long", "status", "positions", "watchlist-signals", "alertas",
+                 "orders", "risk", "skill"):
         d = call("POST", "/api/terminal", body={"text": text})
         if d:
             ok = d.get("ok")

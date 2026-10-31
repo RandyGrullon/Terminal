@@ -1,4 +1,6 @@
 -- NEXUS Terminal database for PostgreSQL / Supabase (cloud mode). Mirrors app/schema.sql.
+-- BASELINE (schema version 1, frozen): later changes are numbered migrations in app/migrations/ (one .sqlite.sql and
+-- one .pg.sql file each), applied in order by init_schema and recorded in schema_migrations(version, name, applied_at).
 -- Tables live in their own schema ("{schema}", default "nexus") so Supabase's public Data API never exposes them,
 -- and RLS is enabled without policies as defense in depth (the backend connects as the table owner).
 -- Time columns: `time`/`*_time` = unix seconds; `ts`/`*_at` = unix milliseconds (BIGINT).
@@ -266,26 +268,5 @@ CREATE TABLE IF NOT EXISTS backtests (
   created_at BIGINT NOT NULL
 );
 
--- Defense in depth on Supabase: RLS on (no policies => anon/authenticated roles see nothing).
--- Only tables whose RLS is still off are altered: ALTER TABLE ... ENABLE ROW LEVEL SECURITY takes an ACCESS EXCLUSIVE
--- lock, and re-running it on every start (init_schema runs at every boot) would take that lock on every table while a
--- standby initialises the schema next to the active instance during a deploy overlap -- brief blocking, with a chance
--- of a deadlock abort. Filtering on pg_class.relrowsecurity keeps the block idempotent and lock-free once RLS is set.
-DO $$
-DECLARE t record;
-BEGIN
-  FOR t IN
-    SELECT c.relname
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = '{schema}' AND c.relkind = 'r' AND NOT c.relrowsecurity
-  LOOP
-    EXECUTE format('ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY', '{schema}', t.relname);
-  END LOOP;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
-    EXECUTE 'REVOKE ALL ON SCHEMA {schema} FROM anon';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-    EXECUTE 'REVOKE ALL ON SCHEMA {schema} FROM authenticated';
-  END IF;
-END $$;
+-- Row level security: app/migrations/pg_rls.sql enables RLS (no policies) on every table of the schema after the
+-- baseline and the migrations, at every start (idempotent and lock-free once every table has it).

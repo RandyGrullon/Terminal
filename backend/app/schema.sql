@@ -1,5 +1,8 @@
 -- NEXUS Terminal local database (SQLite). Created/migrated automatically on start.
 -- Time columns: `time`/`*_time` = unix seconds; `ts`/`*_at` = unix milliseconds.
+-- BASELINE (schema version 1, frozen): later changes are numbered migrations in app/migrations/ (one .sqlite.sql and
+-- one .pg.sql file each), applied in order by init_schema and recorded in schema_migrations(version, name, applied_at).
+-- An existing database with every table and index below is marked as baseline without re-running this script.
 
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,

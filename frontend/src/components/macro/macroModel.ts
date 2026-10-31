@@ -149,6 +149,60 @@ export function normalizeEvents(raw: unknown): MacroEvent[] {
     .sort((a, b) => a.time - b.time)
 }
 
+/** One calendar source of GET /api/macro/calendar `coverage` (optional field; normalized: `until` in unix s,
+ *  `updated_at` in unix ms). `live` = fetched from the source, otherwise a curated official schedule. */
+export interface CalendarSource {
+  id: string
+  label: string
+  live: boolean
+  ok: boolean
+  updated_at: number | null
+  until: number | null
+  error: string | null
+}
+
+/** How far each source reaches: the weekly feed ends at `weekly_until` (unix s); after it only official dates. */
+export interface CalendarCoverage {
+  weekly_until: number | null
+  weekly_stale: boolean
+  /** Day (YYYY-MM-DD) the curated official dates were checked on their official pages. */
+  verified: string | null
+  sources: CalendarSource[]
+}
+
+function normalizeSource(raw: unknown): CalendarSource | null {
+  if (!isObj(raw)) return null
+  const id = str(raw.id).toLowerCase()
+  if (!id) return null
+  const updated = num(raw.updated_at)
+  const until = num(raw.until)
+  return {
+    id,
+    label: str(raw.label, id),
+    live: raw.live === true,
+    ok: raw.ok === true,
+    updated_at: updated === null || updated <= 0 ? null : toMs(updated),
+    until: until === null ? null : toSec(until),
+    error: optStr(raw.error),
+  }
+}
+
+export function normalizeCoverage(raw: unknown): CalendarCoverage | null {
+  if (!isObj(raw)) return null
+  const until = num(raw.weekly_until)
+  return {
+    weekly_until: until === null ? null : toSec(until),
+    weekly_stale: raw.weekly_stale === true,
+    verified: optStr(raw.verified),
+    sources: Array.isArray(raw.sources) ? raw.sources.map(normalizeSource).filter(isPresent) : [],
+  }
+}
+
+/** GET /api/macro/calendar -> events (sorted) + coverage (null when the backend does not send it). */
+export function normalizeCalendar(raw: unknown): { events: MacroEvent[]; coverage: CalendarCoverage | null } {
+  return { events: normalizeEvents(raw), coverage: isObj(raw) ? normalizeCoverage(raw.coverage) : null }
+}
+
 /** True while the "no operar" window is running (client-side check against `until`, in ms). */
 export function blackoutActive(c: MarketConditions, nowMs: number): boolean {
   return c.blackout.active && (c.blackout.until === null || c.blackout.until > nowMs)

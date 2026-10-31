@@ -1,11 +1,13 @@
 """REST API for simulation, backtests, Monte Carlo, paper trading, scanner and learning (contract §6.4).
 
-Errors are `{"detail": "<español>"}`: 400 invalid input, 404 not found, 409 conflict (e.g. the Trade Gate said
-NO TOMAR: detail = {"message", "gate"}), 503 when a required module is not loaded.
+Errors are `{"detail": "<español>"}`: 400 invalid input, 404 not found, 409 conflict (the Trade Gate said NO TOMAR:
+detail = {"message", "gate"}; a portfolio-risk limit of the demo account: detail = {"message", "code": "risk_limit",
+"rule", "risk"}; an offline replay of the scanner already running), 503 when a required module is not loaded.
 """
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -16,12 +18,20 @@ from app.data.base import ProviderError
 from app.runtime import rt
 from app.sim.backtest import BacktestError, run_backtest, save_backtest, summarize_backtest
 from app.sim.common import EngineUnavailable, load_engine
-from app.sim.evaluator import learning_summary, list_predictions, prediction_stats
+from app.sim.evaluator import (
+    REPLAY_DAYS_DEFAULT,
+    ReplayBusy,
+    learning_summary,
+    list_predictions,
+    prediction_stats,
+    replay_report,
+    skill_report,
+)
 from app.sim.montecarlo import MonteCarloError, run_montecarlo
-from app.sim.paper import PaperError, PaperRejected
+from app.sim.paper import PaperError, PaperRejected, PaperRiskBlocked
 from app.sim.scanner import ScanError
 from app.sim.simulator import SimError
-from app.util import clamp, clean_json, normalize_tf
+from app.util import clamp, clean_json, normalize_tf, safe_float
 
 router = APIRouter()
 
@@ -88,6 +98,28 @@ class CloseRequest(BaseModel):
     all: bool = False
 
 
+class PendingOrderRequest(BaseModel):
+    symbol: str | None = None
+    side: str | None = None
+    kind: str | None = None  # limit | stop
+    price: float | None = None  # limit price / stop trigger
+    tf: str | None = None
+    qty: float | None = None
+    risk_pct: float | None = None
+    sl: float | None = None
+    tp: float | None = None
+    expiry: str | None = None  # gtc | bars | date
+    expire_bars: int | None = None
+    expire_time: float | None = None  # unix s (ms accepted)
+    force: bool = False
+
+
+class CancelOrderRequest(BaseModel):
+    order_id: int | None = None
+    symbol: str | None = None
+    all: bool = False
+
+
 class ResetRequest(BaseModel):
     initial_balance: float | None = None
 
@@ -146,10 +178,25 @@ def _emit(level: str, source: str, message: str) -> None:
         rt.bus.emit(level, source, message)
 
 
+_NOT_FOUND = ("No hay posiciones", "No hay una posición", "No hay órdenes pendientes", "No hay una orden pendiente")
+
+
 def _paper_error(exc: PaperError) -> HTTPException:
     msg = str(exc)
-    status = 404 if msg.startswith("No hay posiciones") or msg.startswith("No hay una posición") else 400
+    status = 404 if msg.startswith(_NOT_FOUND) else 400
     return HTTPException(status_code=status, detail=msg)
+
+
+async def _risk_blocked(paper: Any, exc: PaperRiskBlocked) -> HTTPException:
+    """409 for a portfolio-risk limit of the demo account (never overridable with `force`)."""
+    risk = exc.risk
+    if risk is None:
+        try:
+            risk = await paper.risk_state(1)
+        except Exception:
+            risk = None
+    return HTTPException(status_code=409, detail=clean_json({"message": exc.message, "code": "risk_limit",
+                                                             "rule": exc.rule, "risk": risk}))
 
 
 def _sim_error(exc: SimError) -> HTTPException:
@@ -295,9 +342,64 @@ async def paper_order(req: OrderRequest) -> dict:
         )
     except PaperRejected as rej:
         raise HTTPException(status_code=409, detail=clean_json({"message": rej.message, "gate": rej.gate})) from None
+    except PaperRiskBlocked as blk:
+        raise await _risk_blocked(paper, blk) from None
     except PaperError as exc:
         raise _paper_error(exc) from None
     return clean_json(res)
+
+
+@router.get("/api/paper/orders")
+async def paper_orders(status: str = "pending", limit: int = 50) -> dict:
+    """Pending limit / stop orders of the demo account (status=all adds the latest filled / cancelled / expired)."""
+    paper = _service("paper", "La cuenta demo")
+    if status not in ("pending", "all"):
+        raise HTTPException(status_code=400, detail="Estado no válido: usa 'pending' o 'all'")
+    return clean_json({"orders": await paper.list_orders(1, status, int(clamp(limit, 1, 500)))})
+
+
+@router.post("/api/paper/orders")
+async def paper_place_order(req: PendingOrderRequest) -> dict:
+    """Leave a pending limit / stop entry order (demo account). The gate is checked at the order price now and again
+    at the fill (a NO TOMAR then cancels the order)."""
+    paper = _service("paper", "La cuenta demo")
+    symbol = await _resolve(req.symbol)
+    if not req.side:
+        raise HTTPException(status_code=400, detail="Falta el lado de la orden: long o short")
+    if not req.kind:
+        raise HTTPException(status_code=400, detail="Falta el tipo de orden: limit o stop")
+    tf = _tf(req.tf, str(rt.settings.get("paper.auto_tf", "1h")) if rt.settings is not None else "1h")
+    try:
+        res = await paper.place_order(
+            1, symbol, req.side, req.kind, req.price, tf, qty=req.qty, risk_pct=req.risk_pct, sl=req.sl, tp=req.tp,
+            expiry=req.expiry, expire_bars=req.expire_bars, expire_time=req.expire_time, force=bool(req.force),
+            origin="manual",
+        )
+    except PaperRejected as rej:
+        raise HTTPException(status_code=409, detail=clean_json({"message": rej.message, "gate": rej.gate})) from None
+    except PaperRiskBlocked as blk:
+        raise await _risk_blocked(paper, blk) from None
+    except PaperError as exc:
+        raise _paper_error(exc) from None
+    return clean_json(res)
+
+
+@router.post("/api/paper/orders/cancel")
+async def paper_cancel_orders(req: CancelOrderRequest) -> dict:
+    paper = _service("paper", "La cuenta demo")
+    symbol = await _resolve(req.symbol) if req.symbol and req.order_id is None and not req.all else None
+    try:
+        cancelled = await paper.cancel_orders(req.order_id, symbol, bool(req.all), account_id=1)
+    except PaperError as exc:
+        raise _paper_error(exc) from None
+    return {"cancelled": clean_json(cancelled)}
+
+
+@router.get("/api/paper/risk")
+async def paper_risk() -> dict:
+    """Portfolio risk of the demo account: open risk, positions per correlated group, daily P&L vs its limit."""
+    paper = _service("paper", "La cuenta demo")
+    return clean_json(await paper.risk_state(1))
 
 
 @router.post("/api/paper/close")
@@ -394,3 +496,39 @@ async def predictions(source: str | None = None, symbol: str | None = None, reso
 async def learning() -> dict:
     settings = rt.settings.all() if rt.settings is not None else None
     return clean_json(await learning_summary(rt.db, settings))
+
+
+def _days(value: float | None) -> float | None:
+    if value is not None and not math.isfinite(value):
+        raise HTTPException(status_code=400, detail="Parámetro 'days' no válido: usa un número de días (0 = todo)")
+    return value
+
+
+@router.get("/api/learning/skill")
+async def learning_skill(source: str | None = None, days: float = 7.0, model_key: str | None = None) -> dict:
+    """SkillReport (app.sim.evaluator.skill_report): hit rate of the verified predictions against the reference
+    (always the most frequent outcome of the same rows) and chance with the same mix of calls, Brier against
+    climatology, 95 % intervals clustered by independent horizon windows. days <= 0 = every stored row."""
+    if source not in (None, "", "scanner", "nexus"):
+        raise HTTPException(status_code=400, detail="Fuente no válida: usa scanner o nexus")
+    days = _days(days)
+    return clean_json(await skill_report(rt.db, source=source or None, model_key_value=(model_key or "").strip() or None,
+                                         days=days if days and days > 0 else None))
+
+
+@router.get("/api/learning/replay")
+async def learning_replay(days: float | None = None, model_key: str | None = None) -> dict:
+    """Offline replay of the scanner on its stored feature vectors (app.sim.evaluator.replay_report): ≈ 15 s of CPU
+    per week of data in a worker thread, one at a time per database (409 while another one runs). Default period:
+    the setting scanner.replay_days (clamped to 1 h .. 30 days by the evaluator)."""
+    days = _days(days)
+    if days is None or days <= 0:
+        stored = rt.settings.get("scanner.replay_days", REPLAY_DAYS_DEFAULT) if rt.settings is not None else None
+        days = safe_float(stored)
+        if days is None or days <= 0:  # setting 0 (vectors dropped at resolution): the default period, as the terminal
+            days = float(REPLAY_DAYS_DEFAULT)
+    try:
+        rep = await replay_report(rt.db, days=float(days), model_key_value=(model_key or "").strip() or None)
+    except ReplayBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return clean_json(rep)

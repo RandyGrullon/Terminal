@@ -6,8 +6,13 @@ import type { Health } from '../../api/types'
 import { fmtDateTime, fmtDuration, fmtNum } from '../../lib/format'
 import { Card, ErrorBox, IconButton, Loading } from '../ui'
 
-const SERVICE_LABEL: Record<string, string> = {
+/** Spanish name of each backend service id of /api/health (backend/app/main.py SERVICES, plus ws and auth). */
+/** Services without a background loop: idle (not "detenido") until the user starts a job. */
+const ON_DEMAND = new Set(['validation'])
+
+export const SERVICE_LABEL: Record<string, string> = {
   hub: 'Datos de mercado',
+  macro: 'Semáforo de mercado',
   nexus: 'Motor NEXUS',
   scanner: 'Escáner',
   paper: 'Cuenta demo',
@@ -16,6 +21,8 @@ const SERVICE_LABEL: Record<string, string> = {
   scripts: 'PyChart',
   ws: 'Tiempo real (WebSocket)',
   maintenance: 'Mantenimiento',
+  alerts: 'Alertas externas',
+  validation: 'Validación walk-forward',
   auth: 'Autenticación',
 }
 
@@ -122,7 +129,13 @@ function SystemCard({ onHealth }: { onHealth?: (h: Health | null) => void }) {
                     {err ? (
                       <span className="tiny neg set-wrap">{err}</span>
                     ) : (
-                      <span className="tiny muted ellipsis">{running ? d.text || 'en marcha' : `detenido${d.text ? ` · ${d.text}` : ''}`}</span>
+                      <span className="tiny muted ellipsis">
+                        {running
+                          ? d.text || 'en marcha'
+                          : ON_DEMAND.has(id)
+                            ? 'en espera · se ejecuta cuando lo pides'
+                            : `detenido${d.text ? ` · ${d.text}` : ''}`}
+                      </span>
                     )}
                   </div>
                 </div>

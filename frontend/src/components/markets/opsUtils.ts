@@ -20,20 +20,16 @@ export function fmtRate(v: number | null | undefined, digits = 1): string {
   return r === null ? '—' : fmtPct(r * 100, digits, false)
 }
 
-/** Hit-rate tone: green when clearly better than a coin flip, red when worse. */
-export function rateTone(v: number | null | undefined, good = 0.55, bad = 0.5): Tone {
+/** Tone of a rate (fraction or percentage) against thresholds the caller states (e.g. the demo account's win rate:
+ *  green from `good`, red below `bad`, amber in between). There is no default threshold on purpose: neither 50 % nor
+ *  any other fixed number is a chance level in general (predictions have three outcomes, a win rate depends on the
+ *  targets), so each caller says what it compares with. Hit rates of predictions are judged against their reference
+ *  in components/brain/skill.ts instead. */
+export function rateTone(v: number | null | undefined, good: number, bad: number): Tone {
   const r = rate01(v)
   if (r === null) return 'muted'
   if (r >= good) return 'pos'
   if (r < bad) return 'neg'
-  return 'warn'
-}
-
-/** Brier score: 0 = perfect, 0.25 = coin flip. */
-export function brierTone(b: number | null | undefined): Tone {
-  if (!isNum(b)) return 'muted'
-  if (b <= 0.235) return 'pos'
-  if (b > 0.255) return 'neg'
   return 'warn'
 }
 

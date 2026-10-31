@@ -23,7 +23,13 @@ const COLUMNS: { key: SortKey | null; label: string; title?: string; num?: boole
   { key: 'change_pct', label: 'Cambio %', num: true },
   { key: 'score', label: 'Score', title: 'Puntuación del modelo (−1 venta … +1 compra)' },
   { key: 'prob_up', label: 'P↑', num: true, title: 'Probabilidad estimada de subida en el horizonte del escáner' },
-  { key: 'action', label: 'Acción', title: 'Señal del modelo rápido del escáner (no es la acción de NEXUS completo)' },
+  {
+    key: 'action',
+    label: 'Acción',
+    title:
+      'Predicción del modelo rápido del escáner (no es la acción de NEXUS completo): COMPRAR / VENDER = dirección más probable; ' +
+      'ESPERAR = se espera un movimiento menor que la banda neutral (abre la fila para ver por qué)',
+  },
   {
     key: 'verdict',
     label: 'Veredicto',

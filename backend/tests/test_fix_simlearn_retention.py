@@ -74,6 +74,7 @@ def test_old_scanner_rows_are_pruned_and_the_statistics_stay(runtime_factory, mo
 
 
 def test_resolution_updates_the_aggregates_and_drops_the_features(runtime_factory, monkeypatch):
+    """The feature vector of a resolved scanner row is kept `scanner.replay_days` (offline replay), then dropped."""
     monkeypatch.setattr(nexus_config, "BACKGROUND", False)
 
     class Hub:
@@ -91,10 +92,15 @@ def test_resolution_updates_the_aggregates_and_drops_the_features(runtime_factor
                 (NOW - 4 * 3600 * 1000, NOW - 60_000, encode_features({"rec_60": 0.5})),
             )
             rt.hub = Hub()
-            out = await ev.PredictionEvaluator(rt).run_once(now=NOW)
+            evaluator = ev.PredictionEvaluator(rt)
+            out = await evaluator.run_once(now=NOW)
             assert out["predictions"] == 1 and out["scanner_updates"] == 1
             row = await db.fetchone("SELECT features, correct FROM predictions WHERE id=?", (pid,))
-            assert row["features"] is None and row["correct"] == 1
+            assert row["features"] is not None and row["correct"] == 1  # replay window
+            await evaluator.run_once(now=NOW + 2 * DAY_MS)
+            assert (await db.fetchone("SELECT features FROM predictions WHERE id=?", (pid,)))["features"] is not None
+            await evaluator.run_once(now=NOW + ev.REPLAY_DAYS_DEFAULT * DAY_MS + 3_600_000)
+            assert (await db.fetchone("SELECT features FROM predictions WHERE id=?", (pid,)))["features"] is None
             agg = await db.fetchall("SELECT * FROM prediction_daily")
             assert len(agg) == 1
             a = agg[0]

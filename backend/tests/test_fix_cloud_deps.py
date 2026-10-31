@@ -107,5 +107,10 @@ def test_docs_never_tell_windows_users_to_run_start_ps1_directly():
 
 @pytest.mark.skipif(shutil.which("git") is None or not (ROOT / ".git").exists(), reason="sin repositorio git")
 def test_start_sh_is_executable_in_git():
-    out = subprocess.run(["git", "ls-files", "-s", "start.sh"], cwd=ROOT, capture_output=True, text=True, check=True)
+    # safe.directory=* for this read-only call only: a checkout owned by another user (a container with the checkout
+    # mounted, a CI cache) makes git refuse it as "dubious ownership" otherwise
+    out = subprocess.run(["git", "-c", "safe.directory=*", "ls-files", "-s", "start.sh"], cwd=ROOT,
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        pytest.skip(f"git no puede leer este repositorio aquí: {out.stderr.strip()[:200]}")
     assert out.stdout.startswith("100755 "), out.stdout

@@ -1,6 +1,7 @@
 // Detail popover of the header semáforo. The decision comes first (level, headline, advice, "no operar" window),
-// then only the few data points that justify it: ≤ 3 reasons, ≤ 6 metrics, ≤ 5 high-impact events; the weekly
-// calendar loads on demand. Footer: data age and the "sound on red alerts" preference.
+// then only the few data points that justify it: ≤ 3 reasons, ≤ 6 metrics, ≤ 5 high-impact events; the calendar of
+// this week and the next one (official dates tagged by source) loads on demand. Footer: data age and the "sound on
+// red alerts" preference.
 import { useEffect, useRef, useState } from 'react'
 import { Ban, ChevronDown, ChevronUp, RefreshCw, TriangleAlert, X } from 'lucide-react'
 import type { MarketConditions } from '../../api/types'
@@ -125,7 +126,7 @@ function PanelBody(props: { c: MarketConditions; now: number }) {
         )}
         <button type="button" className="mp-link" aria-expanded={week} onClick={() => setWeek((w) => !w)}>
           {week ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-          {week ? 'Ocultar semana' : 'Ver semana completa'}
+          {week ? 'Ocultar calendario' : 'Ver calendario: esta semana y la próxima'}
         </button>
         {week && <MacroWeek now={now} />}
       </section>

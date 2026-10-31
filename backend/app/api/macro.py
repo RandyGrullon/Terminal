@@ -54,7 +54,8 @@ async def get_macro(symbol: str | None = None) -> dict:
 
 @router.get("/api/macro/calendar")
 async def get_macro_calendar(days: str = "7", impact: str = "high,medium", currency: str | None = None) -> dict:
-    """Upcoming economic events: ?days=1..60 &impact=high,medium|all &currency=USD,EUR."""
+    """Upcoming economic events: ?days=1..60 &impact=high,medium|all &currency=USD,EUR. Each event names its
+    `source`; `coverage` (optional) tells how far the weekly feed reaches and the state of each official calendar."""
     svc = _service()
     try:
         n_days = int(str(days).strip())
@@ -80,4 +81,8 @@ async def get_macro_calendar(days: str = "7", impact: str = "high,medium", curre
             raise HTTPException(status_code=400,
                                 detail=f"Divisa no válida: {', '.join(bad)} (códigos de 3 letras, por ejemplo USD,EUR)")
     events = await svc.calendar(days=n_days, impacts=impacts, currencies=currencies)
-    return {"events": clean_json(events)}
+    out = {"events": clean_json(events)}
+    coverage = getattr(svc, "coverage", None)
+    if callable(coverage):
+        out["coverage"] = clean_json(coverage())
+    return out

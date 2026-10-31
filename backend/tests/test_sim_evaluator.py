@@ -9,7 +9,7 @@ import pytest
 from app import config as nexus_config
 from app.data.base import CandleSet
 from app.sim import evaluator as ev
-from app.sim.scanner import FEATURE_NAMES, ScannerService
+from app.sim.scanner import CONTEXT_NAMES, FEATURE_NAMES, LearnSample, ScannerService
 
 NOW = 1_760_000_400_000  # ms
 H = 3600
@@ -254,7 +254,12 @@ def test_learning_summary_with_models_and_calibration(runtime_factory, monkeypat
         async with runtime_factory() as rt:
             db = rt.db
             svc = ScannerService(rt)
-            await svc.learn_batch([("crypto|1h|14400", {"rec_60": 0.9}, 1, 100)] * 5)
+            # cross-sectional evidence: within each scan the assets rated higher on 1h are the ones that went up
+            samples = [LearnSample(key="crypto|1h|14400", feats={"rec_60": 0.9 if i % 2 else -0.9}, up=i % 2,
+                                   label_time=100 + s * 900, created_ms=(100 + s * 900 - 14400) * 1000,
+                                   ret_pct=1.0 if i % 2 else -1.0)
+                       for s in range(60) for i in range(10)]
+            await svc.learn_batch(samples)
             for i, (prob, ret) in enumerate([(0.15, -1.0), (0.12, 0.5), (0.55, 1.0), (0.58, -0.2), (0.91, 2.0)]):
                 pid = await _insert_pred(db, created=NOW - (i + 10) * 86400 * 1000, target=NOW - (i + 9) * 86400 * 1000,
                                          prob=prob, direction=1 if prob > 0.5 else -1)
@@ -268,10 +273,13 @@ def test_learning_summary_with_models_and_calibration(runtime_factory, monkeypat
             )
             s = await ev.learning_summary(db, rt.settings.all())
             sm = s["scanner_model"]
-            assert sm["key"] == "crypto|1h|14400" and sm["updates"] == 5
+            assert sm["key"] == "crypto|1h|14400" and sm["updates"] == 600
             assert sm["hit_rate"] == pytest.approx(0.6) and 0 < sm["brier"] < 1
-            assert len(sm["features"]) == len(FEATURE_NAMES) and sm["features"][0]["name"] == "rec_60"
+            # the asset's features, its volatility × market move and the market context (scan-level part)
+            assert len(sm["features"]) == len(FEATURE_NAMES) + 1 + len(CONTEXT_NAMES)
+            assert sm["features"][0]["name"] == "rec_60" and sm["features"][0]["weight"] > 0
             assert sm["features"][0]["label"] == "Rating técnico 1h"
+            assert {f["name"] for f in sm["features"]} >= {"ctx_breadth_4h", "reg_trend_up", "beta_x_mkt"}
             bins = {b["bin"]: b for b in sm["calibration"]}
             assert bins[1]["count"] == 2 and bins[1]["observed"] == pytest.approx(0.5)
             assert bins[5]["count"] == 2 and bins[9]["count"] == 1 and bins[9]["observed"] == 1.0

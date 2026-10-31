@@ -1,11 +1,12 @@
 // "Aprendizaje": how NEXUS learns from its own verified predictions (feedback loop), with honest out-of-sample
-// statistics, calibration, what the models weigh and the full prediction log.
+// statistics compared with their reference (three outcomes: 50 % is not chance), calibration, what the models weigh
+// and the full prediction log.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Brain, RefreshCw, ShieldCheck, Telescope } from 'lucide-react'
 import { api, errorMessage } from '../api/client'
 import type { LearningSummary, Timeframe } from '../api/types'
 import { socket } from '../api/ws'
-import { fmtClock, fmtInt } from '../lib/format'
+import { fmtClock, fmtInt, fmtProb } from '../lib/format'
 import { plural } from '../lib/plural'
 import { useApp } from '../store'
 import { Button, Card, Disclaimer, ErrorBox, Loading, Modal, Stat } from '../components/ui'
@@ -15,10 +16,27 @@ import LoopExplainer from '../components/brain/LoopExplainer'
 import NexusModelModal from '../components/brain/NexusModelModal'
 import NexusModelsTable from '../components/brain/NexusModelsTable'
 import PredictionsTable from '../components/brain/PredictionsTable'
-import TimelineChart from '../components/brain/TimelineChart'
+import SkillCard from '../components/brain/SkillCard'
+import TimelineChart, { type TimelinePoint } from '../components/brain/TimelineChart'
+import ValidationCard from '../components/brain/ValidationCard'
 import WeightBars from '../components/brain/WeightBars'
 import { MIN_EVIDENCE_N, evidenceTone, filterEvidence, fmtOf } from '../components/brain/evidence'
-import { brierTone, fmtBrier, fmtRate, prettyKey, prob01, rateTone } from '../components/brain/learnFormat'
+import { fmtBrier, fmtRate, prettyKey, prob01, rateTone } from '../components/brain/learnFormat'
+import {
+  brierSkill,
+  climatology,
+  completeDays,
+  fmtBss,
+  fmtOfN,
+  overallGroup,
+  periodLabel,
+  sameRowsDay,
+  scannerGroup,
+  skillTone,
+  sourceGroup,
+  useSkillReport,
+  type SkillWindow,
+} from '../components/brain/skill'
 import '../components/brain/brain.css'
 
 const REFRESH_MS = 30000
@@ -72,6 +90,9 @@ export default function BrainPage() {
   const [viewTarget, setViewTarget] = useState<ModelRef | null>(null)
   const [resetTarget, setResetTarget] = useState<ModelRef | null>(null)
   const [resetting, setResetting] = useState(false)
+  // 7 days by default: "todo lo guardado" scans every stored row (≈ 0,5 M scanner rows a month) and is cached longer.
+  const [skillWindow, setSkillWindow] = useState<SkillWindow>('7')
+  const skill = useSkillReport(skillWindow, tick)
   const seq = useRef(0)
 
   const load = useCallback(async () => {
@@ -140,7 +161,16 @@ export default function BrainPage() {
   const onReset = useCallback((r: ModelRef) => setResetTarget({ symbol: r.symbol, tf: r.tf }), [])
   const closeView = useCallback(() => setViewTarget(null), [])
 
-  const timeline = useMemo(() => arr(data?.timeline).map((t) => ({ time: t.time, hit_rate: t.hit_rate, brier: t.brier, n: t.n })), [data])
+  // Daily references (most frequent outcome of the day, climatology) from the skill report, on the same UTC days, and
+  // only for the days it covers entirely with the same predictions (its first day starts at `since`, mid-day; with
+  // "todo lo guardado" the scanner rows older than 30 days are gone while the daily aggregates keep 90 days).
+  const timeline = useMemo<TimelinePoint[]>(() => {
+    const refs = completeDays(skill.report, overallGroup(skill.report))
+    return arr(data?.timeline).map((t) => {
+      const r = sameRowsDay(refs, t.time, t.n)
+      return { time: t.time, hit_rate: t.hit_rate, brier: t.brier, n: t.n, reference: r?.reference ?? null, brier_ref: r?.brier_ref ?? null }
+    })
+  }, [data, skill.report])
   const features = useMemo(
     () => arr(data?.scanner_model?.features).map((f) => ({ id: f.name, label: f.label || prettyKey(f.name), weight: f.weight })),
     [data],
@@ -197,6 +227,16 @@ export default function BrainPage() {
     'No habrían llegado a TP1 antes del stop: pérdida o cierre por tiempo (no siempre una pérdida). Solo se colorea cuando ' +
     `hay al menos ${MIN_EVIDENCE_N} casos verificados y la diferencia con las tomadas supera el margen de error`
   const takenTitle = `Llegaron a TP1 antes del stop. Solo se colorea con al menos ${MIN_EVIDENCE_N} casos verificados`
+  // Prediction hit rates are compared with their reference (skill report), never with a fixed 50 %. A figure is only
+  // shown next to a reference (or coloured by a verdict) computed on the same rows: the headline hit rate and Brier
+  // are historical (daily aggregates), so they stay neutral and point to the skill card for their reference.
+  const period = periodLabel(skill.report?.days)
+  const hitHint = 'histórico · 3 resultados: el 50 % no es el azar (referencia, abajo)'
+  const brierHint = 'histórico · menor es mejor · su referencia es la climatología, no 0,25'
+  const statTitle = 'Cifra histórica (agregados diarios). La comparación con la referencia del mismo periodo está en «Habilidad frente a la referencia»'
+  const scannerSkill = scannerGroup(skill.report, sm?.key)
+  const scannerClim = sm ? climatology(sm.calibration) : null
+  const scannerBss = brierSkill(sm?.brier, scannerClim?.brierRef)
 
   return (
     <div className="page brain-page">
@@ -213,8 +253,8 @@ export default function BrainPage() {
         <Stat label="Predicciones totales" value={fmtInt(p.total)} hint="registradas antes del resultado" />
         <Stat label="Resueltas" value={fmtInt(p.resolved)} hint="verificadas con el precio real" />
         <Stat label="Pendientes" value={fmtInt(p.pending)} hint="esperando su horizonte" />
-        <Stat label="Acierto" value={fmtRate(p.hit_rate)} tone={rateTone(p.hit_rate)} hint="fuera de muestra · 50 % = azar" />
-        <Stat label="Brier" value={fmtBrier(p.brier)} tone={brierTone(p.brier)} hint="0 = perfecto · 0,25 = azar" />
+        <Stat label="Acierto" value={fmtRate(p.hit_rate)} hint={hitHint} title={statTitle} />
+        <Stat label="Brier" value={fmtBrier(p.brier)} hint={brierHint} title={statTitle} />
         <Stat
           label="Decisiones del filtro"
           value={fmtInt(g.decisions)}
@@ -236,10 +276,12 @@ export default function BrainPage() {
         />
       </div>
 
+      <SkillCard state={skill} range={skillWindow} onRange={setSkillWindow} onRetry={refreshAll} />
+
       <div className="brain-row">
         <Card
           title="Evolución del acierto"
-          sub="Acierto y Brier de las predicciones resueltas a lo largo del tiempo"
+          sub="Acierto y Brier de las predicciones resueltas a lo largo del tiempo, junto a su referencia de cada día"
           flush
           className="brain-main-card"
         >
@@ -247,14 +289,36 @@ export default function BrainPage() {
           <TimelineChart points={timeline} height={280} tf="1d" />
           {bySource.length > 0 && (
             <div className="brain-sources">
-              {bySource.map(([src, s]) => (
-                <div key={src} className="brain-source">
-                  <span className="text-2">{SOURCE_LABEL[src] ?? prettyKey(src)}</span>
-                  <span className="mono">{plural(s?.resolved, 'resuelta', 'resueltas')}</span>
-                  <span className={`mono ${rateTone(s?.hit_rate)}`}>acierto {fmtRate(s?.hit_rate)}</span>
-                  <span className={`mono ${brierTone(s?.brier)}`}>Brier {fmtBrier(s?.brier)}</span>
-                </div>
-              ))}
+              {bySource.map(([src, s]) => {
+                // The period's figures next to their reference (same rows); without them, the historical ones alone.
+                const sg = sourceGroup(skill.report, src)
+                const ref = sg && sg.n > 0 ? sg.reference : null
+                return (
+                  <div key={src} className="brain-source">
+                    <span className="text-2">{SOURCE_LABEL[src] ?? prettyKey(src)}</span>
+                    <span className="mono">{plural(s?.resolved, 'resuelta', 'resueltas')}</span>
+                    {sg && ref ? (
+                      <>
+                        <span className={`mono ${skillTone(sg)}`} title={`Predicciones verificadas en ${period}`}>
+                          acierto {fmtOfN(sg.hits, sg.n)} ({fmtProb(sg.accuracy, 1)}) en {period}
+                        </span>
+                        <span className="mono muted" title={`Referencia en ${period}: ${ref.label}`}>
+                          ref. {fmtProb(ref.accuracy, 1)}
+                        </span>
+                        <span className="mono">Brier {fmtBrier(sg.brier)}</span>
+                        <span className="mono muted" title={`Climatología en ${period}`}>
+                          clim. {fmtBrier(sg.brier_ref)}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="mono">acierto {fmtRate(s?.hit_rate)} (histórico)</span>
+                        <span className="mono">Brier {fmtBrier(s?.brier)}</span>
+                      </>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           )}
         </Card>
@@ -264,7 +328,16 @@ export default function BrainPage() {
           actions={sm ? <span className="tiny muted mono">{sm.key}</span> : undefined}
         >
           {sm ? (
-            <CalibrationChart bins={sm.calibration} />
+            <div className="col gap-1">
+              <CalibrationChart bins={sm.calibration} />
+              {scannerClim && (
+                <div className="brain-ref-note">
+                  Brier {fmtBrier(sm.brier)} frente a {fmtBrier(scannerClim.brierRef)} de la climatología (siempre {fmtProb(scannerClim.upRate, 0)}{' '}
+                  de subida, mismas predicciones) · <strong>habilidad {fmtBss(scannerBss)}</strong> (histórico, sin margen de error: la
+                  conclusión, si la hay, está en «Habilidad frente a la referencia»)
+                </div>
+              )}
+            </div>
           ) : (
             <div className="muted small">El modelo del escáner aún no se ha entrenado. Ejecuta un escaneo para empezar.</div>
           )}
@@ -290,16 +363,32 @@ export default function BrainPage() {
           }
           sub={
             sm
-              ? `${plural(sm.updates, 'actualización', 'actualizaciones')} · acierto ${fmtRate(sm.hit_rate)} · Brier ${fmtBrier(sm.brier)}`
+              ? `${plural(sm.updates, 'actualización', 'actualizaciones')} · acierto histórico ${fmtRate(sm.hit_rate)} · Brier ${fmtBrier(sm.brier)}` +
+                (scannerSkill && scannerSkill.n > 0 && scannerSkill.reference
+                  ? ` · ${period}: ${fmtOfN(scannerSkill.hits, scannerSkill.n)} frente a ${fmtProb(scannerSkill.reference.accuracy, 1)} de referencia`
+                  : '')
               : 'Pesos aprendidos de cada indicador'
           }
         >
           {sm ? (
-            <WeightBars items={features} posHint="empuja al alza" negHint="empuja a la baja" />
+            <div className="col gap-1">
+              <WeightBars items={features} posHint="empuja al alza" negHint="empuja a la baja" />
+              <span className="tiny muted">
+                Los indicadores del activo cuentan frente a la media de su escaneo (un movimiento de todo el mercado no se lee como 150 señales);
+                el contexto de mercado (amplitud, BTC/ETH, régimen) aprende una vez por escaneo.
+              </span>
+            </div>
           ) : (
             <div className="muted small">Sin modelo del escáner todavía.</div>
           )}
         </Card>
+      </div>
+
+      {/* Its own full-width row. In this one-item wrapper the `.val-card` grid-column / order rules of validation.css
+          have no effect (as a direct child of the page's flex column, `order: 1` would move it to the bottom), and the
+          reading and focus order now follow what is on screen. */}
+      <div className="col">
+        <ValidationCard />
       </div>
 
       <Card title="Modelos NEXUS por activo" sub="Cada símbolo y temporalidad aprende sus propios pesos y su calibración" flush>

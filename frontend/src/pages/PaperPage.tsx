@@ -1,10 +1,11 @@
-// Cuenta demo: simulated (paper) trading account 1. Stats, open positions with the live NEXUS advice, history, a new
-// order ticket that shows the Trade Gate verdict before opening, auto-trading and account reset.
-// Live updates arrive over the socket ('paper' topic); the account is also polled every 20 s as a fallback.
+// Cuenta demo: simulated (paper) trading account 1. Stats, open positions with the live NEXUS advice, pending limit /
+// stop orders, history, the portfolio-risk panel, a new order ticket that shows the Trade Gate verdict before opening,
+// auto-trading and account reset. Live updates arrive over the socket ('paper' topic: account, positions and the
+// optional `orders` / `risk`); the account is also polled every 20 s as a fallback.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { OctagonAlert, RefreshCw, RotateCcw, Wallet } from 'lucide-react'
+import { Hourglass, OctagonAlert, RefreshCw, RotateCcw, Wallet } from 'lucide-react'
 import { api, errorMessage } from '../api/client'
-import type { PaperSnapshot, Position } from '../api/types'
+import type { PaperLiveExtra, PaperOrder, PaperRisk, PaperSnapshot, Position } from '../api/types'
 import { socket } from '../api/ws'
 import { fmtAgo, fmtInt, fmtR, splitSymbol } from '../lib/format'
 import { isOne, plural } from '../lib/plural'
@@ -17,12 +18,17 @@ import HistoryTable from '../components/paper/HistoryTable'
 import OrderCard from '../components/paper/OrderCard'
 import AutoTradeCard, { type AutoState } from '../components/paper/AutoTradeCard'
 import ResetModal from '../components/paper/ResetModal'
+import PendingOrdersTable from '../components/paper/PendingOrdersTable'
+import RiskPanel from '../components/paper/RiskPanel'
+import { paperOrdersApi } from '../components/paper/ordersApi'
+import { normalizeOrders, normalizeRisk } from '../components/paper/ordersUtils'
 import { adviceLevel, isAccount, normalizePositions, normalizeSnapshot } from '../components/paper/paperUtils'
 import { useMediaQuery } from '../components/paper/useMediaQuery'
 import '../components/paper/paper.css'
 
 const POLL_MS = 20_000
 const RELOAD_DEBOUNCE_MS = 600
+const RECENT_ORDERS = 20
 
 export default function PaperPage() {
   const notify = useApp((s) => s.notify)
@@ -34,7 +40,18 @@ export default function PaperPage() {
   const [confirmAll, setConfirmAll] = useState(false)
   const [closingAll, setClosingAll] = useState(false)
   const [resetOpen, setResetOpen] = useState(false)
+  const [orders, setOrdersState] = useState<PaperOrder[]>([])
+  const [recentOrders, setRecentOrders] = useState<PaperOrder[]>([])
+  const [risk, setRisk] = useState<PaperRisk | null>(null)
+  const [cancellingId, setCancellingId] = useState<number | null>(null)
+  const [confirmCancelAll, setConfirmCancelAll] = useState(false)
   const [, setTick] = useState(0)
+  const ordersRef = useRef<PaperOrder[]>([])
+
+  const setOrders = useCallback((next: PaperOrder[]) => {
+    ordersRef.current = next
+    setOrdersState(next)
+  }, [])
 
   const alive = useRef(true)
   const seq = useRef(0)
@@ -59,11 +76,22 @@ export default function PaperPage() {
       const id = ++seq.current
       if (!quiet) setLoading(true)
       try {
-        const res = await api.paper.account()
+        // pending orders and the risk panel are optional: a failure there never hides the account
+        const [res, ordersRes, riskRes] = await Promise.all([
+          api.paper.account(),
+          paperOrdersApi.list('all', RECENT_ORDERS).catch(() => null),
+          paperOrdersApi.risk().catch(() => null),
+        ])
         if (!alive.current || id !== seq.current) return
         const s = normalizeSnapshot(res)
         if (!s) throw new Error('Respuesta de la cuenta demo no válida')
         setSnap(s)
+        if (ordersRes) {
+          const all = normalizeOrders(ordersRes.orders)
+          setOrders(all.filter((o) => o.status === 'pending'))
+          setRecentOrders(all.filter((o) => o.status !== 'pending'))
+        }
+        if (riskRes) setRisk(normalizeRisk(riskRes))
         setError(null)
         setLoadedAt(Date.now())
       } catch (err) {
@@ -73,7 +101,7 @@ export default function PaperPage() {
         if (alive.current && id === seq.current) setLoading(false)
       }
     },
-    [setSnap],
+    [setSnap, setOrders],
   )
 
   const scheduleReload = useCallback(() => {
@@ -101,11 +129,21 @@ export default function PaperPage() {
       const closedSome = !!prev && prev.positions.some((p) => !ids.has(p.id))
       const account = { ...msg.account, auto_symbols: Array.isArray(msg.account.auto_symbols) ? msg.account.auto_symbols : [] }
       setSnap(prev ? { ...prev, account, positions } : { account, positions, history: [] })
+      // optional fields (pending orders + portfolio risk): an order that left the list went to the recent ones
+      const extra = msg as unknown as PaperLiveExtra
+      let ordersGone = false
+      if (Array.isArray(extra.orders)) {
+        const next = normalizeOrders(extra.orders)
+        const ids = new Set(next.map((o) => o.id))
+        ordersGone = ordersRef.current.some((o) => !ids.has(o.id))
+        setOrders(next)
+      }
+      if (extra.risk !== undefined) setRisk(normalizeRisk(extra.risk))
       setLoadedAt(Date.now())
-      if (!prev || closedSome || prev.account.trades !== account.trades) scheduleReload()
+      if (!prev || closedSome || ordersGone || prev.account.trades !== account.trades) scheduleReload()
     })
     return off
-  }, [scheduleReload, setSnap])
+  }, [scheduleReload, setSnap, setOrders])
 
   // ------------------------------------------------------------------ actions
   const openChart = useCallback((p: Position) => useApp.getState().openChart(p.symbol, asTimeframe(p.tf)), [])
@@ -148,6 +186,39 @@ export default function PaperPage() {
       void load(true)
     }
   }, [load, notify])
+
+  const cancelOrder = useCallback(
+    async (o: PaperOrder) => {
+      setCancellingId(o.id)
+      try {
+        await paperOrdersApi.cancel({ order_id: o.id })
+        notify(`Orden demo #${o.id} cancelada: ${o.label.toLowerCase()} ${splitSymbol(o.symbol).ticker}`, 'info')
+      } catch (err) {
+        notify(`No se pudo cancelar la orden: ${errorMessage(err)}`, 'error')
+      } finally {
+        if (alive.current) setCancellingId(null)
+        void load(true)
+      }
+    },
+    [load, notify],
+  )
+
+  const cancelAllOrders = useCallback(async () => {
+    setCancellingId(-1)
+    try {
+      const res = await paperOrdersApi.cancel({ all: true })
+      const n = Array.isArray(res?.cancelled) ? res.cancelled.length : 0
+      notify(plural(n, 'orden pendiente cancelada', 'órdenes pendientes canceladas'), 'info')
+      if (alive.current) setConfirmCancelAll(false)
+    } catch (err) {
+      notify(`No se pudieron cancelar las órdenes: ${errorMessage(err)}`, 'error')
+    } finally {
+      if (alive.current) setCancellingId(null)
+      void load(true)
+    }
+  }, [load, notify])
+
+  const openOrderChart = useCallback((o: PaperOrder) => useApp.getState().openChart(o.symbol, asTimeframe(o.tf)), [])
 
   const onAutoChanged = useCallback(
     (auto: AutoState) => {
@@ -227,6 +298,29 @@ export default function PaperPage() {
     </Card>
   )
 
+  const ordersCard =
+    orders.length > 0 || recentOrders.length > 0 ? (
+      <Card
+        flush
+        title={
+          <>
+            <Hourglass size={14} /> Órdenes pendientes <Badge tone={orders.length ? 'accent' : 'muted'}>{fmtInt(orders.length)}</Badge>
+          </>
+        }
+        sub="Límite y stop simulados: al ejecutarse se consulta otra vez el filtro y los límites de riesgo"
+        actions={
+          orders.length > 1 ? (
+            <Button size="sm" variant="ghost" onClick={() => setConfirmCancelAll(true)} disabled={cancellingId !== null}>
+              Cancelar todas
+            </Button>
+          ) : undefined
+        }
+      >
+        {orders.length === 0 && <div className="tiny muted pp-orders-empty">Sin órdenes pendientes.</div>}
+        <PendingOrdersTable orders={orders} recent={recentOrders} cancellingId={cancellingId} onCancel={cancelOrder} onOpenChart={openOrderChart} />
+      </Card>
+    ) : null
+
   const tickets = snap ? (
     <>
       <OrderCard onOpened={onOpened} />
@@ -271,13 +365,19 @@ export default function PaperPage() {
             <div className="pp-layout">
               <div className="pp-main">
                 {positionsCard}
+                {ordersCard}
                 {historyCard}
               </div>
-              <div className="pp-side">{tickets}</div>
+              <div className="pp-side">
+                <RiskPanel risk={risk} />
+                {tickets}
+              </div>
             </div>
           ) : (
             <>
               {positionsCard}
+              {ordersCard}
+              <RiskPanel risk={risk} />
               <div className="pp-tickets">{tickets}</div>
               {historyCard}
             </>
@@ -294,6 +394,28 @@ export default function PaperPage() {
         onClose={() => setResetOpen(false)}
         onDone={onReset}
       />
+
+      <Modal
+        open={confirmCancelAll}
+        onClose={() => (cancellingId !== null ? undefined : setConfirmCancelAll(false))}
+        width={440}
+        title="Cancelar todas las órdenes pendientes"
+        footer={
+          <>
+            <Button onClick={() => setConfirmCancelAll(false)} disabled={cancellingId !== null}>
+              Volver
+            </Button>
+            <Button variant="danger" onClick={() => void cancelAllOrders()} loading={cancellingId === -1}>
+              Cancelar {fmtInt(orders.length)}
+            </Button>
+          </>
+        }
+      >
+        <p className="small" style={{ margin: 0 }}>
+          Se cancelarán las {fmtInt(orders.length)} órdenes límite / stop pendientes de la cuenta demo (órdenes simuladas). Las posiciones abiertas no
+          cambian.
+        </p>
+      </Modal>
 
       <Modal
         open={confirmAll}

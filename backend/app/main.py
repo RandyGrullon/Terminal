@@ -12,12 +12,13 @@ import time
 import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -41,8 +42,19 @@ SERVICES: list[tuple[str, str, str]] = [
     ("sim", "app.sim.simulator", "Simulator"),
     ("scripts", "app.scripting.service", "ScriptService"),
     ("maintenance", "app.maintenance", "Maintenance"),
+    ("alerts", "app.alerts.service", "AlertService"),
+    ("validation", "app.validation.service", "ValidationService"),
 ]
-ROUTERS = ["app.api.system", "app.api.market", "app.api.nexus", "app.api.sim", "app.api.scripts", "app.api.macro"]
+ROUTERS = [
+    "app.api.system",
+    "app.api.market",
+    "app.api.nexus",
+    "app.api.sim",
+    "app.api.scripts",
+    "app.api.macro",
+    "app.api.alerts",
+    "app.api.validation",
+]
 COMMAND_MODULES = [
     "app.terminal",
     "app.data.commands",
@@ -50,6 +62,8 @@ COMMAND_MODULES = [
     "app.sim.commands",
     "app.scripting.commands",
     "app.macro.commands",
+    "app.alerts.commands",
+    "app.validation.commands",
 ]
 
 # Single active instance on a shared PostgreSQL database (see Leadership)
@@ -60,6 +74,19 @@ STANDBY_DETAIL = (
     "Instancia en espera: otra instancia de NEXUS está activa con la misma base de datos (por ejemplo, durante un "
     "despliegue). Reintenta en unos segundos."
 )
+# Browser origins besides the server's own that may call the API (CORS) and send it changes (OriginCheckMiddleware):
+# the Vite dev server (start.bat -Dev / start.sh --dev) and NEXUS_CORS_ORIGINS (e.g. the Vercel frontend).
+DEV_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
+UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+ORIGIN_LOG_EVERY_S = 300.0  # one warning per this many seconds about refused origins (never a flood of events)
+# Vite names every file under dist/assets after a hash of its content: a browser may keep it without asking again. A
+# new build has new names, and index.html (no-cache: revalidated on every load) always points to the current ones.
+ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
+NO_CACHE = {"Cache-Control": "no-cache"}
+
+
+def browser_origins() -> list[str]:
+    return [*DEV_ORIGINS, *config.CORS_ORIGINS]
 
 
 def _import(modname: str):
@@ -138,6 +165,54 @@ def _auth_summary() -> str:
     if not n:
         return "login Supabase (cualquier usuario del proyecto)"
     return f"login Supabase ({n} {'correo permitido' if n == 1 else 'correos permitidos'})"
+
+
+def _schema_info() -> dict:
+    info = getattr(rt.db, "schema_info", None)
+    return info if isinstance(info, dict) else {}
+
+
+def _report_schema(info: dict) -> None:
+    """What init_schema did (it runs before the event bus exists): the migrations it applied now, or versions newer
+    than this code (a database a newer NEXUS already migrated: it keeps working, nothing is undone)."""
+    applied = ", ".join(str(label) for label in info.get("applied") or [])
+    if applied:
+        version = info.get("version")
+        if info.get("baseline") == "created":  # a new database (or an old one missing part of the base schema)
+            text = f"Base de datos preparada: esquema base y migraciones {applied} (esquema v{version})"
+        else:
+            text = f"Base de datos actualizada al esquema v{version}: {applied}"
+        rt.bus.emit("system", "system", text, {"schema": info})
+    unknown = [v for v in info.get("unknown") or [] if isinstance(v, int) and not isinstance(v, bool)]
+    if unknown:
+        rt.bus.emit(
+            "warn",
+            "system",
+            f"La base de datos tiene migraciones más nuevas que esta versión de NEXUS (v{max(unknown)}): sigue "
+            "funcionando, pero conviene actualizar NEXUS.",
+            {"schema": info},
+        )
+
+
+def _server_protection(status: dict) -> str:
+    """Linux only (elsewhere app.hardening is a no-op): the server's own protection, for the startup line."""
+    if not str(status.get("platform", "")).startswith("linux"):
+        return ""
+    return f" · servidor no volcable: {'sí' if status.get('non_dumpable') is True else 'no'}"
+
+
+def _report_hardening(status: dict) -> None:
+    """harden_server_process() runs before the event bus exists: on Linux, a failure is logged once the bus is up."""
+    if not str(status.get("platform", "")).startswith("linux") or status.get("non_dumpable") is True:
+        return
+    why = status.get("error") or "el sistema no aplicó el cambio"
+    rt.bus.emit(
+        "warn",
+        "system",
+        f"No se pudo marcar el proceso del servidor como no volcable ({why}): otro proceso del mismo usuario podría "
+        "leer su entorno y su memoria (/proc/<pid>/environ y mem).",
+        {"hardening": status},
+    )
 
 
 def _warn_risky_setup() -> None:
@@ -272,6 +347,9 @@ class Leadership:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.hardening import harden_server_process, server_protections
+
+    harden_server_process()  # OS-level protections of the server process (best effort; logged once the bus exists)
     rt.started_at = time.time()
     rt.role = "single"
     rt.db = await open_database()
@@ -286,9 +364,17 @@ async def lifespan(app: FastAPI):
     if rt.role != "standby":
         await rt.bus.start(rt.db)  # a standby only logs to the console: its event ids would clash with the active one
     db_kind = "PostgreSQL" if rt.db.dialect == "postgres" else "SQLite"
+    schema = _schema_info()
+    protection = server_protections()
+    version = f" (esquema v{schema['version']})" if schema.get("version") is not None else ""
     rt.bus.emit(
-        "system", "system", f"Iniciando {config.APP_NAME} v{config.VERSION} · {db_kind} {rt.db.path} · {_auth_summary()}"
+        "system",
+        "system",
+        f"Iniciando {config.APP_NAME} v{config.VERSION} · {db_kind} {rt.db.path}{version} · {_auth_summary()}"
+        f"{_server_protection(protection)}",
     )
+    _report_schema(schema)
+    _report_hardening(protection)
     _warn_risky_setup()
     for err in list(rt.load_errors):  # router import errors collected in create_app()
         rt.bus.emit("error", "system", f"Módulo no disponible → {err}")
@@ -335,11 +421,21 @@ _NOT_BUILT = """<!doctype html><html lang="es"><meta charset="utf-8"><title>NEXU
 y recarga esta página. Documentación de la API: <a style="color:#2962ff" href="/api/docs">/api/docs</a></p></body></html>"""
 
 
+class HashedAssets(StaticFiles):
+    """dist/assets of the built UI, cached by the browser for a year without revalidation (ASSET_CACHE_CONTROL; also
+    on a 304). A missing file is a plain 404, never cached like that."""
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = ASSET_CACHE_CONTROL
+        return response
+
+
 def _mount_frontend(app: FastAPI) -> None:
     dist = config.FRONTEND_DIST.resolve()
     assets = dist / "assets"
     if assets.is_dir():
-        app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
+        app.mount("/assets", HashedAssets(directory=str(assets)), name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str):
@@ -348,11 +444,12 @@ def _mount_frontend(app: FastAPI) -> None:
         if full_path:
             candidate = (dist / full_path).resolve()
             if candidate.is_file() and dist in candidate.parents:
-                return FileResponse(str(candidate))
+                # index.html (and any page) revalidated on every load: it names the current hashed assets
+                return FileResponse(str(candidate), headers=NO_CACHE if candidate.suffix == ".html" else None)
         index = dist / "index.html"
         if index.is_file():
-            return FileResponse(str(index), headers={"Cache-Control": "no-cache"})
-        return HTMLResponse(_NOT_BUILT)
+            return FileResponse(str(index), headers=NO_CACHE)
+        return HTMLResponse(_NOT_BUILT, headers=NO_CACHE)
 
 
 _VALIDATION_ES = {
@@ -437,6 +534,74 @@ class StandbyGate:
         await self.app(scope, receive, send)
 
 
+def _scope_header(scope: dict, name: bytes) -> str | None:
+    for key, value in scope.get("headers") or []:
+        if key.lower() == name:
+            return value.decode("latin-1")
+    return None
+
+
+def origin_key(origin: str) -> str | None:
+    """'scheme://host[:port]' (lower case) of a browser Origin header; None when it is not one ("null" from a
+    sandboxed frame or a file:// page, a path, credentials...)."""
+    try:
+        parts = urlsplit(origin.strip())
+    except ValueError:
+        return None
+    if (parts.scheme not in ("http", "https") or not parts.netloc or "@" in parts.netloc
+            or parts.path not in ("", "/") or parts.query or parts.fragment):
+        return None
+    return f"{parts.scheme}://{parts.netloc}".lower()
+
+
+def _printable(text: str, limit: int = 120) -> str:
+    return "".join(ch if ch.isprintable() else "?" for ch in text[:limit])
+
+
+class OriginCheckMiddleware:
+    """CSRF protection for the requests that change something (POST / PUT / PATCH / DELETE). A browser always sends
+    Origin with a cross-site one, also with the "simple" requests that CORS never preflights (an HTML form, text/plain,
+    no body), which would otherwise reach the endpoint even though the page cannot read the answer. Such a request
+    whose Origin is neither this server's own (the Host it was sent to) nor one of `allowed_origins` (DEV_ORIGINS and
+    NEXUS_CORS_ORIGINS) gets 403 before any endpoint runs. Requests without Origin (the terminal client, curl, scripts,
+    tests) pass: they do not come from a web page. HTTP only (app.ws checks the WebSocket's Origin itself)."""
+
+    def __init__(self, app: Callable, allowed_origins: Iterable[str] = ()):
+        self.app = app
+        self.allowed = frozenset(key for key in (origin_key(o) for o in allowed_origins) if key)
+        self._log = RateLimitedLog()
+
+    def allows(self, origin: str, host: str | None) -> bool:
+        key = origin_key(origin)
+        if key is None:
+            return False
+        if key in self.allowed:
+            return True
+        return bool(host) and key.split("://", 1)[1] == host.strip().lower()  # the page was served by this server
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope.get("type") == "http" and scope.get("method") in UNSAFE_METHODS:
+            origin = _scope_header(scope, b"origin")
+            if origin is not None and not self.allows(origin, _scope_header(scope, b"host")):
+                shown = _printable(origin)
+                if rt.bus is not None and self._log.should_log("origin", ORIGIN_LOG_EVERY_S):
+                    rt.bus.emit(
+                        "warn",
+                        "system",
+                        f"Petición {scope.get('method')} {_printable(str(scope.get('path', '')), 80)} rechazada: "
+                        f"origen no permitido ({shown}), protección CSRF. Si es tu interfaz, añade ese origen a "
+                        "NEXUS_CORS_ORIGINS.",
+                    )
+                await send_json_error(
+                    send,
+                    403,
+                    f"Origen no permitido ({shown}): por seguridad (CSRF), NEXUS solo acepta cambios desde su propia "
+                    "interfaz o desde un origen de NEXUS_CORS_ORIGINS.",
+                )
+                return
+        await self.app(scope, receive, send)
+
+
 def create_app() -> FastAPI:
     if config.AUTH_MODE not in ("none", "supabase"):
         raise RuntimeError(f"NEXUS_AUTH no válido: {config.AUTH_MODE!r} (usa 'none' o 'supabase')")
@@ -457,9 +622,12 @@ def create_app() -> FastAPI:
         openapi_url="/api/openapi.json",
         redoc_url=None,
     )
-    # Middleware order (last added = outermost): CORS -> Auth -> host check -> standby gate -> app.
-    # The host check protects the local API against DNS rebinding; Auth guards public (cloud) deployments; the
-    # standby gate only acts while another instance is the active one (PostgreSQL leader lock).
+    # Middleware order (last added = outermost): CORS -> origin check -> Auth -> host check -> standby gate -> app.
+    # CORS stays outermost, so preflights are answered there and every error below carries its headers for an allowed
+    # origin. The origin check (CSRF) refuses a cross-site change before Auth asks Supabase about its token. The host
+    # check protects the local API against DNS rebinding; Auth guards public (cloud) deployments; the standby gate
+    # only acts while another instance is the active one (PostgreSQL leader lock).
+    origins = browser_origins()
     app.add_middleware(StandbyGate)
     app.add_middleware(HostCheckMiddleware, allowed_hosts=_allowed_hosts(), exempt_paths=_host_check_exempt())
     if config.AUTH_MODE == "supabase":
@@ -467,9 +635,10 @@ def create_app() -> FastAPI:
 
         rt.auth = SupabaseVerifier(config.SUPABASE_URL, config.SUPABASE_ANON_KEY, config.ALLOWED_EMAILS)
         app.add_middleware(AuthMiddleware, verifier=rt.auth)
+    app.add_middleware(OriginCheckMiddleware, allowed_origins=origins)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", *config.CORS_ORIGINS],
+        allow_origins=origins,
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["Retry-After"],  # readable by the browser: back-off hint of the 503s (auth outage, standby)
@@ -553,6 +722,9 @@ def main() -> None:
         app,
         host=config.HOST,
         port=config.PORT,
+        # the standard asyncio loop everywhere: on Linux, start.sh installs uvicorn[standard], whose uvloop would be
+        # picked automatically, while the image (its lock leaves uvloop out), Windows and the tests run on asyncio
+        loop="asyncio",
         log_level="warning",
         access_log=False,
         proxy_headers=True,

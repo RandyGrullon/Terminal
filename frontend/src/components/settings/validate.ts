@@ -41,6 +41,11 @@ export function validateField(def: FieldDef, value: unknown): string | null {
     case 'secret':
       if (typeof value !== 'string') return 'Valor no válido'
       return /\s/.test(value.trim()) ? 'La clave no debe contener espacios' : null
+    case 'text':
+    case 'password':
+      return typeof value === 'string' ? null : 'Valor no válido'
+    case 'multi':
+      return Array.isArray(value) && value.every((v) => typeof v === 'string') ? null : 'Valor no válido'
     case 'markets':
       if (!Array.isArray(value)) return 'Valor no válido'
       return value.length ? null : 'Elige al menos un mercado'

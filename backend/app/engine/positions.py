@@ -37,6 +37,49 @@ class Position:
         self.bars = 0
         self.decision_idx = decision_idx
 
+    # ------------------------------------------------------------------ persistence (anchor snapshots)
+
+    def to_state(self, ref: int) -> dict:
+        """JSON-ready state; bar indices stored as offsets back from bar `ref` (the snapshot bar)."""
+        return {
+            "id": int(self.trade_id), "side": int(self.side), "entry_off": int(ref) - int(self.entry_idx),
+            "entry_time": int(self.entry_time), "entry_price": float(self.entry_price),
+            "sl_initial": float(self.sl_initial), "sl": float(self.sl), "tps": [float(x) for x in self.tps],
+            "risk": float(self.risk), "tp_hits": int(self.tp_hits), "size_left": float(self.size_left),
+            "trail": None if self.trail is None else float(self.trail), "hi": float(self.hi), "lo": float(self.lo),
+            "fills": [[float(fr), float(px)] for fr, px in self.fills],
+            "gate_score": None if self.gate_score is None else float(self.gate_score),
+            "entry_regime": int(self.entry_regime), "bars": int(self.bars),
+            "decision_off": int(ref) - int(self.decision_idx),
+        }
+
+    @classmethod
+    def from_state(cls, d: dict, ref: int) -> "Position":
+        """Inverse of `to_state` for a run whose bar `ref` is the snapshot bar."""
+        pos = cls.__new__(cls)
+        pos.trade_id = int(d["id"])
+        pos.side = 1 if int(d["side"]) > 0 else -1
+        pos.entry_idx = int(ref) - int(d["entry_off"])
+        pos.entry_time = int(d["entry_time"])
+        pos.entry_price = float(d["entry_price"])
+        pos.sl_initial = float(d["sl_initial"])
+        pos.sl = float(d["sl"])
+        pos.tps = [float(x) for x in d["tps"]][:3]
+        pos.risk = float(d["risk"])
+        pos.tp_hits = int(d["tp_hits"])
+        pos.size_left = float(d["size_left"])
+        pos.trail = None if d.get("trail") is None else float(d["trail"])
+        pos.hi = float(d["hi"])
+        pos.lo = float(d["lo"])
+        pos.fills = [(float(fr), float(px)) for fr, px in d.get("fills") or []]
+        pos.gate_score = None if d.get("gate_score") is None else float(d["gate_score"])
+        pos.entry_regime = int(d["entry_regime"])
+        pos.bars = int(d["bars"])
+        pos.decision_idx = int(ref) - int(d["decision_off"])
+        if len(pos.tps) != 3 or not pos.risk > 0:
+            raise ValueError("posición almacenada incompleta")
+        return pos
+
     # ------------------------------------------------------------------ state
 
     @property

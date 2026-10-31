@@ -1,4 +1,15 @@
-import { Component, useEffect, useState, type ComponentType, type ErrorInfo, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import {
+  Component,
+  Suspense,
+  lazy,
+  useEffect,
+  useState,
+  type ComponentType,
+  type ErrorInfo,
+  type LazyExoticComponent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react'
 import {
   Brain,
   ChartCandlestick,
@@ -18,18 +29,25 @@ import { api } from './api/client'
 import type { Health, Page, Timeframe } from './api/types'
 import { socket } from './api/ws'
 import { authEnabled, currentSession, signOut } from './auth/session'
-import { Badge, Button, IconButton } from './components/ui'
+import { Badge, Button, IconButton, Loading } from './components/ui'
 import MarketPulse from './components/macro/MarketPulse'
 import SymbolSearch from './components/SymbolSearch'
 import Terminal from './components/terminal/Terminal'
-import BrainPage from './pages/BrainPage'
-import ChartPage from './pages/ChartPage'
-import MarketsPage from './pages/MarketsPage'
-import PaperPage from './pages/PaperPage'
-import ScannerPage from './pages/ScannerPage'
-import SettingsPage from './pages/SettingsPage'
-import SimulationPage from './pages/SimulationPage'
-import StudioPage from './pages/StudioPage'
+// The sections' styles stay in the first-load stylesheet, in the order the single bundle had them (styles.css, from
+// main.tsx, still last): the cascade and every page look exactly as before the code split. Loaded with each section
+// they would land after styles.css and rules of equal specificity would change winner (e.g. `.stat .stat-value` vs
+// `.scn-acc-stats .stat-value`). All of it is ~16 kB gzip; what loads on demand is the sections' code. A stylesheet
+// that only a section imports and that is not listed here (e.g. brain/validation.css) loads with that section, after
+// styles.css (Vite's default).
+import './components/brain/brain.css'
+import './components/nexus/nexus.css'
+import './components/chart/chart.css'
+import './components/markets/markets.css'
+import './components/paper/paper.css'
+import './components/scanner/scanner.css'
+import './components/settings/settings.css'
+import './components/sim/sim.css'
+import './components/studio/studio.css'
 import { runUiAction, useApp } from './store'
 
 const NAV: { page: Page; label: string; icon: LucideIcon }[] = [
@@ -43,15 +61,97 @@ const NAV: { page: Page; label: string; icon: LucideIcon }[] = [
   { page: 'settings', label: 'Ajustes', icon: SettingsIcon },
 ]
 
-const PAGES: Record<Page, ComponentType> = {
-  chart: ChartPage,
-  markets: MarketsPage,
-  scanner: ScannerPage,
-  sim: SimulationPage,
-  paper: PaperPage,
-  studio: StudioPage,
-  brain: BrainPage,
-  settings: SettingsPage,
+// ----------------------------------------------------------------------------- sections, downloaded on demand
+// Each page is its own chunk (React.lazy): the first load brings the shell plus the section in the URL, the rest is
+// downloaded when it is opened (or, while the server is reachable, when the pointer / focus reaches its menu item).
+
+type PageModule = { default: ComponentType }
+
+/** A section's code could not be downloaded: no connection with the server, or a new build replaced the files while
+ *  this tab was open (the old file names no longer exist). */
+class PageLoadError extends Error {
+  readonly page: Page
+  constructor(page: Page, cause: unknown) {
+    super(cause instanceof Error && cause.message ? cause.message : String(cause))
+    this.name = 'PageLoadError'
+    this.page = page
+  }
+}
+
+interface LazyPage {
+  /** Starts the download once, shared by every caller (prefetch, the visit itself). A failure is not kept here, but the
+   *  browser keeps it: Chromium never requests a failed module file again in the same page (see prefetchOnIntent). */
+  preload: () => Promise<PageModule>
+  Component: LazyExoticComponent<ComponentType>
+}
+
+function lazyPage(page: Page, load: () => Promise<PageModule>): LazyPage {
+  let pending: Promise<PageModule> | null = null
+  const preload = () => {
+    if (!pending) {
+      pending = load().catch((err: unknown) => {
+        pending = null
+        throw new PageLoadError(page, err)
+      })
+    }
+    return pending
+  }
+  return { preload, Component: lazy(preload) }
+}
+
+const PAGES: Record<Page, LazyPage> = {
+  chart: lazyPage('chart', () => import('./pages/ChartPage')),
+  markets: lazyPage('markets', () => import('./pages/MarketsPage')),
+  scanner: lazyPage('scanner', () => import('./pages/ScannerPage')),
+  sim: lazyPage('sim', () => import('./pages/SimulationPage')),
+  paper: lazyPage('paper', () => import('./pages/PaperPage')),
+  studio: lazyPage('studio', () => import('./pages/StudioPage')),
+  brain: lazyPage('brain', () => import('./pages/BrainPage')),
+  settings: lazyPage('settings', () => import('./pages/SettingsPage')),
+}
+
+const pageFor = (page: Page): LazyPage => PAGES[page] ?? PAGES.chart
+
+/** Downloads a section's code ahead of the visit; a failure is reported by the visit itself (the page boundary). */
+function prefetchPage(page: Page): void {
+  pageFor(page)
+    .preload()
+    .catch(() => undefined)
+}
+
+/** Menu hover / focus: downloads the section ahead of the click, only while the server is reachable (live connection
+ *  open, browser online). The browser keeps a failed module download for the life of the page, so a prefetch during a
+ *  disconnection would leave that section unable to open until a reload, even after the server is back. The click
+ *  itself always tries. */
+function prefetchOnIntent(page: Page): void {
+  if (useApp.getState().wsStatus !== 'open') return
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return
+  prefetchPage(page)
+}
+
+// The section in the URL starts downloading right away, in parallel with AuthGate's first request (App renders after).
+prefetchPage(useApp.getState().page)
+
+function PageView({ page }: { page: Page }) {
+  const Section = pageFor(page).Component
+  return <Section />
+}
+
+const LOADING_DELAY_MS = 150
+
+/** Suspense fallback while a section downloads: empty for the first 150 ms (a local server is usually faster, so
+ *  nothing flashes), then a light "Cargando sección…". */
+function PageLoading() {
+  const [visible, setVisible] = useState(false)
+  useEffect(() => {
+    const id = window.setTimeout(() => setVisible(true), LOADING_DELAY_MS)
+    return () => window.clearTimeout(id)
+  }, [])
+  return (
+    <div className="page" aria-busy="true">
+      {visible && <Loading label="Cargando sección…" />}
+    </div>
+  )
 }
 
 const HEADER_TFS: Timeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d', '1w']
@@ -65,25 +165,39 @@ class PageBoundary extends Component<{ children: ReactNode; name: string }, { er
     console.error(`Error en la página ${this.props.name}`, error, info.componentStack)
   }
   render() {
-    if (this.state.error) {
-      return (
-        <div className="page">
-          <div className="errorbox">
-            <TriangleAlert size={16} />
-            <div className="grow">
-              <strong>Esta sección tuvo un error y no se pudo mostrar.</strong>
-              <div className="mono tiny" style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>
-                {this.state.error.message}
+    const { error } = this.state
+    if (!error) return this.props.children
+    // The browser keeps a failed module download for the life of the page (Chromium never requests that file again)
+    // and so does React.lazy: a section that could not be downloaded only comes back with a reload.
+    const download = error instanceof PageLoadError
+    return (
+      <div className="page">
+        <div className="errorbox">
+          <TriangleAlert size={16} />
+          <div className="grow">
+            <strong>{download ? 'No se pudo descargar esta sección.' : 'Esta sección tuvo un error y no se pudo mostrar.'}</strong>
+            {download && (
+              <div style={{ marginTop: 6 }}>
+                Puede que se haya perdido la conexión con el servidor o que la aplicación se haya actualizado mientras
+                esta pestaña estaba abierta. Recarga la página para intentarlo de nuevo.
               </div>
+            )}
+            <div className="mono tiny" style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>
+              {error.message}
             </div>
+          </div>
+          {download ? (
+            <Button size="sm" onClick={() => window.location.reload()}>
+              Recargar página
+            </Button>
+          ) : (
             <Button size="sm" onClick={() => this.setState({ error: null })}>
               Reintentar
             </Button>
-          </div>
+          )}
         </div>
-      )
-    }
-    return this.props.children
+      </div>
+    )
   }
 }
 
@@ -195,7 +309,6 @@ export default function App() {
     window.addEventListener('mouseup', onUp)
   }
 
-  const PageComponent = PAGES[page] ?? ChartPage
   const loadErrors = health?.load_errors ?? []
 
   return (
@@ -248,7 +361,15 @@ export default function App() {
 
       <nav className="app-nav" aria-label="Secciones">
         {NAV.map(({ page: p, label, icon: Icon }) => (
-          <button key={p} type="button" className={`nav-item ${p === page ? 'active' : ''}`} onClick={() => setPage(p)} title={label}>
+          <button
+            key={p}
+            type="button"
+            className={`nav-item ${p === page ? 'active' : ''}`}
+            onClick={() => setPage(p)}
+            onPointerEnter={() => prefetchOnIntent(p)}
+            onFocus={() => prefetchOnIntent(p)}
+            title={label}
+          >
             <Icon size={19} />
             <span>{label}</span>
           </button>
@@ -258,7 +379,9 @@ export default function App() {
       <main className="app-main">
         <div className="page-area">
           <PageBoundary key={page} name={page}>
-            <PageComponent />
+            <Suspense fallback={<PageLoading />}>
+              <PageView page={page} />
+            </Suspense>
           </PageBoundary>
         </div>
         {terminalOpen && (

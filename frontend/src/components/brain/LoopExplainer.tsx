@@ -44,8 +44,10 @@ function LoopExplainer() {
         <ShieldCheck size={16} className="pos" />
         <span>
           Todo el acierto que ves aquí es <strong>fuera de muestra</strong>: se mide sobre predicciones hechas antes de conocer el
-          resultado, nunca sobre datos que el modelo ya había visto. Un 50 % equivale a lanzar una moneda; por encima de 55 % empieza a
-          haber ventaja real.
+          resultado, nunca sobre datos que el modelo ya había visto. Cada predicción tiene tres resultados posibles (sube, baja o se queda
+          dentro de la banda neutral), así que <strong>el 50 % no es el azar</strong>: la referencia es lo que habría acertado quien dijera
+          siempre el resultado más frecuente del periodo. Solo hay ventaja si el acierto la supera fuera del margen de error y con al menos 30
+          ventanas independientes (las predicciones de una misma ventana se mueven juntas).
         </span>
       </div>
     </div>

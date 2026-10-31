@@ -99,10 +99,26 @@ def _wdot(w: np.ndarray, v: np.ndarray) -> np.ndarray:
     return (_rows(w) * v).sum(axis=1)
 
 
+_ROW_CHUNK = 1 << 15
+
+
+def _row_sums(x: np.ndarray, n: int) -> np.ndarray:
+    """Sum of every window x[i-n+1 .. i] (i >= n-1), each one reduced on its own: the value of a bar depends only
+    on its n values, never on where the series starts or ends (bounded memory: rows in chunks)."""
+    w = sliding_window_view(x, n)
+    out = np.empty(len(w))
+    for a in range(0, len(w), _ROW_CHUNK):
+        out[a : a + _ROW_CHUNK] = _rows(w[a : a + _ROW_CHUNK]).sum(axis=1)
+    return out
+
+
 # ============================================================================= rolling statistics
 
 
-def rolling_sum(x: np.ndarray, n: int) -> np.ndarray:
+def rolling_sum(x: np.ndarray, n: int, exact: bool = False) -> np.ndarray:
+    """Rolling sum (NaN-strict). `exact` = each window summed on its own (O(n·len) but independent of the series
+    start, so a run that starts at another bar reproduces the same bits; the default cumulative version is
+    O(len) and only independent of the series end)."""
     x = f64(x)
     n = _n(n)
     m = len(x)
@@ -110,6 +126,12 @@ def rolling_sum(x: np.ndarray, n: int) -> np.ndarray:
     if m < n:
         return out
     bad = ~np.isfinite(x)
+    if exact:
+        b = np.concatenate(([0], np.cumsum(bad)))
+        s = _row_sums(np.where(bad, 0.0, x), n)
+        s[(b[n:] - b[:-n]) > 0] = NAN
+        out[n - 1 :] = s
+        return out
     # Offset by the FIRST finite value (improves precision of the cumulative sums). It must not depend on later
     # bars: a whole-array statistic (e.g. the median) changes the last bits of every sum when the series is
     # truncated, which flips exact comparisons downstream (crossovers) -> numerical lookahead.
@@ -124,9 +146,9 @@ def rolling_sum(x: np.ndarray, n: int) -> np.ndarray:
     return out
 
 
-def sma(x: np.ndarray, n: int) -> np.ndarray:
+def sma(x: np.ndarray, n: int, exact: bool = False) -> np.ndarray:
     n = _n(n)
-    return rolling_sum(x, n) / n
+    return rolling_sum(x, n, exact) / n
 
 
 def rolling_std(x: np.ndarray, n: int, ddof: int = 0) -> np.ndarray:
@@ -236,8 +258,8 @@ def rolling_rank_pct(x: np.ndarray, n: int, min_periods: int = 30) -> np.ndarray
     return out
 
 
-def zscore(x: np.ndarray, n: int) -> np.ndarray:
-    m = sma(x, n)
+def zscore(x: np.ndarray, n: int, exact: bool = False) -> np.ndarray:
+    m = sma(x, n, exact)
     s = rolling_std(x, n)
     return safe_div(f64(x) - m, s)
 
@@ -245,11 +267,38 @@ def zscore(x: np.ndarray, n: int) -> np.ndarray:
 # ============================================================================= moving averages
 
 
-def ema(x: np.ndarray, n: int, alpha: float | None = None) -> np.ndarray:
+def _resumed(x: np.ndarray, a: float, init: float) -> np.ndarray:
+    """Recursive filter continued from `init` = its state after bar 0 (same arithmetic as the cold loop, so a run
+    that resumes from a stored state reproduces the bits of the run that computed it)."""
+    m = len(x)
+    res = [NAN] * m
+    prev = float(init)
+    res[0] = prev
+    xs = x.tolist()
+    for i in range(1, m):
+        v = xs[i]
+        if v == v:  # not NaN
+            prev += a * (v - prev)
+            res[i] = prev
+    return np.array(res)
+
+
+def last_finite(x: np.ndarray, i: int) -> float | None:
+    """State of a recursive filter after bar i: its latest finite value up to i (None before it starts)."""
+    seg = f64(x)[: int(i) + 1]
+    ok = np.flatnonzero(np.isfinite(seg))
+    return float(seg[ok[-1]]) if ok.size else None
+
+
+def ema(x: np.ndarray, n: int, alpha: float | None = None, init: float | None = None) -> np.ndarray:
+    """EMA seeded with the mean of the first n finite values. `init` = the state after bar 0 (resume a stored
+    filter: bar 0 takes it and the recursion continues from bar 1)."""
     x = f64(x)
     n = _n(n)
     m = len(x)
     a = 2.0 / (n + 1.0) if alpha is None else float(alpha)
+    if init is not None and m and init == init:
+        return _resumed(x, a, init)
     s = first_valid_run(x, n)
     if s is None:
         return full_nan(m)
@@ -265,10 +314,10 @@ def ema(x: np.ndarray, n: int, alpha: float | None = None) -> np.ndarray:
     return np.array(res)
 
 
-def rma(x: np.ndarray, n: int) -> np.ndarray:
+def rma(x: np.ndarray, n: int, init: float | None = None) -> np.ndarray:
     """Wilder's moving average (SMMA)."""
     n = _n(n)
-    return ema(x, n, alpha=1.0 / n)
+    return ema(x, n, alpha=1.0 / n, init=init)
 
 
 def wma(x: np.ndarray, n: int) -> np.ndarray:
@@ -461,12 +510,13 @@ def true_range(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> np.ndarr
     return tr
 
 
-def atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, n: int = 14) -> np.ndarray:
-    return rma(true_range(high, low, close), n)
+def atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, n: int = 14, init: float | None = None) -> np.ndarray:
+    return rma(true_range(high, low, close), n, init=init)
 
 
-def bollinger(x: np.ndarray, n: int = 20, k: float = 2.0) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    mid = sma(x, n)
+def bollinger(x: np.ndarray, n: int = 20, k: float = 2.0,
+              exact: bool = False) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    mid = sma(x, n, exact)
     sd = rolling_std(x, n)
     return mid, mid + k * sd, mid - k * sd, sd
 
@@ -485,19 +535,34 @@ def donchian(high: np.ndarray, low: np.ndarray, n: int = 20) -> tuple[np.ndarray
 
 def supertrend(high, low, close, n: int = 10, mult: float = 3.0) -> tuple[np.ndarray, np.ndarray]:
     """(line, direction) with direction +1 (alcista) / -1 (bajista)."""
+    line, direction, _, _, _ = supertrend_parts(high, low, close, n, mult)
+    return line, direction
+
+
+def supertrend_parts(high, low, close, n: int = 10, mult: float = 3.0,
+                     init: Sequence[float] | None = None) -> tuple[np.ndarray, ...]:
+    """(line, direction, atr, final upper band, final lower band). `init` = (atr, upper, lower, direction) after
+    bar 0: the bands and the direction continue from that state."""
     high, low, close = f64(high), f64(low), f64(close)
     m = len(close)
-    a = atr(high, low, close, n)
+    a = atr(high, low, close, n, init=None if init is None else init[0])
     hl2 = (high + low) / 2.0
     up_b = (hl2 - mult * a).tolist()
     dn_b = (hl2 + mult * a).tolist()
     cl = close.tolist()
     line = [NAN] * m
     direction = [NAN] * m
+    fu_arr = [NAN] * m
+    fd_arr = [NAN] * m
     fu = fd = fu_prev = fd_prev = NAN
     d = 1.0
     started = False
-    for i in range(m):
+    first = 0
+    if init is not None and m:
+        fu, fd, d = float(init[1]), float(init[2]), float(init[3])
+        fu_prev, fd_prev, started, first = fu, fd, True, 1
+        line[0], direction[0], fu_arr[0], fd_arr[0] = (fu if d > 0 else fd), d, fu, fd
+    for i in range(first, m):
         ub, db = up_b[i], dn_b[i]
         if ub != ub or db != db:
             continue
@@ -513,8 +578,9 @@ def supertrend(high, low, close, n: int = 10, mult: float = 3.0) -> tuple[np.nda
                 d = -1.0
         line[i] = fu if d > 0 else fd
         direction[i] = d
+        fu_arr[i], fd_arr[i] = fu, fd
         fu_prev, fd_prev = fu, fd
-    return np.array(line), np.array(direction)
+    return np.array(line), np.array(direction), a, np.array(fu_arr), np.array(fd_arr)
 
 
 def psar(high, low, start: float = 0.02, inc: float = 0.02, maximum: float = 0.2) -> np.ndarray:
@@ -556,22 +622,37 @@ def chandelier(high, low, close, n: int = 22, mult: float = 3.0) -> tuple[np.nda
 
 
 def rsi(x: np.ndarray, n: int = 14) -> np.ndarray:
+    return rsi_parts(x, n)[0]
+
+
+def rsi_parts(x: np.ndarray, n: int = 14,
+              init: Sequence[float] | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(RSI, Wilder average of gains, of losses). `init` = (gains, losses) averages after bar 0."""
     x = f64(x)
     d = diff(x, 1)
-    up = rma(np.where(np.isfinite(d), np.maximum(d, 0.0), NAN), n)
-    dn = rma(np.where(np.isfinite(d), np.maximum(-d, 0.0), NAN), n)
+    up = rma(np.where(np.isfinite(d), np.maximum(d, 0.0), NAN), n, init=None if init is None else init[0])
+    dn = rma(np.where(np.isfinite(d), np.maximum(-d, 0.0), NAN), n, init=None if init is None else init[1])
     with np.errstate(divide="ignore", invalid="ignore"):
         rs = up / dn
         out = 100.0 - 100.0 / (1.0 + rs)
     out = np.where((dn == 0) & (up > 0), 100.0, out)
     out = np.where((dn == 0) & (up == 0), 50.0, out)
-    return np.where(np.isfinite(up) & np.isfinite(dn), out, NAN)
+    return np.where(np.isfinite(up) & np.isfinite(dn), out, NAN), up, dn
 
 
 def macd(x: np.ndarray, fast: int = 12, slow: int = 26, signal: int = 9):
-    line = ema(x, fast) - ema(x, slow)
-    sig = ema(line, signal)
-    return line, sig, line - sig
+    line, sig, hist, _, _ = macd_parts(x, fast, slow, signal)
+    return line, sig, hist
+
+
+def macd_parts(x: np.ndarray, fast: int = 12, slow: int = 26, signal: int = 9,
+               init: Sequence[float] | None = None) -> tuple[np.ndarray, ...]:
+    """(line, signal, histogram, fast EMA, slow EMA). `init` = (fast EMA, slow EMA, signal) after bar 0."""
+    e_fast = ema(x, fast, init=None if init is None else init[0])
+    e_slow = ema(x, slow, init=None if init is None else init[1])
+    line = e_fast - e_slow
+    sig = ema(line, signal, init=None if init is None else init[2])
+    return line, sig, line - sig, e_fast, e_slow
 
 
 def stoch(high, low, close, n: int = 14, smooth_k: int = 3, d: int = 3) -> tuple[np.ndarray, np.ndarray]:
@@ -584,13 +665,18 @@ def stoch(high, low, close, n: int = 14, smooth_k: int = 3, d: int = 3) -> tuple
 
 
 def stochrsi(x: np.ndarray, rsi_n: int = 14, stoch_n: int = 14, k: int = 3, d: int = 3) -> tuple[np.ndarray, np.ndarray]:
-    r = rsi(x, rsi_n)
+    return stoch_of(rsi(x, rsi_n), stoch_n, k, d)
+
+
+def stoch_of(r: np.ndarray, stoch_n: int = 14, k: int = 3, d: int = 3,
+             exact: bool = False) -> tuple[np.ndarray, np.ndarray]:
+    """Stochastic %K / %D of a series already computed (StochRSI = stoch_of(rsi))."""
     hh = rolling_max(r, stoch_n)
     ll = rolling_min(r, stoch_n)
     raw = 100.0 * safe_div(r - ll, hh - ll, fill=NAN)
     raw = np.where(np.isfinite(hh) & np.isfinite(ll) & ~np.isfinite(raw), 50.0, raw)
-    kk = sma(raw, k)
-    return kk, sma(kk, d)
+    kk = sma(raw, k, exact)
+    return kk, sma(kk, d, exact)
 
 
 def cci(high, low, close, n: int = 20) -> np.ndarray:
@@ -626,7 +712,14 @@ def mom(x: np.ndarray, n: int = 10) -> np.ndarray:
 
 def adx_dmi(high, low, close, n: int = 14) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(+DI, -DI, ADX)."""
+    pdi, mdi, adx, _, _, _ = adx_dmi_parts(high, low, close, n)
+    return pdi, mdi, adx
+
+
+def adx_dmi_parts(high, low, close, n: int = 14, init: Sequence[float] | None = None) -> tuple[np.ndarray, ...]:
+    """(+DI, -DI, ADX, Wilder TR, Wilder +DM, Wilder -DM). `init` = (TR, +DM, -DM, ADX) averages after bar 0."""
     high, low, close = f64(high), f64(low), f64(close)
+    i0 = (None, None, None, None) if init is None else tuple(init)
     up = diff(high, 1)
     dn = -diff(low, 1)
     pdm = np.where((up > dn) & (up > 0), up, 0.0)
@@ -635,15 +728,17 @@ def adx_dmi(high, low, close, n: int = 14) -> tuple[np.ndarray, np.ndarray, np.n
     mdm[0] = NAN
     tr = true_range(high, low, close)
     tr[0] = NAN
-    atr_n = rma(tr, n)
-    pdi = 100.0 * safe_div(rma(pdm, n), atr_n, fill=0.0)
-    mdi = 100.0 * safe_div(rma(mdm, n), atr_n, fill=0.0)
+    atr_n = rma(tr, n, init=i0[0])
+    pdm_n = rma(pdm, n, init=i0[1])
+    mdm_n = rma(mdm, n, init=i0[2])
+    pdi = 100.0 * safe_div(pdm_n, atr_n, fill=0.0)
+    mdi = 100.0 * safe_div(mdm_n, atr_n, fill=0.0)
     valid = np.isfinite(atr_n)
     pdi = np.where(valid, pdi, NAN)
     mdi = np.where(valid, mdi, NAN)
     dx = 100.0 * safe_div(np.abs(pdi - mdi), pdi + mdi, fill=0.0)
     dx = np.where(valid, dx, NAN)
-    return pdi, mdi, rma(dx, n)
+    return pdi, mdi, rma(dx, n, init=i0[3]), atr_n, pdm_n, mdm_n
 
 
 def aroon(high, low, n: int = 14) -> tuple[np.ndarray, np.ndarray]:
@@ -721,10 +816,10 @@ def cmo(x: np.ndarray, n: int = 14) -> np.ndarray:
     return np.where(np.isfinite(up) & np.isfinite(dn), out, NAN)
 
 
-def efficiency_ratio(x: np.ndarray, n: int = 10) -> np.ndarray:
+def efficiency_ratio(x: np.ndarray, n: int = 10, exact: bool = False) -> np.ndarray:
     x = f64(x)
     change = np.abs(x - shift(x, n))
-    vol = rolling_sum(np.abs(diff(x, 1)), n)
+    vol = rolling_sum(np.abs(diff(x, 1)), n, exact)
     er = safe_div(change, vol, fill=0.0)
     return np.where(np.isfinite(change) & np.isfinite(vol), np.clip(er, 0.0, 1.0), NAN)
 
@@ -824,9 +919,13 @@ def schaff(x: np.ndarray, fast: int = 23, slow: int = 50, cycle: int = 10, facto
 # ============================================================================= volume
 
 
-def obv(close: np.ndarray, volume: np.ndarray) -> np.ndarray:
+def obv(close: np.ndarray, volume: np.ndarray, init: float | None = None) -> np.ndarray:
+    """On-balance volume; `init` = its value after bar 0 (the running sum continues from it)."""
     d = np.sign(nz(diff(close, 1)))
-    return np.cumsum(d * nz(volume))
+    t = d * nz(volume)
+    if init is not None and len(t) and init == init:
+        t[0] = float(init)  # cumsum is a strict left-to-right running sum: same bits as the run that stored it
+    return np.cumsum(t)
 
 
 def money_flow_multiplier(high, low, close) -> np.ndarray:
@@ -1010,15 +1109,19 @@ def pivots(high: np.ndarray, low: np.ndarray, left: int = 5, right: int = 5) -> 
     return out
 
 
-def decay_events(events: np.ndarray, decay: float) -> np.ndarray:
-    """Causal memory of +-1 events: value = event when it fires, else previous * decay."""
+def decay_events(events: np.ndarray, decay: float, init: tuple[int, float] | None = None) -> np.ndarray:
+    """Causal memory of +-1 events: value = event when it fires, else previous * decay. `init` = (bar k, value):
+    the memory after bar k is set to that stored value and continues from there."""
     ev = nz(events).tolist()
     m = len(ev)
     out = [0.0] * m
     prev = 0.0
+    k, value = (int(init[0]), float(init[1])) if init is not None else (-1, 0.0)
     for i in range(m):
         e = ev[i]
         prev = e if e != 0.0 else prev * decay
+        if i == k:
+            prev = value
         out[i] = prev
     return np.array(out)
 

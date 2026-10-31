@@ -37,13 +37,16 @@ async def health(request: Request) -> dict:
     services = {attr: _service_status(svc) for attr, svc in rt.services}
     if rt.ws is not None:
         services["ws"] = rt.ws.status()
+    schema = getattr(rt.db, "schema_info", None)
     return clean_json(
         {
             "ok": True,
             "version": VERSION,
             "uptime_s": int(time.time() - rt.started_at),
             "server_time": now_ms(),
-            "db": {"path": str(rt.db.path), "size_bytes": rt.db.size_bytes(), "dialect": rt.db.dialect},
+            # schema_version: the database's migration version (app.migrations), None before init_schema ran
+            "db": {"path": str(rt.db.path), "size_bytes": rt.db.size_bytes(), "dialect": rt.db.dialect,
+                   "schema_version": schema.get("version") if isinstance(schema, dict) else None},
             "auth": config.AUTH_MODE,
             "role": rt.role,
             "services": services,
@@ -96,7 +99,8 @@ async def terminal_exec(req: TerminalRequest) -> dict:
 
 @router.get("/api/db/stats")
 async def db_stats() -> dict:
-    return {"path": str(rt.db.path), "size_bytes": rt.db.size_bytes(), "tables": await rt.db.table_counts()}
+    return {"path": str(rt.db.path), "size_bytes": rt.db.size_bytes(), "tables": await rt.db.table_counts(),
+            "dialect": getattr(rt.db, "dialect", "sqlite")}
 
 
 @router.post("/api/db/vacuum")

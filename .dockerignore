@@ -1,18 +1,29 @@
+# Build context of the backend image. The Dockerfile copies only backend/requirements.lock, backend/app and docs;
+# everything else stays out, so no local secret, database, environment or cache can reach an image layer.
+# Python caches and environments
 **/__pycache__
 **/*.py[cod]
+**/.pytest_cache
+**/.venv
+backend/.tmp
+# Secrets and local data
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+data
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.log
+# Not part of the backend image (the UI is deployed on Vercel; tests and CI tools run outside the image)
 .git
 .github
+.claude
 .vscode
 .idea
-.env
-*.log
-*.db
-*.db-wal
-*.db-shm
-data
-tools
+**/node_modules
 frontend
-backend/.venv
-backend/.tmp
-backend/.pytest_cache
+tools
 backend/tests
+**/.DS_Store

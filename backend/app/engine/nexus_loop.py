@@ -7,8 +7,12 @@ and (6) takes the decisions of the close of bar i.
 
 Snapshots (`NexusResult.snapshots`) hold the state AFTER processing their bar: {"time", "state", "kind"}. kind
 "grid" = the first processed bar of each absolute time bucket of SNAPSHOT_EVERY bars (the same bars whatever the
-window start, so runs over different windows snapshot the same times); "last" = the last bar when it is not one.
-A run that continues from a snapshot must process first the bar right after it (see NexusService).
+window start, so runs over different windows snapshot the same times), never the last bar (it is "now" there: an
+entry decided at its close fills at that close and the global gate state is pooled in); "last" = the last bar.
+Grid snapshots carry the resume block of app.engine.nexus_resume; `NexusResult.origin` is the same for the bar
+before the first processed one of a run that started cold. A run whose `prior` is such a snapshot and whose bars
+start where its features restart (`resume_fit`) continues exactly from it: it processes first the bar right after
+the snapshot, and every later bar is computed bit for bit as by the run that stored it (see NexusService).
 """
 from __future__ import annotations
 
@@ -18,14 +22,15 @@ from typing import Any
 import numpy as np
 
 from app.engine.experts import expert_signals
-from app.engine.features import compute_features, sr_levels
+from app.engine.features import WARMUP_BARS, compute_features, sr_levels
 from app.engine.fmt import EXIT_LABEL
 from app.engine.gate import GateLearner
-from app.engine.gate_checks import GateContext
+from app.engine.gate_checks import CHECK_IDS, GateContext
 from app.engine.learner import NexusLearner, feature_matrix
 from app.engine.levels import Levels
 from app.engine.nexus import NexusParams, NexusResult
 from app.engine.nexus_decide import DecisionsMixin
+from app.engine.nexus_resume import NEVER, ResumeMixin, path_fingerprint, resume_fit
 from app.engine.positions import Position
 from app.engine.regime import REGIMES, detect_regime, regime_name
 
@@ -67,6 +72,27 @@ def parse_vetoes(raw: Any) -> dict[tuple[int, int], dict]:
     return out
 
 
+def parse_live_gates(raw: Any, fp: str | None = None) -> dict[tuple[int, int], dict]:
+    """live_gates (stored bar-close gate decisions, see nexus_decide.gate_record) -> {(bar time, side): record}.
+    `fp` = the run's path fingerprint: a record decided with other engine params (settings changed) is not
+    replayed, those bars are recomputed with the current ones."""
+    out: dict[tuple[int, int], dict] = {}
+    for item in raw or []:
+        if not isinstance(item, dict) or not isinstance(item.get("checks"), list):
+            continue
+        if fp is not None and item.get("fp", fp) != fp:
+            continue
+        side = {"long": 1, "short": -1}.get(str(item.get("direction") or "").lower())
+        try:
+            t = int(item.get("time"))
+        except (TypeError, ValueError):
+            continue
+        ok = item.get("verdict") in ("TAKE", "WAIT", "AVOID") and len(item["checks"]) == len(CHECK_IDS)
+        if side is not None and ok:
+            out[(t, side)] = item
+    return out
+
+
 def _edge_list(raw: Any) -> list[list[int]]:
     out: list[list[int]] = []
     for item in raw or []:
@@ -80,18 +106,41 @@ def _edge_list(raw: Any) -> list[list[int]]:
     return out[-EDGE_KEEP:]
 
 
-class NexusRun(DecisionsMixin):
-    def __init__(self, cs: Any, params: NexusParams, prior: Any, gate_state: Any, vetoed: Any = None):
+class NexusRun(ResumeMixin, DecisionsMixin):
+    def __init__(self, cs: Any, params: NexusParams, prior: Any, gate_state: Any, vetoed: Any = None,
+                 live_gates: Any = None):
         self.cs = cs
         self.p = params
+        self.fp = path_fingerprint(params)
         self.vetoes = parse_vetoes(vetoed)  # entries the semáforo vetoed live: rejected instead of opened
-        self.f = f = compute_features(cs)
+        self.live = parse_live_gates(live_gates, self.fp)  # gate decisions taken at a bar's close (global state)
+        self.live_records: list[dict] = []  # this run's own such decisions (its last bar)
+        self.replayed_now: dict[int, dict] = {}  # side -> GateResult of the last bar replayed from such a record
+        state = parse_prior(prior)
+        # exact resume: the prior is an anchor snapshot of this engine/params and the bars start where its features
+        # restart; anything else uses the prior's learner only (legacy prior)
+        fit = resume_fit(state, cs.time, params) if len(cs) else None
+        block = state["resume"] if fit is not None and fit[0] == 0 else None
+        a = fit[1] if block is not None else -1
+        self.resumed = block is not None
+        self.cold_features = block is None or block["feat"].get("rec") is None
+        fres = None if block is None else {"rec": block["feat"].get("rec"),
+                                           "swing": (a, block["swing"][0], block["swing"][1])}
+        self.f = f = compute_features(cs, fres)
         self.n = n = f.n
         self.h = int(params.horizon)
-        self.regime = detect_regime(f) if n else np.zeros(0, dtype=np.int64)
-        self.S = expert_signals(f, self.regime)
+        if n:
+            reg_init = None if block is None else (a, *block["regime"])
+            self.regime, self.reg_pending, self.reg_count = detect_regime(f, init=reg_init, states=True)
+        else:
+            self.regime, self.reg_pending, self.reg_count = np.zeros(0, dtype=np.int64), [], []
+        self.S, self.decay = expert_signals(f, self.regime, None if block is None else (a, block["decay"]),
+                                            with_decay=True)
         self.X = feature_matrix(self.S, self.regime, f.atr_rank)
-        state = parse_prior(prior)
+        # first processed bar, and the first bar of the output (a resumed run shows the same WARMUP_BARS bars before
+        # its first processed bar as a window that started there cold, not the extra bars its features needed)
+        self.start = a + 1 if block is not None else f.warmup
+        self.out_start = max(a + 1 - WARMUP_BARS, 0) if block is not None else 0
         self.learner = NexusLearner.from_state(state.get("learner"), params.learning_rate)
         # The gate learner of the historical bars comes only from the (causal) prior chain and is trained inside
         # the run; the global live gate state (trained by the evaluator with outcomes up to now) is pooled in only
@@ -124,24 +173,35 @@ class NexusRun(DecisionsMixin):
         self.candidates: list[dict] = []
         self.rejected: list[dict] = []
         self.heap: list[tuple[int, int, dict]] = []
+        self.unknown: list[dict] = []  # candidates whose outcome lies beyond these bars (carried by snapshots)
         self.seq = 0
         self.trade_seq = 0
         self.prev_cond = {1: False, -1: False}
-        self.last_eval = {1: -10**9, -1: -10**9}
+        self.last_eval = {1: NEVER, -1: NEVER}
         # first rejected candidate of the running episode (dropped from the stats if the episode is later taken)
         self.rejected_in_episode: dict[int, dict | None] = {1: None, -1: None}
-        self.last_exit = {1: -10**9, -1: -10**9}
+        self.last_exit = {1: NEVER, -1: NEVER}
         self.loss_streak = 0
         self.closed_count = 0
         self.snapshots: list[dict] = []
+        self.origin: dict | None = None
         self.ctx_cache: tuple[int, GateContext] | None = None
         # what happened on the current bar (used for `current` at the last bar)
         self.bar_info: dict[str, Any] = {}
+        # label inputs of the bars before the first processed one and the score of the bar right before it
+        self.queue: dict[int, tuple] = {}
+        self.score_prev: float | None = None
+        if block is not None:
+            self.load_queue(block)
+            self.restore(block, a, fresh=True)
 
     # ------------------------------------------------------------------ helpers
 
-    def state_dict(self) -> dict:
+    def state_dict(self, full: bool = False) -> dict:
+        """Snapshot state (learner, gate learner, edge history). `full` = the whole edge history the gate uses
+        (anchor snapshots, so a resumed run sees the same one), else the newest EDGE_IN_STATE per side."""
         lr = self.learner
+        keep = EDGE_KEEP if full else EDGE_IN_STATE
         return {
             "version": STATE_VERSION,
             "trained_until": lr.trained_until,
@@ -150,8 +210,15 @@ class NexusRun(DecisionsMixin):
             "brier": None if lr.brier is None else round(lr.brier, 6),
             "learner": lr.to_state(),
             "gate": self.gate_learner.to_state(),
-            "edge": {"long": self.edge[1][-EDGE_IN_STATE:], "short": self.edge[-1][-EDGE_IN_STATE:]},
+            "edge": {"long": self.edge[1][-keep:], "short": self.edge[-1][-keep:]},
         }
+
+    def score_before(self, i: int) -> float:
+        """Score of bar i − 1 (the stored one when that bar precedes this run's first processed bar)."""
+        k = i - 1
+        if k == self.start - 1 and self.score_prev is not None:
+            return self.score_prev
+        return float(self.score[k]) if k >= 0 else float("nan")
 
     def edge_stats(self, regime_code: int) -> tuple[dict[str, tuple[int, int]], dict[str, str]]:
         stats: dict[str, tuple[int, int]] = {}
@@ -203,13 +270,18 @@ class NexusRun(DecisionsMixin):
         won = TP1 reached before the SL within `time_stop_bars` bars (SL first when both are touched in one bar).
         A candidate that reaches neither by then is a loss (the trade would have been closed by the time stop),
         whatever its close; None while the horizon is not covered yet."""
+        return self.outcome_from(i, side, sl, tp1, i + 1)
+
+    def outcome_from(self, i: int, side: int, sl: float, tp1: float, lo: int) -> tuple[int, bool] | None:
+        """`outcome` scanning only bars >= lo (a candidate carried by a snapshot touched nothing before it)."""
         f = self.f
         horizon = int(self.p.time_stop_bars)
         end = min(i + horizon, self.n - 1)
         if end <= i:
             return None
-        lows = f.low[i + 1 : end + 1]
-        highs = f.high[i + 1 : end + 1]
+        s = max(i + 1, int(lo))
+        lows = f.low[s : end + 1]
+        highs = f.high[s : end + 1]
         if side > 0:
             sl_hit, tp_hit = lows <= sl, highs >= tp1
         else:
@@ -221,8 +293,8 @@ class NexusRun(DecisionsMixin):
                 return end, False
             return None
         if k_tp is None or (k_sl is not None and k_sl <= k_tp):
-            return i + 1 + int(k_sl), False
-        return i + 1 + int(k_tp), True
+            return s + int(k_sl), False
+        return s + int(k_tp), True
 
     # ------------------------------------------------------------------ main loop
 
@@ -234,9 +306,12 @@ class NexusRun(DecisionsMixin):
         if bool(np.any(self.f.low <= 0)) or bool(np.any(self.f.close <= 0)):
             return short_result(self, "NEXUS necesita precios positivos: esta serie tiene valores ≤ 0 "
                                       "(diferenciales o datos erróneos).")
-        start = self.f.warmup
+        start = self.start
         times = self.f.time
         bucket_s = SNAPSHOT_EVERY * max(int(self.f.tf_s), 1)
+        if not self.resumed and 1 <= start < self.n:
+            # a cold start: later runs anchored at the bar before the first processed one replay this same path
+            self.origin = self.anchor_snapshot(start - 1, "origin")
         for i in range(start, self.n):
             self.bar_info = {}
             self.bar_ret[i] = 0.0
@@ -251,26 +326,29 @@ class NexusRun(DecisionsMixin):
             self._intrabar(i)
             self._close_decisions(i)
             self._record(i)
-            grid = int(times[i]) // bucket_s != int(times[i - 1]) // bucket_s  # i >= warm-up >= 1
-            if grid or i == self.n - 1:
-                self.snapshots.append({"time": int(times[i]), "state": self.state_dict(),
-                                       "kind": "grid" if grid else "last"})
+            if i == self.n - 1:
+                self.snapshots.append({"time": int(times[i]), "state": self.state_dict(), "kind": "last"})
+            elif int(times[i]) // bucket_s != int(times[i - 1]) // bucket_s:  # i >= 1
+                self.snapshots.append(self.anchor_snapshot(i, "grid"))
         return finish_run(self)
 
     def _learn(self, i: int) -> None:
         j = i - self.h
-        if j < self.f.warmup:
-            return
-        rj = int(self.regime[j])
-        pj = self.prob[j]
+        if j < self.start:
+            row = self.queue.get(j)  # a bar before this run's first processed one (stored by the snapshot)
+            if row is None:
+                return
+            x, s, rj, pj, raw, _ = row
+        else:
+            rj, pj = int(self.regime[j]), float(self.prob[j])
+            x, s, raw = self.X[j], self.S[j], float(self.raw_prob[j])
         if rj < 0 or pj != pj:
             return
         ret = float(self.f.close[i] - self.f.close[j])
         atr_j = self.f.atr[j]
         if abs(ret) <= (0.05 * atr_j if atr_j == atr_j else 0.0):
             return  # ambiguous label: no update
-        self.learner.update(self.X[j], self.S[j], rj, 1 if ret > 0 else 0, float(pj), int(self.f.time[i]),
-                            raw_p=float(self.raw_prob[j]))
+        self.learner.update(x, s, rj, 1 if ret > 0 else 0, pj, int(self.f.time[i]), raw_p=raw)
 
     def _predict(self, i: int) -> None:
         r = int(self.regime[i])

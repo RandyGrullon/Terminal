@@ -88,7 +88,29 @@ function NumField({
   )
 }
 
-function SecretField({ value, onChange, def, a11y }: { value: unknown; onChange: (v: string) => void; def: FieldDef; a11y: A11y }) {
+function FieldLink({ def }: { def: FieldDef }) {
+  if (!def.link) return null
+  return (
+    <a className="tiny set-link" href={def.link.href} target="_blank" rel="noopener noreferrer">
+      <ExternalLink size={11} /> {def.link.label}
+    </a>
+  )
+}
+
+/** Masked value with show / hide and clear: API keys and tokens ('secret', noun "clave") or passwords ('password'). */
+function SecretField({
+  value,
+  onChange,
+  def,
+  a11y,
+  noun = 'clave',
+}: {
+  value: unknown
+  onChange: (v: string) => void
+  def: FieldDef
+  a11y: A11y
+  noun?: 'clave' | 'contraseña'
+}) {
   const [show, setShow] = useState(false)
   const v = typeof value === 'string' ? value : ''
   return (
@@ -103,22 +125,66 @@ function SecretField({ value, onChange, def, a11y }: { value: unknown; onChange:
           value={v}
           autoComplete="off"
           spellCheck={false}
-          placeholder="Sin configurar"
+          placeholder={def.placeholder ?? 'Sin configurar'}
           onChange={(e) => onChange(e.target.value)}
         />
         <IconButton
           size="sm"
           icon={show ? <EyeOff size={14} /> : <Eye size={14} />}
-          title={show ? 'Ocultar clave' : 'Mostrar clave'}
+          title={show ? `Ocultar ${noun}` : `Mostrar ${noun}`}
           onClick={() => setShow((s) => !s)}
         />
-        {v && <IconButton size="sm" icon={<X size={14} />} title="Borrar clave" onClick={() => onChange('')} />}
+        {v && <IconButton size="sm" icon={<X size={14} />} title={`Borrar ${noun}`} onClick={() => onChange('')} />}
       </div>
-      {def.link && (
-        <a className="tiny set-link" href={def.link.href} target="_blank" rel="noopener noreferrer">
-          <ExternalLink size={11} /> {def.link.label}
-        </a>
-      )}
+      <FieldLink def={def} />
+    </div>
+  )
+}
+
+/** Plain text: server names, addresses, chat ids… (nothing to hide). */
+function TextField({ value, onChange, def, a11y }: { value: unknown; onChange: (v: string) => void; def: FieldDef; a11y: A11y }) {
+  return (
+    <div className="col gap-1">
+      <input
+        className="input mono"
+        id={a11y.id}
+        aria-describedby={a11y.describedBy}
+        aria-invalid={a11y.invalid || undefined}
+        type="text"
+        inputMode={def.inputMode ?? 'text'}
+        value={typeof value === 'string' ? value : ''}
+        autoComplete="off"
+        spellCheck={false}
+        placeholder={def.placeholder ?? 'Sin configurar'}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <FieldLink def={def} />
+    </div>
+  )
+}
+
+/** Several values of `def.options` as toggle chips. The list keeps the options' order (switching a chip off and on
+ *  again gives back the saved value); a saved value that is not an option is still shown, so it can be removed. */
+function MultiField({ value, onChange, def }: { value: unknown; onChange: (v: string[]) => void; def: FieldDef }) {
+  const sel = Array.isArray(value) ? value.map(String) : []
+  const opts = [...(def.options ?? [])]
+  for (const v of sel) if (!opts.some((o) => o.value === v)) opts.push({ value: v, label: v })
+  return (
+    <div className="set-chips">
+      {opts.map((o) => {
+        const on = sel.includes(o.value)
+        return (
+          <button
+            key={o.value}
+            type="button"
+            className={`set-pick ${on ? 'on' : ''}`}
+            aria-pressed={on}
+            onClick={() => onChange(opts.filter((x) => (x.value === o.value ? !on : sel.includes(x.value))).map((x) => x.value))}
+          >
+            {o.label}
+          </button>
+        )
+      })}
     </div>
   )
 }
@@ -265,7 +331,7 @@ interface Props {
 }
 
 /** Kinds rendered as several controls: their label names the group instead of pointing at one control. */
-const GROUP_KINDS = new Set<FieldDef['kind']>(['markets', 'tp3', 'fee_classes'])
+const GROUP_KINDS = new Set<FieldDef['kind']>(['markets', 'multi', 'tp3', 'fee_classes'])
 
 function SettingField({ def, value, dirty, error, markets, onChange, onRevert }: Props) {
   const set = (v: unknown) => onChange(def.key, v)
@@ -315,8 +381,17 @@ function SettingField({ def, value, dirty, error, markets, onChange, onRevert }:
     case 'secret':
       control = <SecretField def={def} value={value} onChange={set} a11y={a11y} />
       break
+    case 'password':
+      control = <SecretField def={def} value={value} onChange={set} a11y={a11y} noun="contraseña" />
+      break
+    case 'text':
+      control = <TextField def={def} value={value} onChange={set} a11y={a11y} />
+      break
     case 'markets':
       control = <MarketsField value={value} onChange={set} markets={markets} />
+      break
+    case 'multi':
+      control = <MultiField def={def} value={value} onChange={set} />
       break
     case 'tp3':
       control = <Tp3Field def={def} value={value} onChange={set} a11y={a11y} />

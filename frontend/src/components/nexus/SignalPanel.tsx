@@ -517,7 +517,9 @@ function SignalPanel(props: Props) {
               <span className="mono">{fmtInt(learning.updates)}</span>
               <span title="Acierto de sus propias predicciones pasadas, fuera de muestra">Acierto (fuera de muestra)</span>
               <span className="mono">{fmtProb(hitRate, 1)}</span>
-              <span title="Error cuadrático de las probabilidades: menor es mejor (0,25 = azar)">Brier</span>
+              <span title="Error cuadrático de las probabilidades: menor es mejor (0,25 = decir siempre 50 %; la referencia honesta es la climatología del periodo)">
+                Brier
+              </span>
               <span className="mono">{isFiniteNumber(learning.brier) ? fmtNum(learning.brier, 3) : '—'}</span>
               <span>Memoria</span>
               <span className="mono">{plural(learning.memory_bars, 'vela', 'velas')}</span>

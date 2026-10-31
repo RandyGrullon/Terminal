@@ -335,3 +335,38 @@
 .brain-link:hover {
   text-decoration: underline;
 }
+
+/* skill versus the baseline */
+.brain-skill-table td,
+.brain-skill-table th {
+  white-space: nowrap;
+  vertical-align: top;
+}
+.brain-skill-verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  line-height: 1.45;
+}
+.brain-skill-dirs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 12px;
+}
+.brain-skill-dir b {
+  font-weight: 600;
+}
+.brain-skill-notes {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.5;
+}
+.brain-ref-note {
+  font-size: 11.5px;
+  color: var(--text-2);
+}

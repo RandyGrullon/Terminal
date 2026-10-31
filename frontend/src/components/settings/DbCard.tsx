@@ -69,15 +69,16 @@ function DbCard() {
     [stats],
   )
   const totalRows = tables.reduce((s, [, n]) => s + (Number.isFinite(n) ? n : 0), 0)
+  const cloud = stats?.dialect === 'postgres'
 
   return (
     <Card
       title={
         <>
-          <Database size={14} /> Base de datos local
+          <Database size={14} /> {cloud ? 'Base de datos en la nube' : 'Base de datos local'}
         </>
       }
-      sub="SQLite en tu equipo: nada sale de él"
+      sub={cloud ? 'PostgreSQL de tu proyecto (Supabase): tus datos están en tu propia base' : 'SQLite en tu equipo: nada sale de él'}
       actions={<IconButton size="sm" icon={<RefreshCw size={13} />} title="Actualizar" onClick={() => void load()} disabled={loading} />}
     >
       {error !== null && !stats ? (

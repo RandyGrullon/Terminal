@@ -5,6 +5,7 @@ GET    /api/symbols/search?q=&market=&limit=30          -> {results: SearchResul
 GET    /api/universe?market=&offset=&limit=&sort=&order=&q=&type=  -> UniverseResponse
 GET    /api/candles?symbol=&tf=&limit=                  -> CandlesResponse
 GET    /api/quotes?symbols=A,B                          -> {quotes: {symbol: Quote}}
+GET    /api/realtime                                    -> RealtimeStatus (types-realtime.ts)
 GET    /api/symbol?symbol=                              -> SymbolDetail
 GET    /api/watchlist                                   -> {items: WatchItem[]}
 POST   /api/watchlist {symbol}                          -> {items}
@@ -195,6 +196,15 @@ async def get_quotes(symbols: str = "") -> dict:
         if sym not in wanted:
             wanted.append(sym)
     return clean_json({"quotes": await hub.quotes(wanted)})
+
+
+@router.get("/api/realtime")
+async def get_realtime() -> dict:
+    """Real-time quotes of the API-key providers: what each plan serves live, credits used and symbols polled."""
+    service = getattr(_hub(), "realtime", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="El servicio de cotizaciones en tiempo real no está disponible")
+    return clean_json(service.status())
 
 
 # ----------------------------------------------------------------------------- watchlist

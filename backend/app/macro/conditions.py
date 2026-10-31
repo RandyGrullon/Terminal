@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from app.macro import cards as C
 from app.macro import fmt
 from app.macro.calendar import IMPACT_RANK, public_event
-from app.macro.conditions_events import collapse, event_findings
+from app.macro.conditions_events import APPROX_NOTE, collapse, event_findings
 from app.macro.fomc import NEW_YORK
 from app.macro.metrics import QUOTES_STALE_S
 from app.macro.scope import global_scope, scope_for_symbol
@@ -32,6 +32,7 @@ HIGH_HORIZON_S = 60 * 86400  # the next FOMC meeting is never further away
 GREEN_ADVICE = "Condiciones normales: sigue tu plan y respeta el filtro NEXUS."
 NO_DATA_HEADLINE = "Sin datos macro: opera con cautela."
 NO_BLACKOUT = {"active": False, "until": None, "event": None}
+METRIC_PRIO = 10  # findings of metric_findings have prio >= 10; calendar findings (conditions_events) 0-2
 
 
 def settings_view(settings: dict | None) -> SimpleNamespace:
@@ -123,14 +124,16 @@ def _advice(level: str, blackout: dict, soon: dict | None, cfg: SimpleNamespace,
     if level == "red" and blackout["active"]:
         after_min = cfg.after // 60
         when = f"{after_min} min después del dato" if after_min else "cuando se publique el dato"
+        if APPROX_NOTE in str(blackout.get("event") or ""):
+            when += "; la hora del dato es aproximada"
         return f"No abras posiciones nuevas hasta las {fmt.clock(blackout['until'], cfg.tz)} ({when})."
     if level == "red":
         return "Volatilidad extrema: no abras posiciones nuevas y protege las abiertas con su stop."
-    if no_data:
-        return "Sin datos macro: reduce el tamaño a la mitad y revisa el calendario antes de operar."
-    if level == "amber" and soon is not None:
+    if level == "amber" and soon is not None:  # a known release (e.g. an official date) still sets the window
         start = fmt.clock(int(soon["time"]) - cfg.before, cfg.tz)
         return f"Reduce el tamaño a la mitad y usa stops más amplios; no abras nada nuevo desde las {start}."
+    if no_data:
+        return "Sin datos macro: reduce el tamaño a la mitad y revisa el calendario antes de operar."
     if level == "amber":
         return "Reduce el tamaño a la mitad y usa stops más amplios."
     return GREEN_ADVICE
@@ -183,7 +186,10 @@ def assess(events: list[dict], metrics: dict | None, now_s: int, settings: dict 
 
     reasons = [f["reason"] for f in findings][:MAX_REASONS]
     if no_data:
-        headline = findings[0]["headline"] if level == "red" else NO_DATA_HEADLINE
+        # without the weekly feed nor fresh quotes, a calendar finding (official dates: it sets the window) or a red
+        # one still leads; an amber reading of stale quotes does not (it stays behind "Sin datos macro")
+        lead = next((f for f in findings if f["prio"] < METRIC_PRIO or f["level"] == "red"), None)
+        headline = lead["headline"] if lead else NO_DATA_HEADLINE
     elif findings:
         headline = findings[0]["headline"]
     else:
@@ -197,11 +203,11 @@ def assess(events: list[dict], metrics: dict | None, now_s: int, settings: dict 
         reasons.append(f"Próximo evento importante: {short_title(next_event['title_es'])} "
                        f"({fmt.day_clock(next_event['time'], now_s, cfg.tz)})")
     if calendar_stale and not no_data and len(reasons) < MAX_REASONS:
-        reasons.append("Calendario económico sin actualizar: confirma los datos de hoy")
+        reasons.append("Calendario semanal sin actualizar: solo se evalúan las fechas oficiales")
     if quotes_stale and not no_data and len(reasons) < MAX_REASONS:
         reasons.append("Sin datos de volatilidad: solo se evalúa el calendario")
     if no_data and len(reasons) < MAX_REASONS:
-        reasons.append("Sin calendario ni cotizaciones recientes")
+        reasons.append("Sin calendario semanal ni cotizaciones recientes: solo fechas oficiales")
 
     return {
         "level": level, "label": LEVEL_LABEL[level], "headline": headline,

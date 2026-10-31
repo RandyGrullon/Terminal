@@ -91,7 +91,7 @@ def test_closed_session_zero_return_is_not_judged_nor_trained(runtime_factory, m
                 r = await _row(db, pid)
                 assert r["resolved"] == 1 and r["correct"] is None  # no verdict: neither "down" nor "flat = right"
                 assert r["outcome_return_pct"] is not None and abs(r["outcome_return_pct"]) < 0.01
-                assert r["features"] is None
+                assert r["features"] is not None  # kept for the offline replay window (scanner.replay_days)
             assert (await _row(db, moved))["correct"] == 1
             state = await db.fetchone(f"SELECT updates FROM model_state WHERE kind='scanner' AND key='{KEY}'")
             assert state["updates"] == 1  # only the measurable outcome trained the model

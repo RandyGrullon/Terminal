@@ -5,16 +5,49 @@ from __future__ import annotations
 import heapq
 from typing import Any
 
-import numpy as np
-
-from app.engine.fmt import EXIT_LABEL
-from app.engine.gate import checks_vector, evaluate_gate
+from app.engine.fmt import EXIT_LABEL, VERDICT_LABEL
+from app.engine.gate import CHECK_IDS, checks_vector, evaluate_gate
 from app.engine.levels import Levels, ev_hold
 from app.engine.nexus_current import EARLY_EV, risk_flags
 from app.engine.positions import Position
 
 REEVAL_BARS = 3
 COOLDOWN_BARS = 3
+
+
+def gate_digest(gate: dict) -> tuple:
+    """What a historical bar shows of a gate verdict: markers (verdict, score, first reason / summary), the trade's
+    gate score and the check vector the gate learner trains on (the levels do not depend on the learner)."""
+    reasons = gate.get("reasons_against") or []
+    vec = checks_vector(gate.get("checks"))
+    return (gate.get("verdict"), gate.get("score"), reasons[0] if reasons else None, gate.get("summary"),
+            tuple(vec.get(cid) for cid in CHECK_IDS))
+
+
+def gate_record(t: int, direction: str, gate: dict) -> dict:
+    """Bar-close gate decision to store (JSON): the parts of `gate_digest` a later replay must reproduce."""
+    verdict, score, reason, summary, vec = gate_digest(gate)
+    return {"time": int(t), "direction": direction, "verdict": verdict, "score": score, "reason": reason,
+            "summary": summary, "checks": list(vec)}
+
+
+def record_digest(rec: dict) -> tuple:
+    """`gate_digest` of a stored record (what the bar showed at its close)."""
+    return (rec.get("verdict"), rec.get("score"), rec.get("reason"), rec.get("summary"),
+            tuple(rec.get("checks") or ()))
+
+
+def replay_gate(gate: dict, rec: dict) -> dict:
+    """`gate` (evaluated with the run's own gate learner) as it was decided at that bar's close: verdict, score,
+    reasons and check vector of the stored record (the global gate state pooled in then)."""
+    g = dict(gate)
+    verdict = str(rec.get("verdict"))
+    g["verdict"], g["verdict_label"] = verdict, VERDICT_LABEL.get(verdict, verdict)
+    g["score"] = rec.get("score")
+    g["summary"] = rec.get("summary")
+    g["reasons_against"] = [rec["reason"]] if rec.get("reason") else []
+    g["checks"] = [{"id": cid, "passed": None if v is None else bool(v)} for cid, v in zip(CHECK_IDS, rec["checks"])]
+    return g
 
 
 class DecisionsMixin:
@@ -31,7 +64,26 @@ class DecisionsMixin:
         from app.engine.nexus_out import rejected_marker
 
         ctx = self.gate_ctx(i)
-        gate = evaluate_gate(ctx, "long" if side > 0 else "short", self.p, gate_state=self.decision_gate)
+        direction = "long" if side > 0 else "short"
+        gate = evaluate_gate(ctx, direction, self.p, gate_state=self.decision_gate)
+        t = int(self.f.time[i])
+        rec = self.live.get((t, side)) if self.live else None
+        if rec is not None:  # decided at that bar's close with the global gate state pooled in: replayed as taken
+            full = rec.get("gate") if i == self.n - 1 else None
+            if isinstance(full, dict) and gate_digest(full) == record_digest(rec):
+                # that close is "now" again (a market sitting on it): the whole GateResult as decided then, so the
+                # gate block of `current` agrees with the replayed action and advice (not a fresh global state)
+                gate = dict(full)
+                self.replayed_now[side] = gate
+            else:
+                gate = replay_gate(gate, rec)
+        elif i == self.n - 1 and self.decision_gate is not self.gate_learner:
+            # this close's decision uses the live global state; when that changes what the bar shows, the service
+            # stores it (NexusResult.live_gates) so the bar keeps this decision once it is history; "gate" = the
+            # whole GateResult, for the views of this same close (the service keeps it for the newest bar only)
+            own = evaluate_gate(ctx, direction, self.p, gate_state=self.gate_learner)
+            if gate_digest(own) != gate_digest(gate):
+                self.live_records.append({**gate_record(t, direction, gate), "fp": self.fp, "gate": gate})
         self.last_eval[side] = i
         take = gate["verdict"] == "TAKE" or not self.p.gate_enabled
         # the gate learner sees the same candidates and check vectors with or without a macro veto
@@ -47,10 +99,13 @@ class DecisionsMixin:
             self.seq += 1
             cand = {"idx": i, "side": side, "regime": int(self.regime[i]), "checks": checks,
                     "verdict": gate["verdict"], "taken": take, "won": res[1] if res else None,
-                    "resolve_idx": res[0] if res else None}
+                    "resolve_idx": res[0] if res else None, "sl": float(gate["sl"]), "tp1": float(gate["tp1"]),
+                    "seq": self.seq}
             self.candidates.append(cand)
             if res is not None:
                 heapq.heappush(self.heap, (res[0], self.seq, cand))
+            else:
+                self.unknown.append(cand)  # outcome beyond these bars: a snapshot carries it to later runs
         if not take:
             marker = rejected_marker(int(self.f.time[i]), side, gate, float(self.f.close[i]))
             if self.rejected_in_episode[side] is None:
@@ -120,7 +175,7 @@ class DecisionsMixin:
                 if code in flags:
                     return "EARLY", f"Salida anticipada: {why} ({fmt.rr(ev)})"
         thr = -self.p.exit_threshold
-        prev = self.score[i - 1] if i > 0 else np.nan
+        prev = self.score_before(i)
         if s_side < thr and prev == prev and side * float(prev) < thr:
             return "SIGNAL", f"Señal de salida: el score NEXUS giró en contra ({fmt.num(self.score[i], 2, True)})"
         if pos.bars >= self.p.time_stop_bars and pos.tp_hits == 0:

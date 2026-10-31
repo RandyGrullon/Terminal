@@ -76,10 +76,10 @@ def _bollinger(f: Features, regime: np.ndarray) -> np.ndarray:
     return np.where(trend, np.clip(z / 2.5, -1.0, 1.0), -np.clip(z / 2.0, -1.0, 1.0))
 
 
-def _donchian(f: Features) -> np.ndarray:
+def _donchian(f: Features, init: tuple[int, float] | None = None) -> np.ndarray:
     with np.errstate(invalid="ignore"):
         ev = np.where(f.close > f.dc_hi, 1.0, np.where(f.close < f.dc_lo, -1.0, 0.0))
-    return ta.decay_events(ev, 0.9)
+    return ta.decay_events(ev, 0.9, init)
 
 
 def _supertrend(f: Features) -> np.ndarray:
@@ -101,14 +101,14 @@ def _regression(f: Features) -> np.ndarray:
     return np.tanh(_nz(f.lr_t) / 3.0)
 
 
-def _stochrsi(f: Features) -> np.ndarray:
+def _stochrsi(f: Features, init: tuple[int, float] | None = None) -> np.ndarray:
     k, d = f.srsi_k, f.srsi_d
     up = ta.crossover(k, d) & (_nz(k) < 25.0)
     dn = ta.crossunder(k, d) & (_nz(k) > 75.0)
-    return ta.decay_events(np.where(up, 1.0, np.where(dn, -1.0, 0.0)), 0.85)
+    return ta.decay_events(np.where(up, 1.0, np.where(dn, -1.0, 0.0)), 0.85, init)
 
 
-def _price_action(f: Features) -> np.ndarray:
+def _price_action(f: Features, init: tuple[int, float] | None = None) -> np.ndarray:
     o, h, lo, c = f.open, f.high, f.low, f.close
     po, pc = ta.shift(o, 1), ta.shift(c, 1)
     body = np.abs(c - o)
@@ -125,29 +125,42 @@ def _price_action(f: Features) -> np.ndarray:
         bear_pin = (upper_wick >= 2.0 * body) & ((h - c) / rng >= 0.66) & (rng > 0.8 * atr)
     bull = np.where(bull_engulf, 1.0, np.where(bull_pin, 0.7, 0.0)) * np.where(near_sup, 1.0, 0.5)
     bear = np.where(bear_engulf, 1.0, np.where(bear_pin, 0.7, 0.0)) * np.where(near_res, 1.0, 0.5)
-    return ta.decay_events(np.clip(bull - bear, -1.0, 1.0), 0.75)
+    return ta.decay_events(np.clip(bull - bear, -1.0, 1.0), 0.75, init)
 
 
-def expert_signals(f: Features, regime: np.ndarray) -> np.ndarray:
-    """Matrix (n, N_EXPERTS) of expert signals in [-1, 1]; zero during each expert's warm-up."""
+DECAY_EXPERTS = ("donchian", "stochrsi", "price_action")  # experts with a decaying memory of past events
+
+
+def expert_signals(f: Features, regime: np.ndarray, decay_init: tuple[int, list[float]] | None = None,
+                   with_decay: bool = False) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+    """Matrix (n, N_EXPERTS) of expert signals in [-1, 1]; zero during each expert's warm-up.
+
+    `decay_init` = (bar k, [memory of each DECAY_EXPERTS expert after bar k]) continues the stored memories;
+    `with_decay` = also return those memories per bar (n, 3), what a snapshot stores."""
+    k, mem = decay_init if decay_init is not None else (None, None)
+    init = (lambda j: None) if k is None else (lambda j: (int(k), float(mem[j])))
+    donchian, stoch, pa = _donchian(f, init(0)), _stochrsi(f, init(1)), _price_action(f, init(2))
     cols = [
         _trend_ribbon(f),
         _macd(f),
         _rsi(f, regime),
         _bollinger(f, regime),
-        _donchian(f),
+        donchian,
         _supertrend(f),
         _adx_dmi(f),
         _volume_obv(f),
         _regression(f),
         _nz(f.htf_trend),
-        _stochrsi(f),
-        _price_action(f),
+        stoch,
+        pa,
     ]
     out = np.column_stack(cols) if f.n else np.zeros((0, N_EXPERTS))
     out = np.clip(np.where(np.isfinite(out), out, 0.0), -1.0, 1.0)
     out[regime < 0] = 0.0  # nothing is trusted before the regime (core indicators) is known
-    return out
+    if not with_decay:
+        return out
+    decay = np.column_stack([donchian, stoch, pa]) if f.n else np.zeros((0, len(DECAY_EXPERTS)))
+    return out, decay
 
 
 def volatile_mask(regime: np.ndarray) -> np.ndarray:

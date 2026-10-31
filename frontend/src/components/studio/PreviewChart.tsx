@@ -21,6 +21,7 @@ import {
   addCandles,
   addLine,
   addVolume,
+  isChartRemoved,
   timeScaleFor,
   toCandleData,
   toHistogramData,
@@ -133,11 +134,14 @@ function PreviewChart({ result, viewKey, running, error, symbol, tf, onRetry }: 
     chart.subscribeCrosshairMove(onMove)
     return () => {
       base.current = null
+      // On unmount useChart's cleanup has already removed the chart: detaching the markers plugin now would schedule a
+      // redraw of the destroyed widgets ("Uncaught Error: Object is disposed"). Only a live chart is touched.
+      if (isChartRemoved(chart)) return
       try {
         chart.unsubscribeCrosshairMove(onMove)
         markers.detach()
       } catch {
-        /* chart already removed */
+        /* chart in a broken state */
       }
     }
   }, [chart])
@@ -145,6 +149,8 @@ function PreviewChart({ result, viewKey, running, error, symbol, tf, onRetry }: 
   useEffect(() => {
     const b = base.current
     if (!chart || !b) return
+    // price lines first, while their series still belong to the chart
+    for (const l of dyn.current.levels) l.clear()
     for (const s of dyn.current.series) {
       try {
         chart.removeSeries(s)
@@ -152,7 +158,6 @@ function PreviewChart({ result, viewKey, running, error, symbol, tf, onRetry }: 
         /* already gone */
       }
     }
-    for (const l of dyn.current.levels) l.clear()
     dyn.current = { series: [], levels: [], plots: [] }
     trimPanes(chart, 1)
     setHover(null)

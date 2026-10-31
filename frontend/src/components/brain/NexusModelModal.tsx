@@ -8,7 +8,7 @@ import { ErrorBox, Loading, Modal, Stat } from '../ui'
 import CalibrationChart from './CalibrationChart'
 import TimelineChart from './TimelineChart'
 import WeightBars from './WeightBars'
-import { GATE_CHECK_LABEL, REGIME_ORDER, brierTone, fmtBrier, fmtRate, prettyKey, rateTone } from './learnFormat'
+import { GATE_CHECK_LABEL, REGIME_ORDER, fmtBrier, fmtRate, prettyKey } from './learnFormat'
 
 interface Props {
   target: { symbol: string; tf: string } | null
@@ -136,8 +136,10 @@ export default function NexusModelModal({ target, onClose }: Props) {
   const stats: { label: string; value: string; tone?: Tone; hint?: string }[] = l
     ? [
         { label: 'Actualizaciones', value: fmtInt(l.updates), hint: 'velas aprendidas' },
-        { label: 'Acierto', value: fmtRate(l.hit_rate), tone: rateTone(l.hit_rate), hint: 'fuera de muestra' },
-        { label: 'Brier', value: fmtBrier(l.brier), tone: brierTone(l.brier), hint: '0 perfecto · 0,25 azar' },
+        // The engine's own sign hit rate: no fixed 50 % / 0,25 judgement (the share of rising bars of the period is the
+        // reference, and it is rarely exactly 50 %).
+        { label: 'Acierto', value: fmtRate(l.hit_rate), hint: 'fuera de muestra · compáralo con la frecuencia de subidas' },
+        { label: 'Brier', value: fmtBrier(l.brier), hint: '0 perfecto · 0,25 = decir siempre 50 %' },
         { label: 'Memoria', value: fmtInt(l.memory_bars), hint: 'velas recordadas' },
         { label: 'Entrenado hasta', value: fmtBarTime(l.trained_until, target?.tf) },
       ]

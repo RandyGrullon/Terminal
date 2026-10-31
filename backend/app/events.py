@@ -100,12 +100,30 @@ class EventBus:
         return ev
 
     def emit_threadsafe(self, level: str, source: str, message: str, data: Any = None) -> None:
+        """emit() from another thread, on the bus's event loop. Before start() it does nothing (check `running`);
+        once that loop is closed it raises RuntimeError."""
         if self._loop is None:
             return
         self._loop.call_soon_threadsafe(self.emit, level, source, message, data)
 
+    @property
+    def running(self) -> bool:
+        """True between start() and stop() while the bus's event loop is open: only then are events persisted and
+        does emit_threadsafe() deliver them. A bus that was never started (a standby instance, a test runtime) only
+        keeps emit()'s events in memory and on the console."""
+        loop, task = self._loop, self._task
+        return task is not None and not task.done() and loop is not None and not loop.is_closed()
+
     def add_listener(self, cb: Callable[[dict], None]) -> None:
+        """cb(event) is called (synchronously, errors ignored) after every emit()."""
         self._listeners.append(cb)
+
+    def remove_listener(self, cb: Callable[[dict], None]) -> None:
+        """Undoes add_listener (nothing happens when `cb` is not registered)."""
+        try:
+            self._listeners.remove(cb)
+        except ValueError:
+            pass
 
     def recent(self, limit: int = 200, level: str | None = None, source: str | None = None) -> list[dict]:
         items = list(self._buffer)

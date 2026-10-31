@@ -18,19 +18,24 @@ import type {
   IndicatorRequestItem,
   IndicatorSpec,
   LearningSummary,
-  MacroEvent,
+  MacroCalendarResponse,
   MarketConditions,
   MarketInfo,
   MonteCarloResult,
   NexusEvent,
   NexusModel,
   NexusResponse,
+  PaperOrder,
+  PaperOrderRequest,
+  PaperOrderResponse,
+  PaperRisk,
   PaperSnapshot,
   Position,
   PredictionRow,
   PredictionStats,
   Quote,
   QuickSignal,
+  RealtimeStatus,
   ScanRow,
   ScanRun,
   Script,
@@ -42,6 +47,7 @@ import type {
   SimSnapshot,
   SimStartRequest,
   SimState,
+  SkillReport,
   SymbolDetail,
   Timeframe,
   UniverseResponse,
@@ -72,7 +78,7 @@ const TRANSIENT_RETRY_DELAYS_MS = [1000, 3000]
 
 /** Transient 503s, never a reason to sign out: "no se pudo verificar tu sesión…" (app.auth: Supabase unreachable) and
  *  "Instancia en espera…" (app.main StandbyGate: another instance holds the database, e.g. during a deploy). Both come
- *  with Retry-After, which a cross-origin page cannot read (not exposed by CORS), hence the detail. Other 503s mean a
+ *  with Retry-After; they are recognised by their detail and retried after the fixed delays below. Other 503s mean a
  *  module is not available and are not retried. */
 function isTransient503(status: number, data: unknown): boolean {
   const detail = (data as { detail?: unknown } | null)?.detail
@@ -195,6 +201,8 @@ export const api = {
   candles: (symbol: string, tf: Timeframe, limit = 1000, signal?: AbortSignal) =>
     get<CandlesResponse>('/api/candles', { symbol, tf, limit }, signal),
   quotes: (symbols: string[]) => get<{ quotes: Record<string, Quote> }>('/api/quotes', { symbols: symbols.join(',') }),
+  /** API-key real-time quotes: what each plan serves live, credits used, symbols polled (503 without the service). */
+  realtime: () => get<RealtimeStatus>('/api/realtime'),
   symbol: (symbol: string) => get<SymbolDetail>('/api/symbol', { symbol }),
   watchlist: {
     list: () => get<{ items: WatchItem[] }>('/api/watchlist'),
@@ -261,6 +269,13 @@ export const api = {
     reset: (initial_balance?: number) => post<PaperSnapshot>('/api/paper/reset', { initial_balance }),
     auto: (body: { enabled: boolean; symbols?: string[]; tf?: Timeframe }) =>
       post<{ auto: { enabled: boolean; symbols: string[]; tf: string } }>('/api/paper/auto', body),
+    // Pending limit / stop orders (simulated) and the portfolio risk of the demo account. A portfolio-risk block answers
+    // 409 {message, code: 'risk_limit', rule, risk} and can never be forced; a NO TOMAR of the gate answers 409 too.
+    orders: (status: 'pending' | 'all' = 'pending', limit = 50) => get<{ orders: PaperOrder[] }>('/api/paper/orders', { status, limit }),
+    placeOrder: (body: PaperOrderRequest) => post<PaperOrderResponse>('/api/paper/orders', body),
+    cancelOrders: (body: { order_id?: number; symbol?: string; all?: boolean }) =>
+      post<{ cancelled: PaperOrder[] }>('/api/paper/orders/cancel', body),
+    risk: () => get<PaperRisk>('/api/paper/risk'),
   },
 
   // ------------------------------------------------------------------ scanner / learning
@@ -274,10 +289,16 @@ export const api = {
   predictions: (q: { source?: string; symbol?: string; resolved?: boolean; limit?: number } = {}) =>
     get<{ predictions: PredictionRow[]; stats: PredictionStats }>('/api/predictions', q),
   learning: () => get<LearningSummary>('/api/learning/summary'),
+  /** Skill against the reference (always the most frequent outcome) and climatology. days <= 0 = every stored row,
+   *  omitted = 7. An older server without the route answers 404 (components/brain/skill.ts turns it into null). */
+  learningSkill: (q: { source?: 'scanner' | 'nexus'; days?: number; model_key?: string } = {}) =>
+    get<SkillReport>('/api/learning/skill', q),
 
   // ------------------------------------------------------------------ market conditions (macro semáforo)
   macro: (symbol?: string) => get<MarketConditions>('/api/macro', { symbol }),
-  macroCalendar: (q: { days?: number; impact?: string } = {}) => get<{ events: MacroEvent[] }>('/api/macro/calendar', q),
+  /** days 1..60, impact 'high,medium' | 'all' | …, currency 'USD,EUR'. `coverage` is absent on older servers. */
+  macroCalendar: (q: { days?: number; impact?: string; currency?: string } = {}) =>
+    get<MacroCalendarResponse>('/api/macro/calendar', q),
 
   // ------------------------------------------------------------------ PyChart scripts
   scripts: {

@@ -1,5 +1,5 @@
 """Terminal commands of the market-data hub (group "Mercado"): search, quote, candles, markets, universe, watch,
-chart, providers, recorder."""
+chart, providers, realtime, recorder."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -160,12 +160,14 @@ async def _quote(ctx: CommandContext) -> None:
             symbols.append(sym)
     quotes = await hub.quotes(symbols)
     ctx.data = quotes
+    from app.data.realtime import freshness_label
+
     rows = []
     for sym in symbols:
         q = quotes.get(sym) or {}
         rows.append([sym, fmt_price(q.get("price")), fmt_pct(q.get("change_pct")), fmt_price(q.get("high")),
-                     fmt_price(q.get("low")), fmt_num(q.get("volume"))])
-    ctx.table(["Símbolo", "Precio", "Cambio", "Máximo", "Mínimo", "Volumen"], rows)
+                     fmt_price(q.get("low")), fmt_num(q.get("volume")), freshness_label(q or None, symbol=sym)])
+    ctx.table(["Símbolo", "Precio", "Cambio", "Máximo", "Mínimo", "Volumen", "Origen"], rows)
     missing = [s for s in symbols if s not in quotes]
     if missing:
         ctx.print(f"Sin cotización disponible: {', '.join(missing)}", "warn")
@@ -329,9 +331,14 @@ async def _providers(ctx: CommandContext) -> None:
          "✔ activo" if online else "✖ sin conexión"],
         ["Exchange preferido", _label(st.get("crypto_default")), "providers.crypto_default"],
     ]
+    realtime = getattr(hub, "realtime", None)
+    live = {p["id"]: p for p in (realtime.status().get("providers") or [])} if realtime is not None else {}
     for name, configured in (st.get("keyed") or {}).items():
-        rows.append([_label(name), "clave configurada" if configured else "sin clave",
-                     "✔ acciones/forex/índices" if configured else f"providers.{name}_key"])
+        detail = "✔ acciones/forex/índices" if configured else f"providers.{name}_key"
+        state = (live.get(name) or {}).get("state")
+        if configured and state:
+            detail += f" · tiempo real: {RT_STATES.get(state, state)}"
+        rows.append([_label(name), "clave configurada" if configured else "sin clave", detail])
     tv = st.get("tradingview") or {}
     tv_state = "activo" if tv.get("enabled") and online else ("desactivado" if not tv.get("enabled") else "sin conexión")
     tv_detail = tv.get("error") or ", ".join(f"{k}={v}" for k, v in tv.items() if k not in ("enabled", "error"))[:60]
@@ -342,8 +349,50 @@ async def _providers(ctx: CommandContext) -> None:
     status = hub.status()
     ctx.print(f"Suscripciones en vivo: {status['subscriptions']} · aciertos de caché: {status['cache_hits']} · "
               f"descargas: {status['fetches']} · errores: {status['fetch_errors']}", "muted")
-    ctx.print("Configura una clave con: settings providers.twelvedata_key <clave>", "muted")
+    ctx.print("Configura una clave con: settings providers.twelvedata_key <clave> · detalle: realtime", "muted")
     ctx.data = {**st, "recorder": rec}
+
+
+RT_STATES = {
+    "sin_clave": "sin clave", "sin_tiempo_real": "no (plan gratuito de fin de día)", "en_espera": "en espera",
+    "activo": "activo", "limite": "límite alcanzado", "plan": "tu plan no lo incluye", "error": "con errores",
+}
+
+
+@command("realtime", help="Cotizaciones en tiempo real con tus claves: qué es tiempo real en cada plan y consumo",
+         usage="realtime", group=GROUP, aliases=("tiemporeal", "tiempo-real", "rt"))
+async def _realtime(ctx: CommandContext) -> None:
+    hub = _hub(ctx)
+    service = getattr(hub, "realtime", None)
+    if service is None:
+        ctx.fail("El servicio de cotizaciones en tiempo real no está disponible")
+    st = service.status()
+    ctx.data = st
+    state = "activado" if st["enabled"] else ("modo sin conexión" if st["offline"] else "desactivado (realtime.enabled)")
+    ctx.print(f"Tiempo real con proveedores con clave · {state}", "system")
+    rows = []
+    for p in st["providers"]:
+        used = f"{p['used_min']}/{p['credits_min']} min" if p["credits_min"] else "—"
+        if p["credits_day"]:
+            used += f" · {p['used_day']}/{p['credits_day']} día"
+        rows.append([p["label"], RT_STATES.get(p["state"], p["state"]), used, p["detail"]])
+    ctx.table(["Proveedor", "Estado", "Consumo", "Detalle"], rows)
+    for p in st["providers"]:
+        ctx.print(f"{p['label']}: {p['plan']} ({p['doc_url']})", "muted")
+    if st["symbols"]:
+        table = []
+        for item in st["symbols"]:
+            fresh = ("tiempo real" if item.get("realtime") else
+                     "mercado cerrado" if item.get("market_open") is False else
+                     f"retraso {round((item.get('delay_s') or 0) / 60)} min" if item.get("delay_s") else "pendiente")
+            every = f"cada {item['interval_s']:.0f} s" if item.get("interval_s") else "—"
+            table.append([item["symbol"], _label(item["provider"]), every, fresh])
+        ctx.table(["Símbolo", "Proveedor", "Cadencia", "Último precio"], table)
+    else:
+        ctx.print("Ningún símbolo en tiempo real ahora: se consultan solo los gráficos abiertos de acciones o forex y "
+                  "las posiciones demo abiertas (para no gastar los créditos del plan).", "muted")
+    ctx.print("Sin clave (o si el plan no lo incluye) los precios de acciones y forex vienen de TradingView con el "
+              "retraso que anuncia (p. ej. 15 min para NASDAQ/NYSE).", "muted")
 
 
 @command("recorder", help="Grabador local de velas (activos sin API de velas gratuita)",
@@ -373,6 +422,12 @@ async def _recorder(ctx: CommandContext) -> None:
               f"{'en marcha' if st['running'] else 'detenido'} · cada {st['interval_s']:.0f} s", "system")
     ctx.print(f"Ciclos: {st['cycles']} · velas guardadas: {st['bars']} · instantáneas repetidas ignoradas: "
               f"{st['skipped_stale']} · cambios de vela de TradingView descartados: {st.get('skipped_rollover', 0)}")
+    lags = st.get("lag_s") or {}
+    if lags:
+        shown = ", ".join(f"{s} {v:+.0f} s" for s, v in list(lags.items())[:10])
+        ctx.print(f"Retraso real de TradingView respecto al anunciado (estimado por los cambios de vela): {shown}"
+                  + (f" · correcciones: {st.get('corrections', 0)} ({st.get('relocated', 0)} velas recolocadas)"
+                     if st.get("corrections") else ""), "muted")
     if st["recording"]:
         ctx.print("Grabando: " + ", ".join(st["recording"]))
     pending = [s for s in await rec.symbols_to_record() if s not in st["recording"]]

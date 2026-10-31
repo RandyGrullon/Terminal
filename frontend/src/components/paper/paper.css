@@ -418,3 +418,98 @@
 .pp-chip button:focus-visible {
   outline: 1px solid var(--accent);
 }
+
+/* ----------------------------------------------------------------------------- pending orders (limit / stop) */
+.pp-type {
+  display: flex;
+}
+.pp-type .btn {
+  flex: 1;
+}
+.pp-type .btn.active {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--accent-2);
+}
+.pp-expiry {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.pp-expiry .input,
+.pp-expiry .select {
+  width: 100%;
+}
+.pp-orders-empty {
+  padding: 10px 12px 0;
+}
+.pp-orders-recent {
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--border);
+}
+.pp-orders-toggle {
+  all: unset;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.pp-orders-toggle:hover {
+  color: var(--accent-2);
+}
+.pp-orders-toggle:focus-visible {
+  outline: 1px solid var(--accent);
+}
+.pp-orders-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pp-orders-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+/* ----------------------------------------------------------------------------- portfolio risk panel */
+.pp-risk.blocked {
+  border-color: var(--neg);
+}
+.pp-risk-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pp-risk-block {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--neg-bg);
+  border: 1px solid var(--neg);
+  line-height: 1.45;
+}
+.pp-risk-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pp-risk-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border-2);
+  background: var(--panel-2);
+  font-size: 11.5px;
+}
+.pp-risk-group.full {
+  border-color: var(--warn);
+  color: var(--warn);
+  background: var(--warn-bg);
+}

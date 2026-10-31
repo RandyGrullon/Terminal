@@ -111,8 +111,8 @@ def test_consecutive_runs_replay_the_same_history(runtime_factory, no_ttl):
 def test_bar_close_decision_analyses_the_closed_only_window(runtime_factory, monkeypatch):
     """With the forming bar in the hub (and after a burst of 3 more closed bars), the closed-bar run of bar k has
     the same window start and length, decisions and history as a closed-only analysis of bar k."""
-    cs = make_series()
-    k = 640
+    cs = make_series(1400)
+    k = LIMIT + ANCHOR_SPAN + 40  # the hub holds more bars than one fetch asks for
     t_k, t_next = int(cs.time[k]), int(cs.time[k + 1])
     monkeypatch.setattr(service_mod, "now_s", lambda: t_next + 120)  # bar k+1 opened 2 min ago
 
@@ -148,8 +148,9 @@ def test_bar_close_decision_analyses_the_closed_only_window(runtime_factory, mon
 
 
 def test_a_forming_bar_never_becomes_an_anchor(runtime_factory, monkeypatch, no_ttl):
-    """A still-forming bar's state is provisional: stored as the 'last' snapshot only. Once that bar has closed,
-    the run that processes it stores it as the grid anchor of its bucket."""
+    """A still-forming bar's state is provisional: stored as the 'last' snapshot only. The grid anchor of its bucket
+    is stored once another bar has closed after it (its own bar-close decision, with any semáforo veto of it, is
+    then known), by the first run that processes it as history."""
     cs = make_series()
     bucket = SNAPSHOT_EVERY * H
     k = next(i for i in range(600, 800) if int(cs.time[i + 1]) // bucket != int(cs.time[i]) // bucket)
@@ -166,10 +167,15 @@ def test_a_forming_bar_never_becomes_an_anchor(runtime_factory, monkeypatch, no_
             snaps = await stored_snapshots(rt)
             assert t_new not in anchors(snaps)
             assert (snaps[-1]["time"], snaps[-1]["kind"]) == (t_new, "last")
-            clock["now"] = t_new + H + 120  # bar k+1 closed, bar k+2 forming
+            clock["now"] = t_new + H + 120  # bar k+1 closed, bar k+2 forming: k+1 is the newest closed bar
             rt.hub = RecordingHub(with_forming(cs, k + 1))
             await svc.analyze(SYM, "1h", LIMIT)
-            assert anchors(await stored_snapshots(rt))[t_new]["kind"] == "grid"
+            assert t_new not in anchors(await stored_snapshots(rt))
+            clock["now"] = t_new + 2 * H + 120  # bar k+2 closed too
+            rt.hub = RecordingHub(with_forming(cs, k + 2))
+            await svc.analyze(SYM, "1h", LIMIT)
+            stored = anchors(await stored_snapshots(rt))[t_new]
+            assert stored["kind"] == "grid" and stored["state"]["resume"]["time"] == t_new
 
     asyncio.run(scenario())
 

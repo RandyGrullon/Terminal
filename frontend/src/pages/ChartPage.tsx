@@ -1,6 +1,6 @@
-// Main chart workspace: toolbar (symbol, price, history quality, gate verdicts, layer toggles, indicators, view),
-// the NEXUS chart or the official TradingView chart, and the decision sidebar (signal + "¿Tomo esta operación?"
-// + watchlist). Follows the global symbol / timeframe from the header.
+// Main chart workspace: toolbar (symbol, price, price freshness, history quality, gate verdicts, layer toggles,
+// indicators, view), the NEXUS chart or the official TradingView chart, and the decision sidebar (signal + "¿Tomo
+// esta operación?" + watchlist). Follows the global symbol / timeframe from the header.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ChartCandlestick,
@@ -21,6 +21,7 @@ import type { Candle, GateResult, HistoryKind, NexusCurrent, SymbolDetail } from
 import ChartMacro from '../components/chart/ChartMacro'
 import IndicatorsDialog from '../components/chart/IndicatorsDialog'
 import NexusChart, { type ChartToggles, type NexusChartHandle } from '../components/chart/NexusChart'
+import QuoteFreshness from '../components/chart/QuoteFreshness'
 import TradingViewWidget from '../components/chart/TradingViewWidget'
 import { isFiniteNumber } from '../components/chart/chartUtils'
 import { DETAIL_REFRESH_MS, ROLLOVER_DELAY_MS, msToNextUtcDay, priceChange } from '../components/chart/dailyChange'
@@ -331,6 +332,7 @@ export default function ChartPage() {
               </span>
             )}
           </div>
+          <QuoteFreshness symbol={symbol} tf={tf} candles={md.candles} />
           {historyInfo && history && (
             <Badge tone={historyInfo.tone} title={historyTitle}>
               <HistoryIcon kind={history} /> {historyInfo.label}

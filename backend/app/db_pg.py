@@ -35,10 +35,11 @@ from urllib.parse import urlsplit, urlunsplit
 import asyncpg
 import numpy as np
 
-SCHEMA_VERSION = "1"
+from app import migrations
+
 SCHEMA_FILE = Path(__file__).with_name("schema_pg.sql")
 
-# Keep in sync with schema_pg.sql
+# Keep in sync with schema_pg.sql and the PostgreSQL migrations (app/migrations/*.pg.sql)
 TABLE_PKS: dict[str, tuple[str, ...]] = {
     "meta": ("key",),
     "settings": ("key",),
@@ -58,8 +59,11 @@ TABLE_PKS: dict[str, tuple[str, ...]] = {
     "events": ("id",),
     "scripts": ("id",),
     "backtests": ("id",),
+    "schema_migrations": ("version",),
+    "paper_orders": ("id",),  # migration 0002
 }
-IDENTITY_TABLES = {"signals", "predictions", "gate_log", "scan_runs", "paper_positions", "paper_fills", "scripts", "backtests"}
+IDENTITY_TABLES = {"signals", "predictions", "gate_log", "scan_runs", "paper_positions", "paper_fills", "scripts", "backtests",
+                   "paper_orders"}
 UNIQUE_KEYS: dict[str, tuple[str, ...]] = {
     "signals": ("symbol", "tf", "time", "action"),
     "gate_log": ("symbol", "tf", "time", "direction", "source"),
@@ -519,6 +523,8 @@ class PostgresDatabase(_Executor):
         self._types: dict[str, list[str]] = {}
         self._size = 0
         self._size_task: asyncio.Task | None = None
+        # Result of the last init_schema: {version, latest, baseline, applied, unknown} (see app.migrations)
+        self.schema_info: dict[str, Any] = {}
 
     @classmethod
     async def open(cls, dsn: str, schema: str = "nexus") -> "PostgresDatabase":
@@ -536,20 +542,21 @@ class PostgresDatabase(_Executor):
         )
         return db
 
-    async def init_schema(self) -> None:
-        script = SCHEMA_FILE.read_text(encoding="utf-8").replace("{schema}", self.schema)
+    async def init_schema(self, migration_set: list[migrations.Migration] | None = None) -> dict[str, Any]:
+        """Baseline + pending migrations + the RLS pass in one transaction (`migration_set`: tests only)."""
+        baseline = SCHEMA_FILE.read_text(encoding="utf-8")
         async with self.conn.acquire() as conn:
             async with conn.transaction():
-                # instances starting together on a fresh database must not race on CREATE ... IF NOT EXISTS
+                # instances starting together must not race on the baseline or apply a migration twice: the
+                # transaction-level advisory lock serializes them until commit
                 await conn.execute("SELECT pg_advisory_xact_lock($1)", advisory_lock_key(self.schema, "schema"))
-                await conn.execute(script)
+                info = await migrations.apply_postgres(conn, self.schema, baseline, migration_set)
+        self.schema_info = info
         self._types.clear()
-        await self.execute(
-            "INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (SCHEMA_VERSION,),
-        )
         await self.refresh_size()
-        self._size_task = asyncio.create_task(self._size_loop(), name="pg-size")
+        if self._size_task is None:
+            self._size_task = asyncio.create_task(self._size_loop(), name="pg-size")
+        return info
 
     # ---------------------------------------------------------------- public API (same as Database)
     async def execute(self, sql: str, params: Sequence[Any] = ()) -> int:

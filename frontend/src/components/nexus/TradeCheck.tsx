@@ -1,16 +1,21 @@
 // "¿Tomo esta operación?": check any idea (direction + optional entry / SL / TP) against the Trade Gate, see the
-// verdict with its reasons, and open it in the demo account. Demo orders always fill at MARKET: an idea with its own
-// entry price is re-checked at market with the same SL / TP before ordering (actual entry, R:R and verdict shown),
-// so the order is never a different trade from the one verified. If the gate says NO TOMAR the server answers 409
-// and the user must explicitly confirm "Abrir de todos modos".
+// verdict with its reasons, and open it in the demo account. The buy / sell buttons fill at MARKET: an idea with its
+// own entry price is re-checked at market with the same SL / TP before ordering (actual entry, R:R and verdict shown),
+// so the order is never a different trade from the one verified. An idea with its own entry can instead be left as a
+// pending demo order at that price ("Dejar orden límite / stop a X": limit when touched, stop when crossed, the gate
+// asked again at the fill). If the gate says NO TOMAR the server answers 409 and the user must explicitly confirm
+// "Abrir de todos modos"; a 409 from a portfolio-risk limit cannot be forced.
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Eraser, Info, Scale, ShieldCheck, ShieldX, TrendingDown, TrendingUp } from 'lucide-react'
+import { Eraser, Hourglass, Info, Scale, ShieldCheck, ShieldX, TrendingDown, TrendingUp } from 'lucide-react'
 import { ApiError, api, errorMessage } from '../../api/client'
-import type { Direction, GateResult, NexusCurrent, Timeframe } from '../../api/types'
+import type { Direction, GateResult, NexusCurrent, PaperRiskBlock, Timeframe } from '../../api/types'
 import { fmtBarTime, fmtNum, fmtPrice, priceDecimals, splitSymbol } from '../../lib/format'
 import { useApp } from '../../store'
 import { Button, Card, ErrorBox, Field, Loading, Modal, NumberInput, VerdictBadge } from '../ui'
 import GateChecklist, { GateVerdictBadge, gateSignal, gateSummary, gateVerdictText, noSignalNote } from './GateChecklist'
+import PendingOrderModal from '../paper/PendingOrderModal'
+import RiskBlockModal from '../paper/RiskBlockModal'
+import { kindLabel, orderKindFor, riskBlockDetail } from '../paper/ordersUtils'
 import './nexus.css'
 
 interface Props {
@@ -99,6 +104,8 @@ function TradeCheck({ symbol, tf, current, onPreview }: Props) {
   const [ordering, setOrdering] = useState<Direction | null>(null)
   const [conflict, setConflict] = useState<Conflict | null>(null)
   const [market, setMarket] = useState<MarketCheck | null>(null)
+  const [pendingOpen, setPendingOpen] = useState(false)
+  const [riskBlock, setRiskBlock] = useState<PaperRiskBlock | null>(null)
   const reqRef = useRef(0)
   const marketReq = useRef(0)
   const aliveRef = useRef(true)
@@ -130,6 +137,7 @@ function TradeCheck({ symbol, tf, current, onPreview }: Props) {
     setSl(null)
     setTp(null)
     setConflict(null)
+    setPendingOpen(false)
     closeMarket()
     clearResult()
   }, [symbol, tf, clearResult, closeMarket])
@@ -233,7 +241,12 @@ function TradeCheck({ symbol, tf, current, onPreview }: Props) {
       )
     } catch (err) {
       if (!aliveRef.current) return
-      if (err instanceof ApiError && err.status === 409 && !force) {
+      const block = err instanceof ApiError && err.status === 409 ? riskBlockDetail(err.data) : null
+      if (block) {
+        closeMarket()
+        setConflict(null)
+        setRiskBlock(block)
+      } else if (err instanceof ApiError && err.status === 409 && !force) {
         const d = conflictDetail(err.data)
         closeMarket()
         setConflict({ side, message: d.message ?? err.message, gate: d.gate })
@@ -258,6 +271,10 @@ function TradeCheck({ symbol, tf, current, onPreview }: Props) {
   // The verified verdict of this very idea (same levels and direction), to compare with the market one.
   const ideaGate = market && result && !resultStale && result.direction === market.side ? result : null
   const resultFavorable = !!result && gateSignal(result, action) === 'favorable'
+  // An idea with its own entry can wait for it as a pending demo order: limit below / stop above the market for a long.
+  const livePrice = isNum(current?.price) ? current.price : null
+  const pendingKind = entry !== null ? orderKindFor(direction, entry, livePrice) : null
+  const verifiedAtEntry = result && !resultStale && result.direction === direction && checked?.entry === entry ? result : null
 
   return (
     <Card
@@ -371,11 +388,46 @@ function TradeCheck({ symbol, tf, current, onPreview }: Props) {
             Vender (demo, a mercado)
           </Button>
         </div>
+        {entry !== null && (
+          <Button
+            variant="ghost"
+            icon={<Hourglass size={14} />}
+            onClick={() => setPendingOpen(true)}
+            disabled={ordering !== null || !!problem || !pendingKind}
+            title={
+              problem
+                ? `Corrige la idea: ${problem}`
+                : pendingKind
+                  ? 'Deja una orden pendiente simulada que espera a tu entrada (cuenta demo)'
+                  : 'Hace falta el precio actual para saber si es una orden límite o stop'
+            }
+          >
+            {pendingKind ? `Dejar ${kindLabel(direction, pendingKind).toLowerCase()} a ${fmtPrice(entry)} (demo)` : 'Dejar orden pendiente (demo)'}
+          </Button>
+        )}
         <div className="tiny muted">
-          Órdenes simuladas y siempre a mercado: tu entrada no fija el precio. En la dirección de tu idea se usan tu SL y objetivo; en la
-          otra, los niveles de NEXUS. Si el filtro dice NO TOMAR, te avisaremos antes de abrir.
+          Órdenes simuladas: comprar y vender van siempre a mercado y tu entrada no fija el precio
+          {entry !== null ? '; para esperar a tu entrada, deja una orden límite o stop' : ''}. En la dirección de tu idea se usan tu SL y
+          objetivo; en la otra, los niveles de NEXUS. Si el filtro dice NO TOMAR, te avisaremos antes de abrir.
         </div>
       </div>
+
+      {pendingKind && entry !== null && (
+        <PendingOrderModal
+          open={pendingOpen}
+          symbol={symbol}
+          tf={tf}
+          side={direction}
+          kind={pendingKind}
+          price={entry}
+          sl={sl}
+          tp={tp}
+          market={livePrice}
+          verified={verifiedAtEntry}
+          onClose={() => setPendingOpen(false)}
+        />
+      )}
+      <RiskBlockModal block={riskBlock} onClose={() => setRiskBlock(null)} />
 
       <Modal
         open={!!market}
@@ -415,9 +467,9 @@ function TradeCheck({ symbol, tf, current, onPreview }: Props) {
             <div className="notice">
               <Info size={15} style={{ flex: 'none', marginTop: 1 }} />
               <div>
-                Las órdenes demo se abren a mercado, no a tu entrada de <b className="mono">{fmtPrice(entry)}</b>. El filtro revisa de nuevo la
-                idea al precio actual con {sl !== null || tp !== null ? 'tu SL y objetivo' : 'los niveles de NEXUS'}: esto es lo que se
-                abriría.
+                Este botón abre la orden demo a mercado, no a tu entrada de <b className="mono">{fmtPrice(entry)}</b> (para esperarla, deja una
+                orden límite o stop). El filtro revisa de nuevo la idea al precio actual con{' '}
+                {sl !== null || tp !== null ? 'tu SL y objetivo' : 'los niveles de NEXUS'}: esto es lo que se abriría.
               </div>
             </div>
             {market.loading ? (

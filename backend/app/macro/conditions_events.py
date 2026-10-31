@@ -9,13 +9,18 @@ from app.macro.calendar import IMPACT_RANK
 from app.macro.titles import short_title
 
 POST_EVENT_S = 2 * 3600  # amber up to 2 h after a high-impact event
-# Keywords that make an event the headline of its cluster (several releases at the same minute).
+# Keywords that make an event the headline of its cluster (several releases at the same minute). The official
+# calendars (official.py) use the agencies' own names: "Employment Situation", "Consumer Price Index"...
 KEY_TITLES = (
-    "Federal Funds Rate", "FOMC Statement", "Main Refinancing Rate", "Official Bank Rate", "BOJ Policy Rate",
-    "Overnight Rate", "Cash Rate", "SNB Policy Rate", "Non-Farm Employment Change", "Core CPI", "CPI",
-    "Core PCE", "GDP", "Press Conference", "Unemployment Rate", "Retail Sales", "ISM", "PMI",
+    "Federal Funds Rate", "FOMC Statement", "Main Refinancing Rate", "monetary policy decision", "Official Bank Rate",
+    "Bank Rate decision", "BOJ Policy Rate", "Overnight Rate", "Cash Rate", "SNB Policy Rate",
+    "Non-Farm Employment Change", "Employment Situation", "Core CPI", "CPI", "Consumer Price Index", "Core PCE",
+    "Personal Income and Outlays", "GDP", "Press Conference", "Unemployment Rate", "Retail Sales", "ISM", "PMI",
 )
 COMPANION_WORDS = ("Statement", "Report", "Projections", "Votes", "Summary")
+# Official dates without a fixed release time (Bank of Japan, schedules.py) say so in their title; the note must
+# survive short_title, which drops the trailing parenthesis, so headlines and alerts never sound exact.
+APPROX_NOTE = "hora aproximada"
 
 
 def importance(ev: dict) -> tuple[int, int]:
@@ -47,7 +52,10 @@ def collapse(events: list[dict]) -> list[dict]:
 
 
 def event_name(cluster: dict) -> str:
-    name = short_title(str(cluster.get("title_es") or cluster.get("title") or ""))
+    full = str(cluster.get("title_es") or cluster.get("title") or "")
+    name = short_title(full)
+    if APPROX_NOTE in full and APPROX_NOTE not in name:
+        name = f"{name} ({APPROX_NOTE})"
     more = int(cluster.get("more") or 0)
     if more == 1:
         return f"{name} y 1 dato más"

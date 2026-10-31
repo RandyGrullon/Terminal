@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -22,13 +23,21 @@ from app.sim.common import (
     gate_line,
     rating_label,
 )
-from app.sim.evaluator import learning_summary, list_predictions, prediction_stats
+from app.sim.evaluator import (
+    REPLAY_DAYS_DEFAULT,
+    ReplayBusy,
+    learning_summary,
+    list_predictions,
+    prediction_stats,
+    replay_report,
+    skill_report,
+)
 from app.sim.montecarlo import MonteCarloError, run_montecarlo
-from app.sim.paper import PaperError, PaperRejected
-from app.sim.scanner import ScanError, is_opportunity
+from app.sim.paper import DEMO_NOTE, PaperError, PaperRejected, PaperRiskBlocked
+from app.sim.scanner import CAL_MIN_LESSONS, CAL_MIN_ROWS, ScanError, is_opportunity
 from app.sim.simulator import SimError
 from app.terminal import CommandContext, command, register_bool_flags
-from app.util import clamp, normalize_tf, now_ms
+from app.util import clamp, normalize_tf, now_ms, now_s
 
 register_bool_flags("take", "synthetic", "sintetico", "noauto")
 
@@ -551,6 +560,285 @@ async def _auto(ctx: CommandContext) -> None:
     ctx.data = auto
 
 
+# ----------------------------------------------------------------------------- pending orders (limit / stop)
+
+_NUM_PLAIN = re.compile(r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")  # 95000 · 95000.5 · 1.0850
+_NUM_ES = re.compile(r"\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+,\d+")  # 95.000,50 · 1.234.567 · 1,0850
+_NUM_AMBIGUOUS = re.compile(r"\d{1,3},\d{3}")  # 95,000: thousands (English) or decimals (Spanish)?
+_ALL = ("all", "todo", "todas", "todos")
+
+
+def _number(ctx: CommandContext, value: Any, what: str, *, flag: str | None = None,
+            required: bool = False) -> float | None:
+    """A positive number typed in the terminal: decimal point (95000.5) or the Spanish format the terminal prints
+    (95.000,50 · 1,0850). An ambiguous or invalid value fails instead of being ignored."""
+    if value is None:
+        if required:
+            ctx.fail(f"Falta {what}")
+        return None
+    text = str(value).strip().replace(" ", "")
+    if value is True or not text:
+        ctx.fail(f"Falta el valor de {flag}" if flag else f"Falta {what}")
+    what = f"{what} ({flag})" if flag else what
+    if _NUM_PLAIN.fullmatch(text):
+        v = float(text)
+    elif _NUM_ES.fullmatch(text) and not _NUM_AMBIGUOUS.fullmatch(text):
+        v = float(text.replace(".", "").replace(",", "."))
+    else:
+        hint = " (¿miles o decimales? escríbelo sin separador de miles: 95000 o 95.5)" if _NUM_AMBIGUOUS.fullmatch(
+            text) else " (usa un número como 95000.5)"
+        ctx.fail(f"Valor no válido para {what}: {value}{hint}")
+    if not v > 0 or v == float("inf"):
+        ctx.fail(f"{what[0].upper()}{what[1:]} debe ser un número mayor que 0")
+    return v
+
+
+def _expiry(ctx: CommandContext, value: Any) -> dict[str, Any]:
+    """--exp of a pending order → place_order arguments: gtc (default, until cancelled) · N or Nv (N bars of the
+    order's timeframe) · 30m / 4h / 2d (from now) · YYYY-MM-DD [HH:MM] (in the ui.timezone zone; a bare date means
+    the end of that day)."""
+    if value is None:
+        return {}
+    text = str(value).strip().lower()
+    if value is True or not text:
+        ctx.fail("Falta el valor de --exp: gtc, 12 (velas), 4h, 2d o una fecha AAAA-MM-DD")
+    if text in ("gtc", "cancelar", "hasta-cancelar", "nunca"):
+        return {"expiry": "gtc"}
+    m = re.fullmatch(r"(\d+)\s*(?:v|vela|velas|b|bar|bars)?", text)
+    if m:
+        n = int(m.group(1))
+        if n >= 1_000_000_000:  # unix time (s or ms)
+            return {"expiry": "date", "expire_time": n}
+        return {"expiry": "bars", "expire_bars": n}
+    m = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*(m|min|h|d)", text)
+    if m:
+        amount = float(m.group(1).replace(",", "."))
+        return {"expiry": "date", "expire_time": now_s() + int(amount * {"m": 60, "min": 60, "h": 3600, "d": 86400}[
+            m.group(2)])}
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})(?:[ t](\d{1,2}):(\d{2}))?", text)
+    if m:
+        from app.macro.fmt import TZ_SETTING, zone
+
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        hh, mm = (int(m.group(4)), int(m.group(5))) if m.group(4) else (23, 59)
+        try:
+            local = datetime(y, mo, d, hh, mm)
+        except ValueError:
+            ctx.fail(f"Fecha no válida en --exp: {value}")
+        tz = zone(_setting(ctx, TZ_SETTING, ""))
+        aware = local.replace(tzinfo=tz) if tz is not None else local.astimezone()
+        return {"expiry": "date", "expire_time": int(aware.timestamp())}
+    ctx.fail(f"Caducidad no válida: {value}. Usa gtc (hasta cancelarla), 12 (velas del tf), 4h, 2d o AAAA-MM-DD [HH:MM]")
+    return {}  # unreachable (ctx.fail raises)
+
+
+def _order_size(o: dict) -> str:
+    if o.get("qty") is not None:
+        return fmt_qty(o["qty"])
+    return f"riesgo {fmt_num(o['risk_pct'], 2)} %" if o.get("risk_pct") is not None else "riesgo de Ajustes"
+
+
+def _order_gate(o: dict) -> str:
+    verdict = o.get("gate_verdict")
+    if not verdict:
+        return "sin filtro"
+    score = o.get("gate_score")
+    text = VERDICT_LABEL.get(verdict, verdict) + (f" {fmt_num(score, 0)}" if score is not None else "")
+    return text + (" (forzada)" if o.get("forced") else "")
+
+
+def _order_levels(o: dict, compact: bool = False) -> str:
+    """The order's own SL / target, or who sets them at the fill (NEXUS, relative to the fill price)."""
+    sl, tp = o.get("sl"), o.get("tp")
+    if sl is None and tp is None:
+        return "niveles de NEXUS" if compact else "SL y objetivos de NEXUS al ejecutarse"
+    if compact:
+        return (f"SL {fmt_price(sl)}" if sl is not None else "SL NEXUS") + " · " + (
+            f"obj. {fmt_price(tp)}" if tp is not None else "obj. NEXUS")
+    parts = [f"SL {fmt_price(sl)}" if sl is not None else "", f"objetivo {fmt_price(tp)}" if tp is not None else ""]
+    text = " · ".join(p for p in parts if p)
+    if sl is None:
+        return text + " · SL de NEXUS al ejecutarse"
+    if tp is None:
+        return text + " · objetivos de NEXUS al ejecutarse"
+    return text
+
+
+_SIDE_WORDS = {"long": "long", "largo": "long", "compra": "long", "comprar": "long", "buy": "long",
+               "short": "short", "corto": "short", "venta": "short", "vender": "short", "sell": "short"}
+
+
+async def _pending(ctx: CommandContext, kind: str) -> None:
+    paper = _svc(ctx, "paper", "La cuenta demo")
+    if len(ctx.args) < 2:
+        hint = " (para detener el simulador usa: sim stop)" if kind == "stop" and not ctx.args else ""
+        ctx.fail(f"Uso: {kind} <símbolo> <precio> [--short] [--sl X] [--tp Y] [--exp gtc|12v|4h|AAAA-MM-DD]{hint}")
+    sides = {s for s in ("long", "short") if ctx.flag(s)}
+    tf_text = ctx.flag("tf")
+    for extra in ctx.args[2:]:  # never ignore a word silently (e.g. a side typed without --)
+        word = str(extra).lower()
+        if word in _SIDE_WORDS:
+            sides.add(_SIDE_WORDS[word])
+        elif _is_tf(word) and not tf_text:
+            tf_text = word
+        else:
+            ctx.fail(f"Argumento no reconocido: {extra}. Uso: {kind} <símbolo> <precio> [--short] [--sl X] [--tp Y]")
+    if len(sides) > 1:
+        ctx.fail("Indica un solo lado: compra (por defecto, o --long) o venta (--short)")
+    side = sides.pop() if sides else "long"
+    price = _number(ctx, ctx.arg(1), "el precio de la orden", required=True)
+    sl = _number(ctx, ctx.flag("sl"), "el stop", flag="--sl")
+    tp = _number(ctx, ctx.flag("tp"), "el objetivo", flag="--tp")
+    qty = _number(ctx, ctx.flag("qty"), "la cantidad", flag="--qty")
+    risk = _number(ctx, ctx.flag("risk"), "el riesgo por operación (%)", flag="--risk")
+    expiry = _expiry(ctx, ctx.flag("exp"))
+    sym = await ctx.symbol(ctx.arg(0))
+    tf = _tf(ctx, tf_text, str(_setting(ctx, "paper.auto_tf", "1h")))
+    what = f"{'compra' if side == 'long' else 'venta'} {'límite' if kind == 'limit' else 'stop'}"
+    try:
+        res = await paper.place_order(1, sym, side, kind, price, tf, qty=qty, risk_pct=risk, sl=sl, tp=tp,
+                                      force=bool(ctx.flag("force", False)), origin="manual", **expiry)
+    except PaperRejected as rej:
+        ctx.print(f"✖ NO TOMAR — {what} en {sym} a {fmt_price(price)} bloqueada", "error")
+        _print_gate(ctx, rej.gate, "warn")
+        ctx.print("Si aun así quieres dejarla (no recomendado), repite la orden con --force: al ejecutarse el filtro se "
+                  "vuelve a consultar y un NO TOMAR entonces la cancela.", "muted")
+        ctx.data = {"rejected": True, "gate": rej.gate}
+        ctx.fail("Orden no creada: el filtro dice NO TOMAR")
+    except PaperRiskBlocked as blk:
+        ctx.print(f"✖ {blk.message}", "error")
+        ctx.print("Los límites de riesgo de la cuenta demo no se saltan con --force (se cambian en Ajustes › Riesgo de "
+                  "cartera). Detalle: risk", "muted")
+        ctx.data = {"blocked": True, "rule": blk.rule, "risk": blk.risk}
+        ctx.fail("Orden no creada: límite de riesgo de la cuenta demo")
+    except PaperError as exc:
+        ctx.fail(str(exc))
+    o, gate = res["order"], res.get("gate")
+    ctx.print(f"✔ Orden demo #{o['id']}: {o['label'].lower()} {sym} a {fmt_price(o['price'])} · {o['expiry_text']}",
+              "success")
+    market = o.get("market_price")
+    ctx.print(f"Precio actual {fmt_price(market)}" + (f" (orden a {fmt_pct(o['distance_pct'], 2)})" if
+                                                       o.get("distance_pct") is not None else "")
+              + f" · {_order_levels(o)} · tamaño: {_order_size(o)} · tf {o['tf']}", "info")
+    if o.get("distance_pct") is not None and abs(float(o["distance_pct"])) >= 50:
+        ctx.print("⚠ La orden está muy lejos del precio actual: revisa el precio (punto decimal, sin separador de "
+                  "miles: 95000.5).", "warn")
+    _print_gate(ctx, gate, "info")
+    if o.get("forced"):
+        ctx.print("⚠ Orden FORZADA contra el filtro (NO TOMAR al dejarla)", "warn")
+    ctx.print("Al llegar a su precio se vuelve a consultar el filtro al precio de ejecución: si entonces dice NO TOMAR, "
+              "la orden se cancela.", "muted")
+    if kind == "limit":
+        ctx.print("En esta demo una orden límite se ejecuta en cuanto el precio la toca; en un mercado real tocar el "
+                  "precio no garantiza la ejecución.", "muted")
+    ctx.print(f"{DEMO_NOTE}. Cancélala con: cancel {o['id']}", "muted")
+    ctx.action("open_chart", symbol=sym, tf=tf)
+    ctx.data = res
+
+
+@command("limit", help="Deja una orden límite pendiente en la cuenta demo (compra por debajo / venta por encima)",
+         usage="limit <simbolo> <precio> [--short] [--sl X] [--tp Y] [--exp gtc|12v|4h|AAAA-MM-DD] [--qty Q] "
+               "[--risk 1] [--tf 1h] [--force]",
+         group="Cuenta demo", aliases=("limite", "límite"))
+async def _limit(ctx: CommandContext) -> None:
+    await _pending(ctx, "limit")
+
+
+@command("stop", help="Deja una orden stop pendiente en la cuenta demo (compra por encima / venta por debajo)",
+         usage="stop <simbolo> <precio> [--short] [--sl X] [--tp Y] [--exp gtc|12v|4h|AAAA-MM-DD] [--qty Q] "
+               "[--risk 1] [--tf 1h] [--force]",
+         group="Cuenta demo")
+async def _stop_order(ctx: CommandContext) -> None:
+    await _pending(ctx, "stop")
+
+
+@command("orders", help="Órdenes pendientes (límite / stop) de la cuenta demo", usage="orders [all]",
+         group="Cuenta demo", aliases=("ordenes", "órdenes"))
+async def _orders(ctx: CommandContext) -> None:
+    paper = _svc(ctx, "paper", "La cuenta demo")
+    show_all = bool(ctx.flag("all")) or str(ctx.arg(0, "")).lower() in _ALL + ("historial",)
+    orders = await paper.list_orders(1, "all" if show_all else "pending")
+    pending = sorted((o for o in orders if o["status"] == "pending"), key=lambda o: o["id"])
+    if pending:
+        ctx.table(["ID", "Símbolo", "Orden", "Precio", "Mercado", "Distancia", "Niveles", "Tamaño", "Validez", "Filtro"], [[
+            o["id"], o["symbol"], o["label"] + (" (ejecutándose)" if o.get("executing") else ""), fmt_price(o["price"]),
+            fmt_price(o.get("market_price")), fmt_pct(o.get("distance_pct"), 2), _order_levels(o, compact=True),
+            _order_size(o), _short(str(o["expiry_text"]).removeprefix("válida "), 40), _order_gate(o),
+        ] for o in pending])
+        ctx.print("Al llegar a su precio se vuelve a consultar el filtro; un NO TOMAR entonces cancela la orden. "
+                  "Cancela con: cancel <id|símbolo|all>", "muted")
+    else:
+        ctx.print("Sin órdenes pendientes. Deja una con: limit btc 95000 --sl 93000  (o stop btc 99000)", "muted")
+    if show_all:
+        closed = [o for o in orders if o["status"] != "pending"]
+        if closed:
+            ctx.print("Últimas órdenes cerradas:", "info")
+            ctx.table(["ID", "Símbolo", "Orden", "Precio", "Estado", "Detalle"], [[
+                o["id"], o["symbol"], o["label"], fmt_price(o["price"]), o["status_label"],
+                _short(f"ejecutada a {fmt_price(o['fill_price'])} · posición #{o['position_id']}" if o["status"] == "filled"
+                       else o.get("reason") or "—", 60),
+            ] for o in closed], max_rows=20)
+        else:
+            ctx.print("No hay órdenes cerradas todavía", "muted")
+    ctx.print(f"{DEMO_NOTE}.", "muted")
+    ctx.data = {"orders": orders}
+
+
+@command("cancel", help="Cancela órdenes pendientes de la cuenta demo", usage="cancel <id|simbolo|all>",
+         group="Cuenta demo", aliases=("cancelar",))
+async def _cancel(ctx: CommandContext) -> None:
+    paper = _svc(ctx, "paper", "La cuenta demo")
+    target = ctx.arg(0) or ("all" if ctx.flag("all") else None)
+    if not target:
+        ctx.fail("Indica qué cancelar: el id de la orden, un símbolo o 'all' (mira 'orders')")
+    text = str(target).strip()
+    try:
+        if text.lower() in _ALL:
+            cancelled = await paper.cancel_orders(all=True)
+        elif text.lstrip("#").isdigit():
+            cancelled = await paper.cancel_orders(int(text.lstrip("#")))
+        else:
+            cancelled = await paper.cancel_orders(symbol=await ctx.symbol(text))
+    except PaperError as exc:
+        ctx.fail(str(exc))
+    if not cancelled:
+        ctx.print("No había órdenes pendientes", "muted")
+    for o in cancelled:
+        ctx.print(f"Cancelada #{o['id']}: {o['label'].lower()} {o['symbol']} a {fmt_price(o['price'])}", "success")
+    ctx.data = {"cancelled": cancelled}
+
+
+@command("risk", help="Riesgo de cartera de la cuenta demo (riesgo abierto, grupos, pérdida diaria)", usage="risk",
+         group="Cuenta demo", aliases=("riesgo",))
+async def _risk(ctx: CommandContext) -> None:
+    paper = _svc(ctx, "paper", "La cuenta demo")
+    r = await paper.risk_state(1)
+    cap, per_group, loss = r.get("max_open_risk_pct"), r.get("max_positions_per_group"), r.get("daily_loss_limit")
+    ctx.print("Riesgo de cartera de la cuenta demo (simulada)", "system")
+    ctx.table(["Concepto", "Valor"], [
+        ["Riesgo abierto (entrada → stop)", f"{fmt_num(r['open_risk'], 2)} ({fmt_pct(r.get('open_risk_pct'), 2, False)} "
+                                             "del equity) · " + (f"límite {fmt_pct(cap, 1, False)}" if cap else "sin límite")],
+        ["Posiciones abiertas", f"{r['open_positions']} · " + (f"máximo {per_group} por grupo" if per_group
+                                                               else "sin límite por grupo")],
+        ["P&L realizado hoy (día UTC)", f"{fmt_num(r['daily_pnl'], 2, True)} ({fmt_pct(r.get('daily_pnl_pct'), 2)})"],
+        ["Límite de pérdida diaria", f"{fmt_num(-float(loss), 2, True)} ({fmt_pct(r.get('daily_loss_limit_pct'), 1, False)}"
+                                     " del saldo al empezar el día)" if loss is not None else "sin límite"],
+        ["Peor P&L realizado del día", fmt_num(r.get("daily_low"), 2, True)],
+        ["P&L abierto (no cuenta en el límite)", fmt_num(r.get("unrealized_pnl"), 2, True)],
+        ["Órdenes pendientes", str(r.get("pending_orders", 0))],
+    ])
+    for g in r.get("groups") or []:
+        n = int(g.get("positions") or 0)
+        count = f"{n} {'posición' if n == 1 else 'posiciones'}" + ("" if g.get("max") is None else f" de {g['max']}")
+        ctx.print(f"  {g['label']}: {count} · riesgo {fmt_num(g['risk'], 2)} · {', '.join(g.get('symbols') or [])}"
+                  + (" · lleno" if g.get("full") else ""), "warn" if g.get("full") else "muted")
+    if r.get("blocked"):
+        ctx.print(f"⛔ {r.get('block_reason') or 'Límite de pérdida diaria alcanzado'}", "warn")
+    if r.get("note"):
+        ctx.print(r["note"], "muted")
+    ctx.data = r
+
+
 # ============================================================================= Aprendizaje
 
 
@@ -560,11 +848,17 @@ async def _predictions(ctx: CommandContext) -> None:
     n = int(clamp(int(ctx.arg(0)), 1, 200)) if str(ctx.arg(0, "")).isdigit() else 20
     rows = await list_predictions(ctx.rt.db, limit=n)
     stats = await prediction_stats(ctx.rt.db)
-    brier = f"{stats['brier']:.3f}" if stats.get("brier") is not None else "—"
+    brier = fmt_num(stats.get("brier"), 3)
     ctx.print(f"Predicciones: {stats['total']} · resueltas {stats['resolved']} · pendientes {stats['pending']} · "
               f"acierto {fmt_prob(stats.get('hit_rate'), 1)} · Brier {brier}", "learn")
     for src, s in (stats.get("by_source") or {}).items():
         ctx.print(f"  {src}: {s['resolved']} resueltas · acierto {fmt_prob(s.get('hit_rate'), 1)}", "muted")
+    report = await skill_report(ctx.rt.db, days=None)
+    overall = next((g for g in report["groups"] if g["id"] == "all"), None) or (report["groups"] or [None])[0]
+    if overall and overall.get("n"):
+        ctx.print(f"Frente a la referencia (filas guardadas): {overall['verdict_text']}", _verdict_level(overall))
+    ctx.print("Hay tres resultados posibles (sube, baja o neutral), así que el 50 % no es el azar: compara con la "
+              "referencia ('skill').", "muted")
     if not rows:
         ctx.print("Aún no hay predicciones: se crean con cada escaneo y con cada vela cerrada de la lista de seguimiento",
                   "muted")
@@ -590,16 +884,32 @@ async def _predictions(ctx: CommandContext) -> None:
          group="Aprendizaje", aliases=("aprendizaje",))
 async def _learning(ctx: CommandContext) -> None:
     s = await learning_summary(ctx.rt.db, ctx.rt.settings.all() if ctx.rt.settings is not None else None)
+    report = await skill_report(ctx.rt.db, days=7)
+    groups = {g["id"]: g for g in report["groups"]}
     sm = s.get("scanner_model")
     if sm:
-        brier = f"{sm['brier']:.3f}" if sm.get("brier") is not None else "—"
+        brier = fmt_num(sm.get("brier"), 3)
         ctx.print(f"Modelo del escáner {sm['key']}: {sm['updates']} actualizaciones · acierto "
-                  f"{fmt_prob(sm.get('hit_rate'), 1)} · Brier {brier}", "learn")
+                  f"{fmt_prob(sm.get('hit_rate'), 1)} · Brier {brier} (histórico)", "learn")
+        model = ctx.rt.scanner.get_model_sync(sm["key"]) if ctx.rt.scanner is not None else None
+        if model is not None and hasattr(model, "status_text"):
+            cal = model.cal_dir
+            cal_txt = ("recalibración Platt activa" if cal.active() else
+                       f"recalibración Platt pendiente ({fmt_num(cal.rows, 0)}/{fmt_num(CAL_MIN_ROWS, 0)} "
+                       f"resultados, {fmt_num(cal.lessons, 1)}/{fmt_num(CAL_MIN_LESSONS, 0)} ventanas)")
+            ctx.print(f"  {model.status_text()} · {cal_txt}", "muted")
+        g = groups.get(f"scanner:{sm['key']}")
+        if g and g.get("n"):
+            ctx.print(f"  Últimos 7 días: {g['verdict_text']}", _verdict_level(g))
         top = [f for f in sm.get("features") or [] if abs(f["weight"]) > 0][:5]
         for f in top:
             ctx.print(f"  {'↑' if f['weight'] > 0 else '↓'} {f['label']}: {fmt_num(f['weight'], 3, True)}", "muted")
-        if not top:
-            ctx.print("  Aún sin resultados resueltos: el modelo usa reglas técnicas mientras aprende", "muted")
+        if not top and sm.get("updates"):
+            ctx.print("  Pesos aún en cero: el modelo usa reglas técnicas mientras aprende", "muted")
+        elif not top:
+            ctx.print("  El modelo actual aún no ha aprendido de ningún resultado: usa reglas técnicas mientras aprende"
+                      + (" (el acierto histórico incluye predicciones de modelos anteriores)"
+                         if sm.get("hit_rate") is not None else ""), "muted")
     else:
         ctx.print("El escáner todavía no tiene modelo (ejecuta 'scan' y espera a que se resuelvan las predicciones)",
                   "muted")
@@ -622,15 +932,130 @@ async def _learning(ctx: CommandContext) -> None:
     if nm:
         ctx.print(f"Modelos NEXUS: {len(nm)}", "learn")
         rows = [[m["symbol"], m["tf"], m["updates"], fmt_prob(m.get("hit_rate"), 1),
-                 f"{m['brier']:.3f}" if m.get("brier") is not None else "—"]
+                 fmt_num(m.get("brier"), 3)]
                 for m in sorted(nm, key=lambda m: -m["updates"])[:8]]
         ctx.table(["Símbolo", "tf", "Actualizaciones", "Acierto", "Brier"], rows)
+        ctx.print("  Acierto de cada modelo NEXUS: dirección de la vela siguiente (sube / baja); compáralo con la "
+                  "frecuencia de subidas del periodo, no con un 50 % (y el Brier con la climatología, no con 0,25).",
+                  "muted")
     p = s["predictions"]
-    ctx.print(f"Predicciones: {p['resolved']} resueltas · acierto global {fmt_prob(p.get('hit_rate'), 1)}", "learn")
+    ctx.print(f"Predicciones: {p['resolved']} resueltas · acierto global {fmt_prob(p.get('hit_rate'), 1)} (histórico)",
+              "learn")
+    overall = groups.get("all") or (report["groups"] or [None])[0]
+    if overall and overall.get("n"):
+        ctx.print(f"  Últimos 7 días: {overall['verdict_text']}", _verdict_level(overall))
     tl = s.get("timeline") or []
     if tl:
-        ctx.table(["Día", "Acierto", "Brier", "N"],
-                  [[_day(t["time"]), fmt_prob(t["hit_rate"], 1), f"{t['brier']:.3f}", t["n"]] for t in tl[-7:]])
-    ctx.print("Todas las cifras son fuera de muestra: cada predicción se guarda antes de conocer el resultado.", "muted")
+        refs = {d["time"]: d for d in (overall or {}).get("daily") or []}
+        ctx.table(["Día", "Acierto", "Referencia", "Brier", "Climatología", "N"],
+                  [[_day(t["time"]), fmt_prob(t["hit_rate"], 1),
+                    fmt_prob(refs[t["time"]]["reference"], 1) if t["time"] in refs else "—", fmt_num(t["brier"], 3),
+                    fmt_num(refs[t["time"]]["brier_ref"], 3) if t["time"] in refs else "—", t["n"]] for t in tl[-7:]])
+    ctx.print("Todas las cifras son fuera de muestra: cada predicción se guarda antes de conocer el resultado. Hay tres "
+              "resultados posibles, así que el 50 % no es el azar: la referencia es acertar siempre el resultado más "
+              "frecuente del día ('skill' para el detalle).", "muted")
     ctx.data = s
+
+
+def _verdict_level(group: dict) -> str:
+    return {"better": "success", "worse": "warn"}.get(str(group.get("verdict")), "muted")
+
+
+def _fmt_pp(v: Any) -> str:
+    return "—" if v is None else f"{fmt_num(v, 1, True)} pp"
+
+
+def _print_skill(ctx: CommandContext, rep: dict) -> None:
+    days = rep.get("days")
+    period = f"últimos {fmt_num(days, 0 if float(days).is_integer() else 1)} días" if days else "todo lo guardado"
+    ctx.print(f"Habilidad frente a la referencia · {period} · fuera de muestra", "learn")
+    groups = [g for g in rep.get("groups") or []]
+    if not any(g.get("n") for g in groups):
+        ctx.print("Aún no hay predicciones verificadas en este periodo: no se puede medir la habilidad.", "muted")
+        return
+    rows = []
+    for g in groups:
+        if not g.get("n"):
+            rows.append([_short(g["label"], 34), "0", "—", "—", "—", "—", "—", "—", "0"])
+            continue
+        ref = g["reference"]
+        ci = g.get("skill_ci")
+        diff = _fmt_pp(g.get("skill_pp")) + (f" [{fmt_num(ci[0], 1, True)}; {fmt_num(ci[1], 1, True)}]" if ci else "")
+        rows.append([
+            _short(g["label"], 34), f"{fmt_num(g['hits'], 0)} de {fmt_num(g['n'], 0)} ({fmt_prob(g['accuracy'], 1)})",
+            f"{fmt_prob(ref['accuracy'], 1)} {ref['label'].replace('siempre ', '')}", fmt_prob(g.get("chance"), 1), diff,
+            f"{fmt_num(g.get('brier'), 3)} / {fmt_num(g.get('brier_ref'), 3)}",
+            "—" if g.get("bss") is None else f"{fmt_num(g['bss'] * 100.0, 0, True)} %",
+            "—" if g.get("ece_pp") is None else f"{fmt_num(g['ece_pp'], 1)} pp", str(g["windows"]),
+        ])
+    ctx.table(["Grupo", "Acierto", "Referencia", "Azar (mezcla)", "Diferencia [IC 95 %]", "Brier / clim.",
+               "Habilidad Brier", "Calibración", "Ventanas"], rows)
+    for g in groups:
+        if not g.get("n"):
+            continue
+        ctx.print(f"{g['label']}: {g['verdict_text']}", _verdict_level(g))
+        if g.get("brier_text"):
+            ctx.print(f"  {g['brier_text']}", "muted")
+        if g.get("source") == "scanner" and g.get("model_key"):
+            for d in g.get("by_direction") or []:
+                if d["n"]:
+                    ctx.print(f"  Predicción {d['label']}: {fmt_num(d['hits'], 0)} de {fmt_num(d['n'], 0)} "
+                              f"({fmt_prob(d['accuracy'], 1)}) · ese resultado ocurrió en el "
+                              f"{fmt_prob(d['base_rate'], 1)} de todas", "muted")
+    for note in rep.get("notes") or []:
+        ctx.print(note, "muted")
+
+
+def _print_replay(ctx: CommandContext, rep: dict) -> None:
+    if not rep.get("key"):
+        ctx.print("No hay predicciones del escáner con su vector de características guardado en el periodo: la "
+                  "repetición necesita escaneos resueltos de los últimos días.", "muted")
+        return
+    ctx.print(f"Repetición del escáner {rep['key']} · últimos {fmt_num(rep['days'], 0)} días · "
+              f"{fmt_num(rep['rows'], 0)} predicciones en {fmt_num(rep['scans'], 0)} escaneos", "learn")
+    rows = []
+    for d in rep.get("designs") or []:
+        if not d.get("n"):
+            continue
+        ref = d["reference"]
+        rows.append([_short(d["label"], 40), f"{fmt_num(d['hits'], 0)} de {fmt_num(d['n'], 0)} "
+                     f"({fmt_prob(d['accuracy'], 1)})", f"{fmt_prob(ref['accuracy'], 1)}",
+                     f"{fmt_num(d.get('brier'), 3)} / {fmt_num(d.get('brier_ref'), 3)}",
+                     "—" if d.get("ece_pp") is None else f"{fmt_num(d['ece_pp'], 1)} pp", str(d["windows"])])
+    if rows:
+        ctx.table(["Diseño", "Acierto", "Referencia", "Brier / clim.", "Calibración", "Ventanas"], rows)
+    comparison = rep.get("comparison") or {}
+    if comparison.get("text"):
+        ctx.print(comparison["text"], _verdict_level(comparison))
+    if rep.get("truncated"):
+        ctx.print(f"Repetición limitada a las primeras {fmt_num(rep['rows'], 0)} predicciones del periodo: usa "
+                  "--days con menos días para cubrir solo las más recientes.", "warn")
+    if rep.get("note"):
+        ctx.print(rep["note"], "muted")
+
+
+@command("skill", help="Habilidad de las predicciones frente a la referencia (y repetición offline del escáner)",
+         usage="skill [escáner|nexus|todo] [--days 7] | skill replay [--days 7] [--key crypto|1h|14400]",
+         group="Aprendizaje",
+         aliases=("habilidad",))
+async def _skill(ctx: CommandContext) -> None:
+    sub = str(ctx.arg(0, "")).lower()
+    if sub in ("replay", "repeticion", "repetición", "repetir"):
+        default = _setting(ctx, "scanner.replay_days", REPLAY_DAYS_DEFAULT) or REPLAY_DAYS_DEFAULT
+        days = ctx.flag_float("days", None) or float(default)
+        try:
+            rep = await replay_report(ctx.rt.db, days=days, model_key_value=ctx.flag("key"))
+        except ReplayBusy as exc:
+            ctx.fail(str(exc))
+        _print_replay(ctx, rep)
+        ctx.data = rep
+        return
+    sources = {"": None, "todo": None, "todas": None, "all": None, "escaner": "scanner", "escáner": "scanner",
+               "scanner": "scanner", "nexus": "nexus"}
+    if sub not in sources:
+        ctx.fail(f"Fuente no válida: {sub}. Usa escáner, nexus, todo o replay")
+    days = ctx.flag_float("days", 7.0)
+    rep = await skill_report(ctx.rt.db, source=sources[sub], days=days if days and days > 0 else None)
+    _print_skill(ctx, rep)
+    ctx.data = rep
 

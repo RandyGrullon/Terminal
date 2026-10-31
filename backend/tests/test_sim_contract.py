@@ -154,6 +154,15 @@ PAPER_ACCOUNT_KEYS = {"id", "name", "balance", "equity", "initial_balance", "rea
 POSITION_KEYS = {"id", "account_id", "symbol", "tf", "side", "qty", "qty_open", "entry_price", "entry_time", "sl", "tp1",
                  "tp2", "tp3", "trail", "tp_hits", "status", "price", "exit_price", "exit_time", "pnl", "pnl_pct", "r_multiple",
                  "exit_reason", "exit_label", "origin", "gate_verdict", "gate_score", "advice", "warnings"}
+# Optional fields of the WS 'paper' message (pending orders + portfolio risk, types-paper-orders.ts)
+PAPER_ORDER_KEYS = {"id", "account_id", "symbol", "tf", "side", "kind", "label", "price", "qty", "risk_pct", "sl", "tp",
+                    "expiry", "expire_bars", "expire_time", "expiry_text", "status", "status_label", "origin",
+                    "gate_verdict", "gate_score", "forced", "market_price", "distance_pct", "executing", "position_id",
+                    "fill_price", "fill_time", "reason", "cancelled_by", "created_at", "updated_at"}
+PAPER_RISK_KEYS = {"account_id", "equity", "open_risk", "open_risk_pct", "max_open_risk_pct", "open_positions", "groups",
+                   "max_positions_per_group", "crypto_one_group", "day_start", "day_start_balance", "daily_pnl",
+                   "daily_pnl_pct", "daily_low", "daily_loss_limit_pct", "daily_loss_limit", "unrealized_pnl", "blocked",
+                   "block_reason", "blocked_until", "pending_orders", "note"}
 
 
 @pytest.fixture
@@ -270,9 +279,20 @@ def test_paper_with_async_hub_methods_and_ws_shapes(runtime_factory, monkeypatch
             await rt.hub.push_candle(BTC, "1m", bar, False)
             assert paper.cached_price(BTC) == 100.2
             msgs = [m for t, m in published if t == "paper"]
-            assert msgs and set(msgs[-1]) == {"type", "account", "positions"} and msgs[-1]["type"] == "paper"
+            # account + positions as before; pending orders and the portfolio risk travel as optional fields
+            assert msgs and set(msgs[-1]) == {"type", "account", "positions", "orders", "risk"}
+            assert msgs[-1]["type"] == "paper" and msgs[-1]["orders"] == []
             assert set(msgs[-1]["account"]) == PAPER_ACCOUNT_KEYS
             assert all(set(p) == POSITION_KEYS for p in msgs[-1]["positions"])
+            assert set(msgs[-1]["risk"]) == PAPER_RISK_KEYS and msgs[-1]["risk"]["open_positions"] == 1
+            rt.hub.prices[BTC] = 100.2
+            placed = await paper.place_order(1, BTC, "long", "limit", 95.0, "1h")
+            assert set(placed) == {"order", "gate"} and set(placed["order"]) == PAPER_ORDER_KEYS
+            assert (BTC, "1m", "paper") in rt.hub.subs
+            msgs = [m for t, m in published if t == "paper"]
+            assert [set(o) for o in msgs[-1]["orders"]] == [PAPER_ORDER_KEYS]
+            assert set(msgs[-1]["risk"]["groups"][0]) == {"group", "label", "positions", "symbols", "risk", "max", "full"}
+            await paper.cancel_orders(all=True)
             await paper.close_position(all=True)
             assert rt.hub.subs == []
             snap = await paper.snapshot(1)

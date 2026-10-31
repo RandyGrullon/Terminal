@@ -1,16 +1,18 @@
 """NexusService (`rt.nexus`): NEXUS analysis with long memory (model_state snapshots), the Trade Gate for any idea
 and the watchlist watcher (see app.engine.service_watch).
 
-Memory: every run stores the learner snapshots of its bars (merge_snapshots) and starts right after a stored one
+Memory: every run stores the snapshots of its bars (merge_snapshots) and starts right after a stored one
 (anchor_window), so the history it shows is the replay of one causal path that later runs repeat instead of
-recomputing it from a start that moves with every new bar."""
+recomputing it from a start that moves with every new bar. An anchor holds the whole run state after its bar
+(app.engine.nexus_resume: position, pending entry, cooldowns, label queue, regime and indicator states...), so a run
+that steps to the next anchor continues that same path exactly: history does not change at anchor steps either."""
 from __future__ import annotations
 
 import asyncio
 import copy
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -18,13 +20,14 @@ import numpy as np
 from app import config
 from app.engine.costs import fee_pct_for
 from app.engine.experts import EXPERTS
-from app.engine.features import WARMUP_BARS
+from app.engine.features import HTF_FACTOR, RESUME_LOOKBACK, SEED_BARS, WARMUP_BARS
 from app.engine.gate import GateLearner, evaluate_gate
 from app.engine.learner import NexusLearner
 from app.engine.macro_merge import merge_current, merge_gate, vetoed_side
 from app.engine.nexus import NexusParams, run_nexus
 from app.engine.nexus_loop import SNAPSHOT_EVERY
 from app.engine.nexus_out import empty_stats
+from app.engine.nexus_resume import dumps, path_fingerprint, resume_block, resume_fit
 from app.engine.service_watch import WatchMixin
 from app.util import RateLimitedLog, clean_json, normalize_tf, now_ms, now_s, tf_seconds
 
@@ -32,15 +35,24 @@ CACHE_TTL_S = 5.0
 MAX_SNAPSHOTS = 60  # anchor snapshots kept (≈ one per SNAPSHOT_EVERY bars) + the newest 'last' one
 SNAPSHOT_MIN_GAP_BARS = 50
 MAX_LIMIT = 5000
+# bars before an anchor that a resumed window also needs: its features restart RESUME_LOOKBACK bars (+ up to one
+# higher-timeframe bucket) before the bar after it, or at the chain's cold start while that start is closer than
+# the longest filter warm-up (EMA 200)
+RESUME_SPAN = RESUME_LOOKBACK + SEED_BARS + 2 * HTF_FACTOR
 # bars fetched beyond `limit` so the window can start at the anchor snapshot (anchor_window): the latest anchor
-# that leaves `limit` bars lies at most about one snapshot bucket (+ the 50-bar gap after an origin) before that start
-ANCHOR_SPAN = 2 * SNAPSHOT_EVERY
+# that leaves `limit` bars lies at most about one snapshot bucket (+ the 50-bar gap after an origin) before that
+# start, plus the bars its features restart from
+ANCHOR_SPAN = 2 * SNAPSHOT_EVERY + RESUME_SPAN
 ANCHOR_KINDS = ("grid", "origin")
 VETO_KIND = "nexus_veto"  # model_state kind of the entries the semáforo vetoed (key "SYMBOL|tf")
 MAX_VETOES = 200  # per symbol/timeframe (newest kept)
 # a plain live view (no `upto`) stores the veto of a CLOSED last bar only this soon after its close (the bar that just
 # closed); later views of a market that sits on an old closed bar (session closed, weekend) veto that view only
 VETO_RECORD_GRACE_S = 300
+# bar-close gate decisions taken with the global gate state pooled in, as the bar shows them (key "SYMBOL|tf"):
+# every later run replays them, so that decision does not change once the bar is history (same rule as vetoes)
+GATE_KIND = "nexus_gate"
+MAX_GATES = 600  # per symbol/timeframe (newest kept; a candidate is evaluated at a few % of the closes)
 
 
 class NexusDataError(RuntimeError):
@@ -56,7 +68,8 @@ class _Entry:
     gate_state: dict | None
     params: NexusParams
     upto: int | None = None  # last closed bar requested (None = live view, forming bar included)
-    veto_ver: int = 0  # version of the stored vetoes the run used
+    veto_ver: int = 0  # version of the stored vetoes and bar-close gate decisions the run used
+    live_gates: list = field(default_factory=list)  # this run's last-bar gate decisions to store at a close
 
     def fresh(self, params: NexusParams, upto: int | None, veto_ver: int) -> bool:
         return (time.monotonic() - self.created < CACHE_TTL_S and self.params == params and self.upto == upto
@@ -123,19 +136,42 @@ def _valid_snapshot(item: Any) -> bool:
     return isinstance(item, dict) and isinstance(item.get("state"), dict) and isinstance(item.get("time"), (int, float))
 
 
-def _anchor_times(items: list[dict]) -> set[int]:
-    return {int(s["time"]) for s in items or [] if _valid_snapshot(s) and snapshot_kind(s) in ANCHOR_KINDS}
+def snapshot_fingerprint(item: dict) -> str | None:
+    """Path fingerprint of an anchor's resume block (None: stored before full resume states existed)."""
+    block = resume_block(item.get("state"))
+    fp = block.get("fp") if block is not None else None
+    return fp if isinstance(fp, str) else None
+
+
+def _anchor_keys(items: list[dict]) -> set[tuple[int, str | None]]:
+    return {(int(s["time"]), snapshot_fingerprint(s)) for s in items or []
+            if _valid_snapshot(s) and snapshot_kind(s) in ANCHOR_KINDS}
+
+
+def stale_for_vetoes(snap: dict, vetoes: list[dict]) -> bool:
+    """True for an anchor whose run read the stored vetoes before a veto of a bar at or before the anchor bar was
+    recorded (vetoes keep their recording time `at`): that path did not include the veto."""
+    if snapshot_kind(snap) == "last":
+        return False
+    block = resume_block(snap.get("state"))
+    made = block.get("made") if block is not None else None
+    if not isinstance(made, (int, float)):
+        return False
+    t = int(snap["time"])
+    return any(int(v["time"]) <= t and isinstance(v.get("at"), (int, float)) and v["at"] > made for v in vetoes)
 
 
 def merge_snapshots(old: list[dict], new: list[dict], tf_s: int, max_keep: int = MAX_SNAPSHOTS,
-                    min_gap_bars: int = SNAPSHOT_MIN_GAP_BARS) -> list[dict]:
+                    min_gap_bars: int = SNAPSHOT_MIN_GAP_BARS, fingerprint: str | None = None) -> list[dict]:
     """Stored NEXUS memory after a run, sorted by time.
 
     Anchor snapshots (kind 'grid' / 'origin', see `anchor_window`) are write-once: a stored one is never replaced or
     thinned out (only the oldest beyond `max_keep` age out), because later runs start their window right after it and
     must replay the same path; a new one is added only when it lies `min_gap_bars` bars or more from every kept one.
-    Plus the newest 'last' snapshot (state at the newest bar, for the learning summary; never an anchor) when it is
-    newer than all of them."""
+    The one exception: a new anchor whose resume block has the current path `fingerprint` replaces the stored anchor
+    of the same bar written without it (before full resume states, or with other engine params), which no run can
+    resume exactly any more. Plus the newest 'last' snapshot (state at the newest bar, for the learning summary;
+    never an anchor) when it is newer than all of them."""
     gap = int(min_gap_bars) * int(tf_s)
     anchors: dict[int, dict] = {}
     last: dict | None = None
@@ -157,6 +193,10 @@ def merge_snapshots(old: list[dict], new: list[dict], tf_s: int, max_keep: int =
         t, kind = int(item["time"]), snapshot_kind(item)
         if kind == "last":
             take_last(t, item)
+        elif t in anchors:
+            fp = snapshot_fingerprint(item)
+            if fingerprint is not None and fp == fingerprint and snapshot_fingerprint(anchors[t]) != fingerprint:
+                anchors[t] = {"time": t, "state": item["state"], "kind": kind}
         elif not any(abs(t - k) < max(gap, 1) for k in anchors):  # write-once, and not crowding a kept one
             anchors[t] = {"time": t, "state": item["state"], "kind": kind}
     kept = sorted(anchors.values(), key=lambda s: s["time"])[-max(int(max_keep), 1):]
@@ -187,7 +227,8 @@ def anchor_window(times: Any, ref: int, limit: int, snapshots: list[dict],
     so their past markers and trades do not move as the window slides. The anchor is the latest anchor snapshot
     (kind grid / origin, never newer than `times[ref]`) present in `times` whose window keeps at least `limit` bars
     up to `ref` (the window then has `limit` to `limit` + about one snapshot bucket of bars). None when no stored
-    snapshot fits the fetched bars: the plain `limit`-bar window."""
+    snapshot fits the fetched bars: the plain `limit`-bar window. The returned start is the first bar the response
+    shows; an anchor with a resume block also needs the earlier bars its features restart from (`resume_fit`)."""
     n = len(times)
     plain = max(int(ref) - int(limit) + 1, 0)
     if n == 0 or ref < 0:
@@ -223,7 +264,9 @@ class NexusService(WatchMixin):
         self._locks: dict[tuple, asyncio.Lock] = {}
         # entries vetoed by the market-conditions check: (symbol, tf) -> {(bar time, direction): veto}
         self._vetoes: dict[tuple[str, str], dict[tuple[int, str], dict]] = {}
-        self._veto_ver: dict[tuple[str, str], int] = {}
+        # bar-close gate decisions taken with the global gate state: (symbol, tf) -> {(bar time, direction): record}
+        self._gates: dict[tuple[str, str], dict[tuple[int, str], dict]] = {}
+        self._veto_ver: dict[tuple[str, str], int] = {}  # bumped when either of them changes
         # bumped when the stored anchor snapshots of (symbol, tf) change: a cached result keyed by the same last bar
         # may have started its window elsewhere
         self._anchor_ver: dict[tuple[str, str], int] = {}
@@ -307,20 +350,41 @@ class NexusService(WatchMixin):
         return state if isinstance(state, dict) else {}
 
     async def _save_model(self, symbol: str, tf: str, old: dict, res: Any, *, origin: dict | None = None,
-                          closed: bool = True) -> None:
+                          closed: bool = True, until: int | None = None, fingerprint: str | None = None,
+                          made: int | None = None) -> None:
         """Persist the run's snapshots (merge_snapshots). `closed` = False when the last bar is still forming: its
-        state is provisional, so it is stored as the 'last' snapshot only, never as an anchor. `origin` = the anchor
-        to store when the run had none (its own window start, with the prior it used)."""
+        state is provisional, so it is stored as the 'last' snapshot only, never as an anchor. `until` = the newest
+        closed bar: anchors are stored only for bars before it, so a bar has closed after the anchor bar (and the
+        bar-close decision of the anchor bar, with any semáforo veto of it, is known) before a later run can start
+        there. `origin` = the anchor to store when the run had none (the run's cold start, NexusResult.origin).
+        `made` = when the run read the stored vetoes (unix ms): an anchor is dropped once a veto of a bar at or
+        before it is recorded after that moment (its path did not include that veto). Stale stored anchors are
+        dropped before the merge, so this run's own anchor of the same bar (which applied the veto) takes its place."""
         if self.rt.db is None or not res.snapshots:
             return
         new = [dict(s) for s in res.snapshots]
         if not closed and new:
             new[-1]["kind"] = "last"
+        if until is not None:
+            new = [s for s in new if snapshot_kind(s) == "last" or int(s["time"]) < int(until)]
         if origin is not None:
             new.append(origin)
+        if made is not None:
+            for s in new:
+                block = resume_block(s.get("state")) if snapshot_kind(s) != "last" else None
+                if block is not None:
+                    block["made"] = int(made)
         old_snaps = old.get("snapshots") or []
-        snaps = merge_snapshots(old_snaps, new, tf_seconds(tf))
-        if _anchor_times(snaps) != _anchor_times(old_snaps):
+        decided = [*(await self._vetoes_for(symbol, tf)).values(), *(await self._gates_for(symbol, tf)).values()]
+        # stale anchors leave BEFORE the merge: kept by it (write-once), a stale stored anchor would win over this
+        # run's fresh anchor of the same bar (or crowd out a nearby one) and leave that bucket empty once dropped
+        def fresh(items: list) -> list[dict]:
+            return [s for s in items if _valid_snapshot(s) and not stale_for_vetoes(s, decided)]
+
+        kept = fresh(old_snaps)
+        snaps = merge_snapshots(kept, fresh(new), tf_seconds(tf), fingerprint=fingerprint)
+        stale_dropped = len(kept) != sum(1 for s in old_snaps if _valid_snapshot(s))  # replaced at the same key too
+        if stale_dropped or _anchor_keys(snaps) != _anchor_keys(old_snaps):
             self._anchor_ver[(symbol, tf)] = self._anchor_ver.get((symbol, tf), 0) + 1
         lr = res.learning
         learning = {k: lr.get(k) for k in ("updates", "hit_rate", "brier", "trained_until", "memory_bars")}
@@ -330,8 +394,7 @@ class NexusService(WatchMixin):
             "INSERT INTO model_state(kind, key, state, updates, trained_until, updated_at) VALUES ('nexus', ?, ?, ?, ?, ?) "
             "ON CONFLICT(kind, key) DO UPDATE SET state=excluded.state, updates=excluded.updates, "
             "trained_until=excluded.trained_until, updated_at=excluded.updated_at",
-            (self.model_key(symbol, tf), json.dumps(clean_json(state), separators=(",", ":")),
-             int(lr.get("updates") or 0), lr.get("trained_until"), now_ms()),
+            (self.model_key(symbol, tf), dumps(state), int(lr.get("updates") or 0), lr.get("trained_until"), now_ms()),
         )
 
     # ------------------------------------------------------------------ macro vetoes (persisted)
@@ -394,6 +457,80 @@ class NexusService(WatchMixin):
         except Exception as exc:
             if self._log.should_log(f"veto-save:{symbol}", 600):
                 self._emit("warn", f"No se pudo guardar el veto de {symbol} {tf}: {exc}")
+
+    # ------------------------------------------------------------------ bar-close gate decisions (persisted)
+
+    async def _gates_for(self, symbol: str, tf: str) -> dict[tuple[int, str], dict]:
+        """Bar-close gate decisions of symbol/tf taken with the global gate state (model_state kind 'nexus_gate')."""
+        key = (symbol, tf)
+        got = self._gates.get(key)
+        if got is not None:
+            return got
+        entries: dict[tuple[int, str], dict] = {}
+        if self.rt.db is not None:
+            try:
+                row = await self.rt.db.fetchone("SELECT state FROM model_state WHERE kind=? AND key=?",
+                                                (GATE_KIND, self.model_key(symbol, tf)))
+                state = json.loads(row["state"]) if row and row.get("state") else {}
+            except Exception as exc:
+                if self._log.should_log(f"gate-load:{symbol}", 600):
+                    self._emit("warn", f"No se pudieron leer las decisiones del filtro de {symbol} {tf}: {exc}")
+                return entries  # not cached: retried on the next analysis
+            for item in (state.get("entries") if isinstance(state, dict) else None) or []:
+                if isinstance(item, dict) and item.get("direction") in ("long", "short"):
+                    try:
+                        entries[(int(item["time"]), str(item["direction"]))] = item
+                    except (KeyError, TypeError, ValueError):
+                        continue
+        return self._gates.setdefault(key, entries)
+
+    async def _record_gates(self, symbol: str, tf: str, records: list[dict]) -> None:
+        """Remember the gate decisions of a bar-close decision whose global gate state changed what the bar shows
+        (bounded, persisted): every later run with the same engine params replays them at that bar. The first record
+        of a bar is kept (one decided with other params is replaced). The whole GateResult ("gate", shown again by
+        a view of that same close) is kept for the newest bar only: an older bar is history, where the digest is
+        enough."""
+        entries = await self._gates_for(symbol, tf)
+        added = False
+        for rec in records:
+            k = (int(rec["time"]), str(rec["direction"]))
+            if k not in entries or entries[k].get("fp") != rec.get("fp"):
+                entries[k] = {**rec, "time": k[0], "direction": k[1], "at": now_ms()}
+                added = True
+        if not added:
+            return
+        for old in sorted(entries)[: max(len(entries) - MAX_GATES, 0)]:
+            entries.pop(old, None)
+        newest = max(k2[0] for k2 in entries)
+        for k2 in [k2 for k2, e in entries.items() if k2[0] < newest and "gate" in e]:
+            entries[k2] = {key: v for key, v in entries[k2].items() if key != "gate"}  # new dict: runs may read it
+        self._veto_ver[(symbol, tf)] = self._veto_ver.get((symbol, tf), 0) + 1
+        if self.rt.db is None:
+            return
+        items = [entries[k2] for k2 in sorted(entries)]
+        try:
+            await self.rt.db.execute(
+                "INSERT INTO model_state(kind, key, state, updates, trained_until, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(kind, key) DO UPDATE SET state=excluded.state, updates=excluded.updates, "
+                "trained_until=excluded.trained_until, updated_at=excluded.updated_at",
+                (GATE_KIND, self.model_key(symbol, tf), dumps({"version": 1, "entries": items}), len(items), None,
+                 now_ms()),
+            )
+        except Exception as exc:
+            if self._log.should_log(f"gate-save:{symbol}", 600):
+                self._emit("warn", f"No se pudieron guardar las decisiones del filtro de {symbol} {tf}: {exc}")
+
+    @staticmethod
+    def _decided_at_close(resp: dict, tf: str, upto: int | None) -> bool:
+        """True when `resp`'s last bar is a bar-close decision: a run with `upto` (watcher, auto-trader) or a live
+        view whose last bar closed at most min(tf, VETO_RECORD_GRACE_S) ago (the bar that just closed)."""
+        if upto is not None:
+            return True
+        cur = resp.get("current") or {}
+        tf_s = tf_seconds(str(resp.get("tf") or tf))
+        closed_ago = now_s() - (int(cur.get("time") or 0) + tf_s)  # < 0 while the bar is still forming
+        return 0 <= closed_ago <= min(tf_s, VETO_RECORD_GRACE_S)
 
     # ------------------------------------------------------------------ analysis
 
@@ -488,8 +625,11 @@ class NexusService(WatchMixin):
 
         Window: the `limit` bars up to the newest closed bar (+ the forming bar in a live view), started instead
         right after the stored anchor snapshot that `anchor_window` picks, so consecutive runs replay the same path
-        and history does not repaint as bars arrive (it only moves when the anchor steps to the next snapshot, about
-        every SNAPSHOT_EVERY bars). A run without an anchor stores its own window start as one ('origin')."""
+        and history does not repaint as bars arrive. When the anchor's resume block fits (`resume_fit`: same engine
+        version and params, its bars fetched) the engine gets the earlier bars its features restart from too and
+        continues the stored path exactly, so stepping to the next anchor (about every SNAPSHOT_EVERY bars) changes
+        nothing either; the response still starts WARMUP_BARS − 1 bars before the anchor. A run without an anchor
+        stores its own cold start as one ('origin')."""
         symbol, tf = self._clean_args(symbol, tf)
         params = self.params(symbol)
         lim = int(limit) if limit else params.default_limit
@@ -499,6 +639,7 @@ class NexusService(WatchMixin):
         if last_veto is not None:
             key += ("veto", int(last_veto["time"]), str(last_veto["direction"]))
         vetoes = await self._vetoes_for(symbol, tf)
+        gates = await self._gates_for(symbol, tf)
         hit = self._cache.get(key)
         if hit is not None and not force and hit.fresh(params, upto, self._veto_ver.get((symbol, tf), 0)):
             return hit
@@ -528,19 +669,23 @@ class NexusService(WatchMixin):
                                params, upto, ver)
             else:
                 old = await self._load_model(symbol, tf)
-                snaps = old.get("snapshots") or []
+                made = now_ms() - 1  # the stored decisions this run applies are the ones known now (1 ms margin)
+                decided = list(vetoes.values()) + list(gates.values())
+                snaps = [s for s in old.get("snapshots") or [] if not stale_for_vetoes(s, decided)]
                 start, anchor = anchor_window(cs.time, ref, lim, snaps)
-                win = cs.slice(start)
-                prior, origin = (anchor["state"] if anchor is not None else pick_prior(snaps, int(win.time[0]))), None
-                if anchor is None and len(win) > WARMUP_BARS:
-                    # the bar before the first processed one: later runs anchored here start at this same bar
-                    origin = {"time": int(win.time[WARMUP_BARS - 1]), "state": prior or {}, "kind": "origin"}
+                fit = resume_fit(anchor["state"], cs.time, params) if anchor is not None else None
+                begin = fit[0] if fit is not None else start  # exact resume: from the bar its features restart at
+                win = cs.slice(begin)
+                prior = anchor["state"] if anchor is not None else pick_prior(snaps, int(cs.time[start]))
                 t0, t1 = int(win.time[0]), int(win.time[-1])
                 window = [dict(v) for v in vetoes.values() if t0 <= v["time"] <= t1]
                 if last_veto is not None:
                     window.append(dict(last_veto))
-                entry = await self._run(win, symbol, tf, params, window, old=old, prior=prior, origin=origin,
-                                        closed=closed)
+                live = [g for g in gates.values() if t0 <= g["time"] <= t1]
+                entry = await self._run(win, symbol, tf, params, window, old=old, prior=prior,
+                                        store_origin=anchor is None, closed=closed, until=int(cs.time[ref]),
+                                        fallback=cs.slice(start) if begin != start else None, made=made,
+                                        live_gates=live)
                 entry.sig = self._sig(symbol, tf, cs)  # with the anchors this run stored
                 entry.upto, entry.veto_ver = upto, ver
             self._cache[key] = entry
@@ -559,27 +704,37 @@ class NexusService(WatchMixin):
         return (int(cs.time[-1]), float(cs.close[-1]), n, ver) if n else (0, 0.0, 0, ver)
 
     async def _run(self, cs: Any, symbol: str, tf: str, params: NexusParams, vetoed: list[dict] | None = None, *,
-                   old: dict, prior: dict | None, origin: dict | None = None, closed: bool = True) -> _Entry:
+                   old: dict, prior: dict | None, store_origin: bool = False, closed: bool = True,
+                   until: int | None = None, fallback: Any = None, made: int | None = None,
+                   live_gates: list[dict] | None = None) -> _Entry:
+        """Run the engine and persist its snapshots. `store_origin` = the run had no anchor (its cold start becomes
+        one); `fallback` = the window to use without the prior when the prior turns out incompatible (the
+        response window, without the earlier bars an exact resume needed)."""
         gate_state = copy.deepcopy(self._gate_state)
         try:
-            res = await asyncio.to_thread(run_nexus, cs, params, prior, gate_state=gate_state, vetoed_entries=vetoed)
+            res = await asyncio.to_thread(run_nexus, cs, params, prior, gate_state=gate_state, vetoed_entries=vetoed,
+                                          live_gates=live_gates)
         except Exception as exc:
             if prior is None:
                 self._last_error = f"{type(exc).__name__}: {exc}"
                 raise
             if self._log.should_log(f"prior:{symbol}|{tf}", 600):
                 self._emit("warn", f"Memoria NEXUS de {symbol} {tf} incompatible; se reinicia ({type(exc).__name__})")
-            res = await asyncio.to_thread(run_nexus, cs, params, None, gate_state=gate_state, vetoed_entries=vetoed)
+            cs = fallback if fallback is not None else cs
+            res = await asyncio.to_thread(run_nexus, cs, params, None, gate_state=gate_state, vetoed_entries=vetoed,
+                                          live_gates=live_gates)
         self._analyses += 1
         try:
-            await self._save_model(symbol, tf, old, res, origin=origin, closed=closed)
+            await self._save_model(symbol, tf, old, res, origin=res.origin if store_origin else None, closed=closed,
+                                   until=until, fingerprint=path_fingerprint(params), made=made)
         except Exception as exc:
             if self._log.should_log(f"save:{symbol}", 600):
                 self._emit("warn", f"No se pudo guardar la memoria NEXUS de {symbol} {tf}: {exc}")
         resp = res.to_response(cs)
         quick = None if res.ok else await self._quick(symbol, tf)
         resp.update({"symbol": symbol, "tf": tf, "provider": cs.provider or "", "note": cs.note, "quick": quick})
-        return _Entry(time.monotonic(), (), clean_json(resp), res.context, res.decision_gate, params)
+        return _Entry(time.monotonic(), (), clean_json(resp), res.context, res.decision_gate, params,
+                      live_gates=list(res.live_gates))
 
     # ------------------------------------------------------------------ market conditions (semáforo)
 
@@ -616,11 +771,18 @@ class NexusService(WatchMixin):
         last bar is the bar that JUST closed (within VETO_RECORD_GRACE_S, at most one bar, of its close). Any other
         veto applies to this view only: a still-forming bar is decided again, with the semáforo of that moment, when
         it closes, and a market that sits on an old closed bar (session closed, weekend) keeps the decision taken at
-        that close, which the semáforo of a later moment must not rewrite."""
+        that close, which the semáforo of a later moment must not rewrite.
+
+        The same rule stores the gate decisions of a bar-close decision that the global gate state (pooled in at
+        the last bar only) made different from what the bar would show as history (NexusResult.live_gates): every
+        later run replays them, so that marker, entry or rejection stays as it was decided at the close."""
         entry = await self._compute(symbol, tf, limit, force, upto=upto)
         resp = entry.resp
         if not resp.get("ok") or not resp.get("current"):
             return resp
+        at_close = self._decided_at_close(resp, tf, upto)
+        if entry.live_gates and at_close:
+            await self._record_gates(str(resp["symbol"]), str(resp["tf"]), entry.live_gates)
         checks = await self._macro_checks(str(resp.get("symbol") or symbol))
         take_score = float(entry.params.take_score)
         vetoed = vetoed_side(resp["current"], checks, take_score)
@@ -629,9 +791,7 @@ class NexusService(WatchMixin):
             t = int(resp["current"]["time"])
             veto = {"time": t, "direction": direction, "level": "red" if check.get("critical") else "amber",
                     "detail": str(check.get("detail") or "Condiciones de mercado adversas")}
-            tf_s = tf_seconds(str(resp.get("tf") or tf))
-            closed_ago = now_s() - (t + tf_s)  # < 0 while the bar is still forming
-            if upto is not None or 0 <= closed_ago <= min(tf_s, VETO_RECORD_GRACE_S):
+            if at_close:
                 await self._record_veto(str(resp["symbol"]), str(resp["tf"]), veto)
                 entry = await self._compute(symbol, tf, limit, upto=upto)
             else:

@@ -1,21 +1,53 @@
 // Watchlist card: quotes refreshed every 15 s (paused while the tab is hidden; a stale quote is dimmed, never shown
-// as live), click to open a symbol, star to add / remove the current symbol, x to remove a row.
+// as live), click to open a symbol, star to add / remove the current symbol, x to remove a row. Each row says how
+// fresh its price is when the source tells ("Tiempo real", "Retraso 15 min", "Cerrado"…, components/markets/freshness.ts),
+// with the full sentence in the tooltip; nothing is claimed when the source does not say.
 import { memo, useCallback, useEffect, useState } from 'react'
 import { ListPlus, RefreshCw, Star, X } from 'lucide-react'
 import { api, errorMessage } from '../../api/client'
 import type { WatchItem } from '../../api/types'
-import { fmtPct, fmtPrice, signTone, splitSymbol } from '../../lib/format'
+import { fmtPct, fmtPrice, signTone, splitSymbol, type Tone } from '../../lib/format'
 import { useApp } from '../../store'
+import { describeFreshness, type Freshness } from '../markets/freshness'
 import { Card, Empty, ErrorBox, IconButton, Loading, Spinner } from '../ui'
 import './nexus.css'
 
 const REFRESH_MS = 15_000
+
+/** Short words of a row: the badge labels are "<estado> · <fuente>" and the exchange is already on the row. */
+function shortLabel(f: Freshness): string | null {
+  const head = f.label.split(' · ')[0]
+  switch (f.kind) {
+    case 'realtime':
+      return 'Tiempo real'
+    case 'delayed': // "Retraso 15 min"
+      return head
+    case 'closed':
+      return 'Cerrado'
+    case 'stale':
+      return 'Desactualizado'
+    case 'recent': // "Twelve Data · hace 3 min"
+      return f.label.split(' · ').pop() ?? f.label
+    case 'synthetic':
+      return 'Sintético'
+    default:
+      return null // only the source name: it does not say whether the price is live or delayed
+  }
+}
+
+/** Freshness of one row's quote (`readAt` = client ms of the read that brought it), or null. */
+export function rowFreshness(item: WatchItem, readAt: number | null, nowMs: number): { text: string; tone: Tone; title: string } | null {
+  const f = describeFreshness({ symbol: item.symbol, quote: item.quote, quoteAt: readAt, live: null, candles: null, tf: '1h', nowMs })
+  const text = f ? shortLabel(f) : null
+  return f && text ? { text, tone: f.tone, title: f.title } : null
+}
 
 function Watchlist() {
   const symbol = useApp((s) => s.symbol)
   const setSymbol = useApp((s) => s.setSymbol)
   const notify = useApp((s) => s.notify)
   const [items, setItems] = useState<WatchItem[] | null>(null)
+  const [readAt, setReadAt] = useState<number | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [nonce, setNonce] = useState(0)
@@ -31,6 +63,7 @@ function Watchlist() {
           const res = await api.watchlist.list()
           if (!alive) return
           setItems(Array.isArray(res?.items) ? res.items.filter((i) => i && typeof i.symbol === 'string') : [])
+          setReadAt(Date.now())
           setError(null)
         } catch (err) {
           if (alive) setError(err)
@@ -57,6 +90,7 @@ function Watchlist() {
       try {
         const res = op === 'add' ? await api.watchlist.add(sym) : await api.watchlist.remove(sym)
         setItems(Array.isArray(res?.items) ? res.items : [])
+        setReadAt(Date.now())
         setError(null)
       } catch (err) {
         const t = splitSymbol(sym).ticker
@@ -109,6 +143,7 @@ function Watchlist() {
             const parts = splitSymbol(it.symbol)
             const active = it.symbol.toUpperCase() === upper
             const tone = signTone(q?.change_pct)
+            const fresh = rowFreshness(it, readAt, Date.now())
             return (
               <div
                 key={it.symbol}
@@ -126,7 +161,17 @@ function Watchlist() {
               >
                 <div className="col gap-0 grow" style={{ minWidth: 0 }}>
                   <span className="chart-wl-ticker ellipsis">{it.ticker || parts.ticker}</span>
-                  <span className="chart-wl-ex ellipsis">{it.exchange || parts.exchange || it.type}</span>
+                  <span className="chart-wl-ex ellipsis">
+                    {it.exchange || parts.exchange || it.type}
+                    {fresh && (
+                      <>
+                        {' · '}
+                        <span className={fresh.tone === 'muted' ? undefined : fresh.tone} title={fresh.title}>
+                          {fresh.text}
+                        </span>
+                      </>
+                    )}
+                  </span>
                 </div>
                 <span
                   className={`mono chart-wl-price ${q?.stale ? 'muted' : ''}`}

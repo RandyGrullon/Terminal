@@ -137,7 +137,8 @@ export function fmtProb(p: number | null | undefined, digits = 0): string {
 
 export function fmtR(r: number | null | undefined, digits = 2): string {
   if (!isNum(r)) return '—'
-  return `${r > 0 ? '+' : ''}${r.toLocaleString('es-ES', { maximumFractionDigits: digits, minimumFractionDigits: digits })}R`
+  const v = Number(r.toFixed(digits)) || 0 // a value that rounds to zero is "0,00R", never "-0,00R"
+  return `${v > 0 ? '+' : ''}${v.toLocaleString('es-ES', { maximumFractionDigits: digits, minimumFractionDigits: digits })}R`
 }
 
 export function fmtScore(s: number | null | undefined): string {

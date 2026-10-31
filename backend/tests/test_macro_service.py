@@ -38,8 +38,10 @@ def online(monkeypatch):
     monkeypatch.setattr(config, "BACKGROUND", False)
 
 
-def make_service(rt, now: int, feed=None, http: FakeHTTP | None = None):
-    calls = {"feed": 0}
+def make_service(rt, now: int, feed=None, http: FakeHTTP | None = None, official=None):
+    """Service with fake sources only (never the network): `official` = what the live official calendars return
+    (default: every source fails, so the curated dates of schedules.py apply)."""
+    calls = {"feed": 0, "official": 0}
 
     async def fetch():
         calls["feed"] += 1
@@ -47,7 +49,13 @@ def make_service(rt, now: int, feed=None, http: FakeHTTP | None = None):
             raise feed
         return cal.parse_feed(FF_SAMPLE if feed is None else feed)
 
-    svc = MacroService(rt, clock=Clock(now), monotonic=Clock(1000.0), fetch_feed=fetch)
+    async def fetch_official():
+        calls["official"] += 1
+        if official is None:
+            return {source: cal.CalendarError("sin conexión (prueba)") for source in ("bls", "bea")}
+        return official
+
+    svc = MacroService(rt, clock=Clock(now), monotonic=Clock(1000.0), fetch_feed=fetch, fetch_official=fetch_official)
     svc.metrics = MetricsCollector(rt, client_factory=http or crypto_http(), clock=svc._mono)
     return svc, calls
 

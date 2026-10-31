@@ -1,10 +1,18 @@
 """PredictionEvaluator (`rt.evaluator`): closes the feedback loop.
 
 Every 60 s it resolves due `predictions` (scanner + NEXUS) with real prices, writes the outcome, trains the scanner
-model with the stored features (one SGD step per resolved scanner row), resolves `gate_log` decisions by walking
-the candles after the decision (TP1 or SL, whichever is touched first; SL first when both in the same bar) and
-feeds the gate learner. This is what makes the hit rates honest: predictions are written *before* the outcome is
-known and scored afterwards.
+model with the stored features (one structured update per resolved scan: app.sim.scanner.ScannerModel), resolves
+`gate_log` decisions by walking the candles after the decision (TP1 or SL, whichever is touched first; SL first when
+both in the same bar) and feeds the gate learner. This is what makes the hit rates honest: predictions are written
+*before* the outcome is known and scored afterwards.
+
+Predictions have three outcomes (up, down, neutral = |return| inside the flat band), so 50 % is not the chance
+level: `skill_report` compares the hit rate with the reference (always predicting the most frequent outcome of the
+period, and the chance level of the same mix of calls) and the Brier score with climatology (the period's up rate),
+with 95 % intervals clustered by independent horizon windows (rows of one window move together; neighbouring windows
+are correlated too: Newey–West term). The scanner's compact feature vectors stay `scanner.replay_days` after
+resolution (default 7) for `replay_report`, an offline prequential replay that measures model designs on the same
+data (streamed in chunks: its memory does not grow with the number of rows).
 
 Outcomes that carry no information are resolved without a verdict (correct NULL) and never train anything: a move
 too small to measure (closed session, frozen price), no bar traded between the prediction and its target, or only a
@@ -19,23 +27,33 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import itertools
 import math
 import time
 import weakref
+from collections import deque
 from typing import Any, Iterable
 
 from app import config
-from app.sim.common import fmt_prob, json_dumps, json_loads, to_plain
+from app.sim.common import fmt_num, fmt_prob, json_dumps, json_loads, to_plain
 from app.sim.scanner import (
-    FEATURE_LABELS,
+    CONTEXT_NAMES,
     FEATURE_NAMES,
+    LearnSample,
     OnlineLogit,
+    ScannerModel,
+    action_for,
+    context_regime,
+    decide_direction,
     decode_features,
-    load_scanner_model,
+    evaluate_features,
+    flat_band_pct,
+    market_context,
     model_key,
-    save_scanner_model,
+    parse_model_key,
+    train_scanner_models,
 )
-from app.util import RateLimitedLog, clamp, floor_time, normalize_tf, now_ms, safe_float, tf_seconds
+from app.util import RateLimitedLog, TTLCache, clamp, floor_time, normalize_tf, now_ms, safe_float, tf_seconds
 
 LOOP_INTERVAL_S = 60.0
 BATCH_LIMIT = 2000
@@ -51,15 +69,16 @@ ROLLING_N = 200
 CALIBRATION_BINS = 10
 DAILY_META_KEY = "prediction_daily"  # meta flag: resolved rows that predate the aggregates table are folded in
 DAILY_VERSION = "1"
+# Resolved scanner rows keep their packed feature vector this long for the offline replay (0 = drop it at
+# resolution). A week holds 42 independent 4 h windows, more than the MIN_WINDOWS a conclusion needs; at ≈ 0,2 KB per
+# row the default background scan (≈ 16 k rows a day) keeps ≈ 3 MB a day, ≈ 20 MB for the week.
+REPLAY_DAYS_DEFAULT = 7
+FEATURE_PRUNE_EVERY_MS = 3_600_000
 
 
 # ----------------------------------------------------------------------------- pure math
-
-
-def flat_band_pct(horizon_s: float) -> float:
-    """|return| (%) below which a neutral prediction (direction 0) counts as correct."""
-    hours = max(float(horizon_s), 60.0) / 3600.0
-    return float(clamp(0.25 * math.sqrt(hours), 0.1, 1.5))
+# flat_band_pct (imported from app.sim.scanner, the model needs it too): |return| (%) below which a neutral prediction
+# counts as correct.
 
 
 def dead_band_pct(horizon_s: float) -> float:
@@ -235,6 +254,7 @@ class PredictionEvaluator:
         self._pending = 0
         self._last_run_ms: int | None = None
         self._gate_checked: dict[tuple[str, str], float] = {}
+        self._last_feature_prune: int = 0
         self._log = RateLimitedLog()
 
     # ------------------------------------------------------------------ lifecycle
@@ -300,6 +320,11 @@ class PredictionEvaluator:
             except Exception as exc:
                 if self._log.should_log("gate", 300):
                     self._emit("warn", f"No se pudieron resolver decisiones del filtro: {type(exc).__name__}: {exc}")
+            try:
+                await self._prune_features(now)
+            except Exception as exc:
+                if self._log.should_log("feature-prune", 3600):
+                    self._emit("warn", f"No se pudieron recortar los vectores del escáner: {type(exc).__name__}: {exc}")
             try:
                 self._pending = int(await self.rt.db.fetchval(
                     "SELECT COUNT(*) FROM predictions WHERE resolved=0", default=0))
@@ -427,7 +452,7 @@ class PredictionEvaluator:
         judged: list[tuple] = []  # (outcome_price, ret, correct, resolved_at, id)
         unjudged: list[tuple] = []  # measured but too small to judge: (outcome_price, ret, resolved_at, id)
         daily = _DailyBatch()
-        samples: list[tuple[str, dict, int, int | None]] = []
+        samples: list[LearnSample] = []
         per_key: dict[str, int] = {}
         nexus_n = 0
         for r, outcome_price in resolved:
@@ -446,64 +471,79 @@ class PredictionEvaluator:
             if r["source"] == "scanner" and r.get("model_key"):
                 x = decode_features(r.get("features"))
                 if x:
-                    samples.append((r["model_key"], x, 1 if ret > 0 else 0, int(r["target_at"]) // 1000))
+                    samples.append(LearnSample(
+                        key=r["model_key"], feats=x, up=1 if ret > 0 else 0, label_time=int(r["target_at"]) // 1000,
+                        created_ms=int(r["created_at"]), ret_pct=ret, symbol=str(r["symbol"]),
+                        direction=int(r["direction"] or 0), correct=1 if correct else 0,
+                    ))
                     per_key[r["model_key"]] = per_key.get(r["model_key"], 0) + 1
             elif r["source"] == "nexus":
                 nexus_n += 1
         for r in expired:
             daily.add(r, None, None)
-        # The scanner's feature vector is only needed to train at resolution time: drop it to keep the table small.
-        no_features = "features=CASE WHEN source='scanner' THEN NULL ELSE features END"
+        # Scanner feature vectors: kept `scanner.replay_days` for the offline replay (then _prune_features drops them);
+        # rows that expired without a price never had an outcome and lose theirs now.
+        drop = "features=CASE WHEN source='scanner' THEN NULL ELSE features END"
+        keep = "features=features" if self._replay_days() > 0 else drop
         async with self.rt.db.transaction() as tx:  # rows and daily aggregates move together (never counted twice)
             await tx.executemany(
                 "UPDATE predictions SET resolved=1, outcome_price=?, outcome_return_pct=?, correct=?, resolved_at=?, "
-                f"{no_features} WHERE id=? AND resolved=0",
+                f"{keep} WHERE id=? AND resolved=0",
                 judged,
             )
             await tx.executemany(
                 "UPDATE predictions SET resolved=1, outcome_price=?, outcome_return_pct=?, correct=NULL, "
-                f"resolved_at=?, {no_features} WHERE id=? AND resolved=0",
+                f"resolved_at=?, {keep} WHERE id=? AND resolved=0",
                 unjudged,
             )
             await tx.executemany(
-                f"UPDATE predictions SET resolved=1, correct=NULL, resolved_at=?, {no_features} "
+                f"UPDATE predictions SET resolved=1, correct=NULL, resolved_at=?, {drop} "
                 "WHERE id=? AND resolved=0",
                 [(now, int(r["id"])) for r in expired],
             )
             await tx.executemany(_DAILY_UPSERT, daily.rows())
         self._resolved_total += len(judged)
+        if judged or unjudged or expired:
+            invalidate_skill_cache(self.rt.db)
         if samples:
             await self._train_scanner(samples)
         for key, n in per_key.items():
-            hit, brier, total = await self._rolling(model_key_value=key)
-            self._emit(
-                "learn",
-                f"Modelo escáner {key.rsplit('|', 1)[0]}: {n} predicciones resueltas · acierto {fmt_prob(hit, 1)} "
-                f"(últimas {total}) · Brier {brier:.3f}" if hit is not None and brier is not None else
-                f"Modelo escáner {key.rsplit('|', 1)[0]}: {n} predicciones resueltas",
-                {"model_key": key, "resolved": n, "hit_rate": hit, "brier": brier},
-            )
+            roll = await self._rolling(model_key_value=key)
+            name = key.rsplit("|", 1)[0]
+            self._emit("learn", f"Modelo escáner {name}: {n} predicciones resueltas" + _rolling_text(roll),
+                       {"model_key": key, "resolved": n, **_rolling_data(roll)})
         if nexus_n:
-            hit, brier, total = await self._rolling(source="nexus")
-            if hit is not None:
-                self._emit("learn", f"NEXUS: {nexus_n} predicciones resueltas · acierto {fmt_prob(hit, 1)} "
-                                    f"(últimas {total})", {"resolved": nexus_n, "hit_rate": hit, "brier": brier})
+            roll = await self._rolling(source="nexus")
+            if roll is not None:
+                self._emit("learn", f"NEXUS: {nexus_n} predicciones resueltas" + _rolling_text(roll),
+                           {"resolved": nexus_n, **_rolling_data(roll)})
         return {"predictions": len(judged), "expired": len(expired) + len(unjudged), "scanner_updates": len(samples)}
 
-    async def _train_scanner(self, samples: list[tuple[str, dict, int, int | None]]) -> None:
+    def _replay_days(self) -> float:
+        v = safe_float(self._setting("scanner.replay_days", REPLAY_DAYS_DEFAULT), REPLAY_DAYS_DEFAULT)
+        return float(clamp(v if v is not None else REPLAY_DAYS_DEFAULT, 0.0, 30.0))
+
+    async def _prune_features(self, now: int) -> None:
+        """Drop the feature vectors of scanner rows resolved more than `scanner.replay_days` ago (hourly)."""
+        if now - self._last_feature_prune < FEATURE_PRUNE_EVERY_MS:
+            return
+        self._last_feature_prune = now
+        cutoff = now - int(self._replay_days() * 86_400_000)
+        await self.rt.db.execute(
+            "UPDATE predictions SET features=NULL WHERE source='scanner' AND resolved=1 AND features IS NOT NULL "
+            "AND target_at < ?",
+            (cutoff,),
+        )
+
+    async def _train_scanner(self, samples: list[LearnSample]) -> None:
         if self.rt.scanner is not None and hasattr(self.rt.scanner, "learn_batch"):
             await self.rt.scanner.learn_batch(samples)
             return
-        models: dict[str, OnlineLogit] = {}
-        for key, feats, label, label_time in samples:
-            model = models.get(key)
-            if model is None:
-                model = models[key] = await load_scanner_model(self.rt.db, key)
-            model.update(model.vector(feats), label, label_time)
-        for key, model in models.items():
-            await save_scanner_model(self.rt.db, key, model)
+        await train_scanner_models(self.rt.db, samples)
 
-    async def _rolling(self, *, model_key_value: str | None = None, source: str | None = None) -> tuple[float | None, float | None, int]:
+    async def _rolling(self, *, model_key_value: str | None = None, source: str | None = None) -> dict | None:
+        """Hit rate and Brier of the last ROLLING_N scored rows, each with its reference over the same rows (the most
+        frequent outcome; climatology for the Brier score) and the number of independent horizon windows."""
         where = "resolved=1 AND correct IS NOT NULL AND outcome_return_pct IS NOT NULL"
         params: list[Any] = []
         if model_key_value is not None:
@@ -513,15 +553,25 @@ class PredictionEvaluator:
             where += " AND source=?"
             params.append(source)
         rows = await self.rt.db.fetchall(
-            f"SELECT correct, prob_up, outcome_return_pct FROM predictions WHERE {where} "
+            f"SELECT correct, prob_up, outcome_return_pct, created_at, target_at FROM predictions WHERE {where} "
             f"ORDER BY target_at DESC LIMIT {ROLLING_N}",
             params,
         )
         if not rows:
-            return None, None, 0
-        hit = sum(int(r["correct"]) for r in rows) / len(rows)
-        brier = sum((float(r["prob_up"]) - (1.0 if r["outcome_return_pct"] > 0 else 0.0)) ** 2 for r in rows) / len(rows)
-        return hit, brier, len(rows)
+            return None
+        n = len(rows)
+        up = sum(1 for r in rows if r["outcome_return_pct"] > 0)
+        flat = sum(1 for r in rows if abs(float(r["outcome_return_pct"])) <= flat_band_pct(
+            (int(r["target_at"]) - int(r["created_at"])) / 1000.0))
+        ref_kind, ref_hits = best_constant(up, n - up, flat)
+        u = up / n
+        windows = len({(int(r["target_at"]) - int(r["created_at"]),
+                        int(r["target_at"]) // max(int(r["target_at"]) - int(r["created_at"]), 60_000)) for r in rows})
+        return {
+            "n": n, "hits": sum(int(r["correct"]) for r in rows), "ref_hits": ref_hits, "ref_kind": ref_kind,
+            "brier": sum((float(r["prob_up"]) - (1.0 if r["outcome_return_pct"] > 0 else 0.0)) ** 2 for r in rows) / n,
+            "brier_ref": u * (1.0 - u), "windows": windows,
+        }
 
     # ------------------------------------------------------------------ gate decisions
 
@@ -976,12 +1026,15 @@ async def calibration_bins(db: Any, *, model_key_value: str | None = None, sourc
     ]
 
 
+_METRIC_CONTAINERS = (None, "learning", "stats", "perf", "metrics", "learner", "latest", "model")  # lookup order
+
+
 def _state_metric(state: Any, name: str, _depth: int = 0) -> float | None:
     """A learner metric from a stored model_state JSON: top level, a common sub-object, or the latest snapshot
     (the NEXUS service may persist {"snapshots": [{"time", "state"}, ...]} instead of the bare learner state)."""
     if not isinstance(state, dict) or _depth > 2:
         return None
-    for key in (None, "learning", "stats", "perf", "metrics", "learner", "latest", "model"):
+    for key in _METRIC_CONTAINERS:
         container = state if key is None else state.get(key)
         if isinstance(container, dict):
             v = safe_float(container.get(name))
@@ -999,6 +1052,82 @@ def _state_metric(state: Any, name: str, _depth: int = 0) -> float | None:
             return None
         return _state_metric(snaps[last_key], name, _depth + 1)
     return None
+
+
+# A stored NEXUS memory ('nexus' row) is large (≈ 0,6 MB of JSON at the default nexus.horizon, ≈ 3,5 MB at 200) and
+# the summary needs only its hit rate and Brier: a row is read again only when its version (updated_at, updates,
+# trained_until) changed since the previous summary of the same database, and then only its small top-level tail is
+# decoded when that tail decides the answer (_nexus_row_metrics; otherwise the whole document). Decoding runs in a
+# worker thread, so a first summary after a start does not stall the server either.
+_NEXUS_TAIL_MARK = ',"learning":'
+_NEXUS_METRICS: "weakref.WeakKeyDictionary[Any, dict[str, tuple[tuple, float | None, float | None]]]" = (
+    weakref.WeakKeyDictionary())
+_NEXUS_LOCKS: "weakref.WeakKeyDictionary[Any, asyncio.Lock]" = weakref.WeakKeyDictionary()
+
+
+def _nexus_tail(text: str) -> dict | None:
+    """The top-level members of a stored NEXUS memory from its last top-level "learning" key to the end, without
+    decoding the snapshots before it (NexusService._save_model writes compact JSON {"version", "snapshots",
+    "learning", "hit_rate", "brier", "updates"}). The text after the last ',"learning":' decodes as one object only
+    when that key is a top-level one (a nested match leaves its enclosing brackets over). None otherwise."""
+    pos = text.rfind(_NEXUS_TAIL_MARK)
+    if pos < 0:
+        return None
+    tail = json_loads("{" + text[pos + 1:])  # None when it is not valid JSON
+    return tail if isinstance(tail, dict) else None
+
+
+def _tail_metric(tail: dict, name: str) -> tuple[bool, float | None]:
+    """(decided, value): what _state_metric gives for the WHOLE document, read from its tail alone. Each container
+    _state_metric looks at, in its order, must be in the tail (its last occurrence, the one the full decode keeps);
+    the first one missing, or the snapshot fallback, leaves it undecided."""
+    for key in _METRIC_CONTAINERS:
+        if (name if key is None else key) not in tail:
+            return False, None
+        container = tail if key is None else tail.get(key)
+        if isinstance(container, dict):
+            v = safe_float(container.get(name))
+            if v is not None:
+                return True, v
+    return False, None
+
+
+def _nexus_row_metrics(text: Any) -> tuple[float | None, float | None]:
+    """(hit_rate, brier) of one stored NEXUS memory, exactly as _state_metric reads them from the decoded document."""
+    if isinstance(text, str):
+        tail = _nexus_tail(text)
+        if tail is not None:
+            hit, brier = _tail_metric(tail, "hit_rate"), _tail_metric(tail, "brier")
+            if hit[0] and brier[0]:
+                return hit[1], brier[1]
+    state = json_loads(text)
+    return _state_metric(state, "hit_rate"), _state_metric(state, "brier")
+
+
+async def _nexus_metrics(db: Any, rows: list[dict]) -> dict[str, tuple[float | None, float | None, Any, Any]]:
+    """{key: (hit_rate, brier, updates, trained_until)} of the listed NEXUS memories (see the comment above). The
+    four values always come from the same version of a row; a row deleted meanwhile is left out."""
+    try:
+        cache = _NEXUS_METRICS.setdefault(db, {})
+        lock = _NEXUS_LOCKS.setdefault(db, asyncio.Lock())
+    except TypeError:  # not weak-referenceable: nothing is remembered between calls
+        cache, lock = {}, asyncio.Lock()
+    listed = {str(r["key"]): (r.get("updated_at"), r.get("updates"), r.get("trained_until")) for r in rows}
+    async with lock:  # concurrent summaries (several open pages) decode each changed row once
+        for k in [k for k in cache if k not in listed]:  # deleted, or no longer among the newest listed
+            cache.pop(k, None)
+        for k, version in listed.items():
+            entry = cache.get(k)
+            if entry is not None and entry[0] == version:
+                continue
+            row = await db.fetchone("SELECT state, updates, trained_until, updated_at FROM model_state "
+                                    "WHERE kind='nexus' AND key=?", (k,))
+            if row is None:
+                cache.pop(k, None)
+                continue
+            hit, brier = await asyncio.to_thread(_nexus_row_metrics, row.get("state"))
+            cache[k] = ((row.get("updated_at"), row.get("updates"), row.get("trained_until")), hit, brier)
+        return {k: (e[1], e[2], e[0][1], e[0][2]) for k, e in cache.items() if k in listed}
 
 
 async def learning_summary(db: Any, settings: dict | None = None) -> dict:
@@ -1027,30 +1156,28 @@ async def learning_summary(db: Any, settings: dict | None = None) -> dict:
     ):
         key = preferred
     if key is not None:
-        model = OnlineLogit.from_state(json_loads(srow["state"]) if srow else None)
+        model = ScannerModel.from_state(json_loads(srow["state"]) if srow else None, key=key)
         stats = await db.fetchone(
             "SELECT SUM(scored) AS n, SUM(correct) AS correct, SUM(brier_sum) AS brier FROM prediction_daily "
             "WHERE model_key=? AND source='scanner'",
             (key,),
         ) or {}
-        weights = {name: float(model.w[i]) for i, name in enumerate(model.names)}
-        features = sorted(
-            ({"name": n, "label": FEATURE_LABELS.get(n, n), "weight": round(weights.get(n, 0.0), 6)} for n in FEATURE_NAMES),
-            key=lambda f: -abs(f["weight"]),
-        )
         scanner_model = {
             "key": key,
             "updates": int(model.updates),
             "hit_rate": _ratio(stats.get("correct"), stats.get("n")),
             "brier": _ratio(stats.get("brier"), stats.get("n")),
-            "features": features,
+            # direction weights: the asset's features (relative to its scan), volatility × market move, market context
+            "features": model.weight_table(),
             "calibration": await calibration_bins(db, model_key_value=key, source="scanner"),
         }
 
-    # --- NEXUS models
+    # --- NEXUS models (the large memory rows are decoded only when they changed: _nexus_metrics)
     nrows = await db.fetchall(
-        "SELECT key, state, updates, trained_until FROM model_state WHERE kind='nexus' ORDER BY updated_at DESC LIMIT 100"
+        "SELECT key, updates, trained_until, updated_at FROM model_state WHERE kind='nexus' "
+        "ORDER BY updated_at DESC LIMIT 100"
     )
+    metrics = await _nexus_metrics(db, nrows)
     pstats = await db.fetchall(
         "SELECT model_key, SUM(scored) AS n, SUM(correct) AS correct, SUM(brier_sum) AS brier FROM prediction_daily "
         "WHERE source='nexus' GROUP BY model_key"
@@ -1063,22 +1190,23 @@ async def learning_summary(db: Any, settings: dict | None = None) -> dict:
     nexus_models = []
     for r in nrows:
         k = str(r["key"])
+        m = metrics.get(k)
+        if m is None:  # deleted while the summary was being built
+            continue
         symbol, _, ntf = k.rpartition("|")
         if not symbol:
             symbol, ntf = k, ""
-        state = json_loads(r["state"])
-        hit = _state_metric(state, "hit_rate")
-        brier = _state_metric(state, "brier")
+        hit, brier, updates, trained_until = m
         p = pmap.get((symbol, ntf))
         if hit is None and p is not None:
             hit = safe_float(p.get("hit_rate"))
         if brier is None and p is not None:
             brier = safe_float(p.get("brier"))
-        tu = safe_float(r.get("trained_until"))
+        tu = safe_float(trained_until)
         nexus_models.append({
             "symbol": symbol,
             "tf": ntf,
-            "updates": int(r.get("updates") or 0),
+            "updates": int(updates or 0),
             "hit_rate": hit,
             "brier": brier,
             "trained_until": int(tu) if tu is not None else None,
@@ -1127,3 +1255,665 @@ async def learning_summary(db: Any, settings: dict | None = None) -> dict:
         "predictions": await prediction_stats(db),
         "timeline": timeline,
     }
+
+
+# ----------------------------------------------------------------------------- skill versus the baseline
+# A prediction has three outcomes (up = return > 0, down = return < 0, neutral = |return| inside the flat band; up/down
+# and neutral overlap), so 50 % is not the chance level. Reference = what always predicting the most frequent outcome
+# of the same rows would have hit (known only afterwards: a demanding baseline); chance = the hit rate expected if the
+# model's calls (same mix of up / down / neutral) were unrelated to the outcomes. The Brier score is compared with
+# climatology (always the period's up rate): Brier skill score BSS = 1 − Brier / climatology. Rows of one horizon
+# window move together, so the 95 % intervals are clustered by horizon windows (target_at // horizon), with a
+# Newey–West term for the correlation between neighbouring windows (cluster_ci), and no conclusion is drawn with
+# fewer than MIN_WINDOWS windows.
+
+MIN_WINDOWS = 30
+SKILL_CACHE_TTL_S = 60.0  # windows up to 7 days (recomputed sooner when new outcomes arrive)
+SKILL_CACHE_LONG_TTL_S = 600.0  # longer windows / every stored row
+_T975 = (12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160, 2.145, 2.131,
+         2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042)
+OUTCOME_LABEL = {"up": "siempre «alcista»", "down": "siempre «bajista»", "flat": "siempre «neutral»"}
+DIRECTION_LABEL = {1: "alcista", -1: "bajista", 0: "neutral"}
+DIRECTION_OUTCOME = {1: "up", -1: "down", 0: "flat"}
+_SKILL_CACHE = TTLCache(SKILL_CACHE_TTL_S, maxsize=64)
+_SKILL_GEN: "weakref.WeakKeyDictionary[Any, int]" = weakref.WeakKeyDictionary()
+_DB_TOKENS: "weakref.WeakKeyDictionary[Any, int]" = weakref.WeakKeyDictionary()
+_TOKEN_SEQ = itertools.count(1)
+
+
+def t975(df: int) -> float:
+    """Two-sided 95 % Student t quantile (df ≥ 1)."""
+    if df < 1:
+        return float("inf")
+    if df <= len(_T975):
+        return _T975[df - 1]
+    return 2.0 if df <= 60 else 1.98 if df <= 120 else 1.96
+
+
+def best_constant(up: int, down: int, flat: int) -> tuple[str, int]:
+    """(outcome, hits) of the best constant prediction for these outcome counts (ties: up, down, neutral)."""
+    return max((("up", int(up)), ("down", int(down)), ("flat", int(flat))), key=lambda o: o[1])
+
+
+def nw_lag(g: int) -> int:
+    """Bartlett (Newey–West) bandwidth for g consecutive horizon windows: ⌊4 (g / 100)^(2/9)⌋, at least 1."""
+    return max(1, int(4.0 * (max(int(g), 1) / 100.0) ** (2.0 / 9.0)))
+
+
+def cluster_ci(sums: list[float], counts: list[int], blocks: list[tuple[int, int]] | None = None
+               ) -> tuple[float, float, float] | None:
+    """(mean, low, high): per-row mean of a quantity summed per cluster and its 95 % interval, robust to the
+    correlation inside clusters (CR1 variance of the ratio estimator, t with G − 1 degrees of freedom).
+
+    `blocks` = (horizon, window index) of each cluster: the variance then also counts the correlation between nearby
+    windows (Bartlett kernel, Newey–West bandwidth `nw_lag`). A target near the start of a window was still moving
+    during the previous one (the outcome windows of neighbouring blocks overlap) and market regimes last longer than
+    one window, so neighbouring windows are not independent either; without it the interval would be too narrow."""
+    g = len(counts)
+    total = float(sum(counts))
+    if g < 2 or total <= 0:
+        return None
+    mean = float(sum(sums)) / total
+    resid = [s - mean * c for s, c in zip(sums, counts)]
+    if blocks is not None and len(blocks) == g:
+        by_block: dict[tuple[int, int], float] = {}
+        for b, r in zip(blocks, resid):
+            key = (int(b[0]), int(b[1]))
+            by_block[key] = by_block.get(key, 0.0) + r
+        acc = sum(r * r for r in by_block.values())
+        lag = nw_lag(len(by_block))
+        for (hz, idx), r in by_block.items():
+            for k in range(1, lag + 1):
+                other = by_block.get((hz, idx + k))
+                if other is not None:
+                    acc += 2.0 * (1.0 - k / (lag + 1.0)) * r * other
+    else:
+        acc = sum(r * r for r in resid)
+    var = g / (g - 1.0) * max(acc, 0.0) / (total * total)
+    half = t975(g - 1) * math.sqrt(var)
+    return mean, mean - half, mean + half
+
+
+def _bounded(ci: tuple[float, float, float] | None, lo: float, hi: float) -> tuple[float, float, float] | None:
+    """An interval clipped to the natural range of its quantity (a hit-rate difference lies within ±1)."""
+    if ci is None:
+        return None
+    return ci[0], max(ci[1], lo), min(ci[2], hi)
+
+
+def invalidate_skill_cache(db: Any) -> None:
+    """New outcomes were written: the next skill report is recomputed."""
+    try:
+        _SKILL_GEN[db] = _SKILL_GEN.get(db, 0) + 1
+    except TypeError:
+        _SKILL_CACHE.clear()
+
+
+def _rolling_text(roll: dict | None) -> str:
+    """' · acierto 38,0 % (76 de 200) · referencia 62,0 % (siempre «bajista») · Brier 0,357 · climatología 0,236 · …'"""
+    if not roll or not roll.get("n"):
+        return ""
+    n = int(roll["n"])
+    text = (f" · acierto {fmt_prob(roll['hits'] / n, 1)} ({fmt_num(roll['hits'], 0)} de {fmt_num(n, 0)}) · referencia "
+            f"{fmt_prob(roll['ref_hits'] / n, 1)} ({OUTCOME_LABEL[roll['ref_kind']]}) · Brier {fmt_num(roll['brier'], 3)} "
+            f"· climatología {fmt_num(roll['brier_ref'], 3)}")
+    windows = int(roll.get("windows") or 0)
+    if windows < MIN_WINDOWS:
+        text += f" · {windows} {'ventana independiente' if windows == 1 else 'ventanas independientes'}: sin conclusión"
+    return text
+
+
+def _rolling_data(roll: dict | None) -> dict:
+    if not roll or not roll.get("n"):
+        return {"hit_rate": None, "brier": None}
+    n = int(roll["n"])
+    return {"hit_rate": roll["hits"] / n, "brier": roll["brier"], "n": n, "reference": roll["ref_hits"] / n,
+            "reference_kind": roll["ref_kind"], "brier_ref": roll["brier_ref"], "windows": roll.get("windows")}
+
+
+def _band_case(horizons: list[int]) -> str:
+    """SQL expression: the flat band (%) of each row from its horizon (target_at − created_at, ms)."""
+    default = f"{flat_band_pct(14400):.6f}"
+    if not horizons:
+        return default
+    whens = " ".join(f"WHEN {int(h)} THEN {flat_band_pct(int(h) / 1000.0):.6f}" for h in horizons)
+    return f"(CASE (target_at - created_at) {whens} ELSE {default} END)"
+
+
+async def _skill_records(db: Any, since: int, source: str | None, model_key_value: str | None) -> list[dict]:
+    """Scored rows since `since` (target time) aggregated per (source, scanner key, horizon, target hour, direction,
+    calibration bin): everything the skill statistics need, without loading the rows."""
+    where = [_SCORED, "target_at >= ?"]
+    params: list[Any] = [int(since)]
+    if source:
+        where.append("source=?")
+        params.append(source)
+    if model_key_value:
+        where.append("model_key=?")
+        params.append(model_key_value)
+    cond = " AND ".join(where)
+    hz_rows = await db.fetchall(
+        f"SELECT DISTINCT target_at - created_at AS hz FROM predictions WHERE {cond} LIMIT 200", params)
+    horizons = sorted({int(r["hz"]) for r in hz_rows if safe_float(r.get("hz")) is not None and int(r["hz"]) > 0})
+    if not horizons:
+        return []
+    band = _band_case(horizons)
+    mkey = "CASE WHEN source='scanner' THEN COALESCE(model_key, '') ELSE '' END"
+    rows = await db.fetchall(
+        f"SELECT source, {mkey} AS mkey, target_at - created_at AS hz, target_at / 3600000 AS hr, direction AS d, "
+        f"{_bin_expr(CALIBRATION_BINS)} AS bin, COUNT(*) AS n, SUM(correct) AS hits, "
+        f"SUM(CASE WHEN outcome_return_pct > 0 THEN 1 ELSE 0 END) AS up, "
+        f"SUM(CASE WHEN ABS(outcome_return_pct) <= {band} THEN 1 ELSE 0 END) AS flat, "
+        f"SUM(prob_up) AS p_sum, SUM({_BRIER_EXPR}) AS brier_sum "
+        f"FROM predictions WHERE {cond} GROUP BY 1, 2, 3, 4, 5, 6",
+        params,
+    )
+    out = []
+    for r in rows:
+        hz = int(safe_float(r.get("hz"), 0) or 0)
+        if hz <= 0:
+            continue
+        d = int(safe_float(r.get("d"), 0) or 0)
+        out.append({
+            "source": str(r.get("source") or ""), "mkey": str(r.get("mkey") or ""), "hz": hz,
+            "hr": int(safe_float(r.get("hr"), 0) or 0), "d": 1 if d > 0 else -1 if d < 0 else 0,
+            "bin": int(safe_float(r.get("bin"), 0) or 0), "n": int(r.get("n") or 0), "hits": int(r.get("hits") or 0),
+            "up": int(r.get("up") or 0), "flat": int(r.get("flat") or 0), "p_sum": float(r.get("p_sum") or 0.0),
+            "brier_sum": float(r.get("brier_sum") or 0.0),
+        })
+    return out
+
+
+def _hz_text(hz_ms: int) -> str:
+    h = hz_ms / 3_600_000
+    if h >= 24 and abs(h / 24 - round(h / 24)) < 1e-9:
+        return f"{round(h / 24)} d"
+    if h >= 1:
+        return f"{fmt_num(h, 0 if abs(h - round(h)) < 1e-9 else 1)} h"
+    return f"{round(hz_ms / 60_000)} min"
+
+
+def _pp(x: float | None, signed: bool = True) -> str:
+    return "—" if x is None else f"{fmt_num(x * 100.0, 1, signed)} pp"
+
+
+def skill_group(records: list[dict], *, gid: str, label: str, source: str | None = None,
+                model_key_value: str | None = None, common_blocks: bool = False) -> dict:
+    """Skill of one group of predictions versus the baseline. `records` are aggregates (see _skill_records); a
+    cluster is one independent horizon window (target hour // horizon; `common_blocks` uses the longest horizon for
+    every row, for groups that mix horizons)."""
+    base: dict[str, Any] = {"id": gid, "label": label, "source": source, "model_key": model_key_value}
+    n = sum(r["n"] for r in records)
+    if n <= 0:
+        return {**base, "n": 0, "hits": 0, "accuracy": None, "windows": 0, "horizon": None, "window": None,
+                "outcomes": {"up": 0, "down": 0, "flat": 0}, "reference": None, "chance": None, "skill_pp": None,
+                "skill_ci": None, "brier": None, "brier_ref": None, "bss": None, "bss_ci": None, "ece_pp": None,
+                "reliability": None, "resolution": None, "by_direction": [], "daily": [], "verdict": "none",
+                "verdict_text": "Aún no hay predicciones verificadas en este periodo.", "brier_text": None}
+    hits = sum(r["hits"] for r in records)
+    up = sum(r["up"] for r in records)
+    flat = sum(r["flat"] for r in records)
+    down = n - up
+    ref_kind, ref_hits = best_constant(up, down, flat)
+    rate = {"up": up / n, "down": down / n, "flat": flat / n}
+    by_d: dict[int, list[int]] = {}
+    for r in records:
+        acc = by_d.setdefault(r["d"], [0, 0])
+        acc[0] += r["n"]
+        acc[1] += r["hits"]
+    chance = sum(v[0] / n * rate[DIRECTION_OUTCOME[d]] for d, v in by_d.items())
+    hz_counts: dict[int, int] = {}
+    for r in records:
+        hz_counts[r["hz"]] = hz_counts.get(r["hz"], 0) + r["n"]
+    main_hz = max(hz_counts, key=lambda h: hz_counts[h])
+    block_hz = max(hz_counts) if common_blocks else None
+    # Length of one independent window as built below (the records are per target hour: never shorter than 1 h). A
+    # group that mixes horizons uses its longest one for every row, so "N ventanas de 4 h" must not be said of 5-day
+    # windows.
+    window_hz = max(block_hz or max(hz_counts), 3_600_000)
+    clusters: dict[tuple[int, int], list[float]] = {}
+    for r in records:
+        hz = block_hz or r["hz"]
+        c = clusters.setdefault((hz, r["hr"] * 3_600_000 // hz), [0, 0, 0, 0, 0.0])
+        c[0] += r["n"]
+        c[1] += r["hits"]
+        c[2] += r["up"]
+        c[3] += r["flat"]
+        c[4] += r["brier_sum"]
+    windows = len(clusters)
+
+    def ref_of(c: list[float]) -> float:
+        return c[2] if ref_kind == "up" else (c[0] - c[2]) if ref_kind == "down" else c[3]
+
+    blocks = list(clusters)
+    cs = [clusters[b] for b in blocks]
+    counts = [int(c[0]) for c in cs]
+    diff = _bounded(cluster_ci([c[1] - ref_of(c) for c in cs], counts, blocks), -1.0, 1.0)
+    u = up / n
+    clim = u * (1.0 - u)
+    brier = sum(r["brier_sum"] for r in records) / n
+    bs = cluster_ci([c[4] - (c[0] * u * u - 2.0 * u * c[2] + c[2]) for c in cs], counts, blocks)
+    bss = 1.0 - brier / clim if clim > 0 else None
+    bss_ci = [-bs[2] / clim, min(-bs[1] / clim, 1.0)] if bs is not None and clim > 0 else None
+    bins: dict[int, list[float]] = {}
+    for r in records:
+        b = bins.setdefault(r["bin"], [0, 0.0, 0])
+        b[0] += r["n"]
+        b[1] += r["p_sum"]
+        b[2] += r["up"]
+    ece = sum(abs(b[1] / b[0] - b[2] / b[0]) * b[0] for b in bins.values() if b[0]) / n
+    reliability = sum((b[1] / b[0] - b[2] / b[0]) ** 2 * b[0] for b in bins.values() if b[0]) / n
+    resolution = sum((b[2] / b[0] - u) ** 2 * b[0] for b in bins.values() if b[0]) / n
+    days: dict[int, list[float]] = {}
+    for r in records:
+        dd = days.setdefault(r["hr"] * 3600 // 86400 * 86400, [0, 0, 0, 0, 0.0])
+        dd[0] += r["n"]
+        dd[1] += r["hits"]
+        dd[2] += r["up"]
+        dd[3] += r["flat"]
+        dd[4] += r["brier_sum"]
+    daily = []
+    for day in sorted(days):
+        dn, dh, du, df, db = days[day]
+        kind, rh = best_constant(int(du), int(dn - du), int(df))
+        ud = du / dn
+        daily.append({"time": int(day), "n": int(dn), "hit_rate": dh / dn, "reference": rh / dn, "reference_kind": kind,
+                      "brier": db / dn, "brier_ref": ud * (1.0 - ud)})
+    by_direction = []
+    for d in (1, -1, 0):
+        dn, dh = by_d.get(d, [0, 0])
+        by_direction.append({"direction": d, "label": DIRECTION_LABEL[d], "n": int(dn), "hits": int(dh),
+                             "accuracy": dh / dn if dn else None, "base_rate": rate[DIRECTION_OUTCOME[d]]})
+    group = {
+        **base, "n": int(n), "hits": int(hits), "accuracy": hits / n, "windows": windows, "horizon": _hz_text(main_hz),
+        "window": _hz_text(window_hz),
+        "outcomes": {"up": int(up), "down": int(down), "flat": int(flat)},
+        "reference": {"kind": ref_kind, "label": OUTCOME_LABEL[ref_kind], "hits": int(ref_hits),
+                      "accuracy": ref_hits / n},
+        "chance": chance, "skill_pp": (hits - ref_hits) / n * 100.0,
+        "skill_ci": [diff[1] * 100.0, diff[2] * 100.0] if diff is not None else None,
+        "brier": brier, "brier_ref": clim, "bss": bss, "bss_ci": bss_ci, "ece_pp": ece * 100.0,
+        "reliability": reliability, "resolution": resolution, "by_direction": by_direction, "daily": daily,
+    }
+    group.update(_verdict(group))
+    return group
+
+
+def _verdict(g: dict) -> dict:
+    """verdict (none | insufficient | no_edge | better | worse) and its Spanish explanation, always as "x de n"."""
+    n, hits, ref = g["n"], g["hits"], g["reference"]
+    acc = f"{fmt_num(hits, 0)} de {fmt_num(n, 0)} ({fmt_prob(hits / n, 1)})"
+    ref_txt = f"{fmt_num(ref['hits'], 0)} de {fmt_num(n, 0)} ({fmt_prob(ref['accuracy'], 1)}, {ref['label']})"
+    windows = int(g["windows"])
+    noun = "ventana independiente" if windows == 1 else "ventanas independientes"
+    win_txt = f"{windows} {noun} de {g.get('window') or g['horizon']}"
+    ci = g.get("skill_ci")
+    brier_text = None
+    if g.get("brier") is not None and g.get("brier_ref") is not None:
+        brier_text = f"Brier {fmt_num(g['brier'], 3)} frente a {fmt_num(g['brier_ref'], 3)} de la climatología"
+        if g.get("bss") is not None:
+            brier_text += f" (habilidad {fmt_num(g['bss'] * 100.0, 0, True)} %"
+            if g.get("bss_ci") and windows >= MIN_WINDOWS:
+                lo, hi = g["bss_ci"]
+                brier_text += f"; IC 95 %: {fmt_num(lo * 100.0, 0, True)} a {fmt_num(hi * 100.0, 0, True)} %"
+            brier_text += ")"
+    if windows < MIN_WINDOWS or n < MIN_WINDOWS:
+        return {"verdict": "insufficient", "brier_text": brier_text,
+                "verdict_text": f"Muestra insuficiente: aciertos {acc} frente a {ref_txt} en solo {win_txt}; se "
+                                f"necesitan al menos {MIN_WINDOWS} para sacar conclusiones."}
+    diff = f"{fmt_num(g['skill_pp'], 1, True)} pp"
+    ci_txt = f"IC 95 %: {fmt_num(ci[0], 1, True)} a {fmt_num(ci[1], 1, True)} pp" if ci else "sin intervalo"
+    if ci and ci[0] > 0:
+        return {"verdict": "better", "brier_text": brier_text,
+                "verdict_text": f"Supera a la referencia: aciertos {acc} frente a {ref_txt}, diferencia {diff} ({ci_txt},"
+                                f" {win_txt}). Es una medición del pasado, no una garantía."}
+    if ci and ci[1] < 0:
+        return {"verdict": "worse", "brier_text": brier_text,
+                "verdict_text": f"Por debajo de la referencia: aciertos {acc} frente a {ref_txt}, diferencia {diff} "
+                                f"({ci_txt}, {win_txt})."}
+    return {"verdict": "no_edge", "brier_text": brier_text,
+            "verdict_text": f"Sin ventaja demostrada: aciertos {acc} frente a {ref_txt}; la diferencia ({diff}) cabe en "
+                            f"el margen de error ({ci_txt}, {win_txt})."}
+
+
+def _scanner_label(key: str) -> str:
+    market, tf, horizon = parse_model_key(key)
+    return f"Escáner {market} {tf} · horizonte {_hz_text(horizon * 1000)}"
+
+
+async def skill_report(db: Any, *, source: str | None = None, model_key_value: str | None = None,
+                       days: float | None = 7.0, now: int | None = None) -> dict:
+    """Out-of-sample skill of the recorded predictions versus the baseline (see the section comment): one group per
+    scanner model key, the scanner as a whole (several keys), NEXUS and everything together. Cached for a minute
+    (and recomputed after new outcomes). days=None: every stored row (resolved scanner rows: ~30 days)."""
+    days = None if days is None or float(days) <= 0 else float(clamp(float(days), 1.0 / 24.0, 400.0))
+    gen = _SKILL_GEN.get(db, 0) if _weakrefable(db) else 0
+    key = (_db_token(db), source, model_key_value, days, gen)
+    cached = _SKILL_CACHE.get(key) if now is None else None
+    if cached is not None:
+        return cached
+    now_v = int(now if now is not None else now_ms())
+    since = now_v - int(days * 86_400_000) if days else 0
+    records = await _skill_records(db, since, source, model_key_value)
+    groups: list[dict] = []
+    scanner_keys = sorted({r["mkey"] for r in records if r["source"] == "scanner" and r["mkey"]})
+    for k in scanner_keys:
+        groups.append(skill_group([r for r in records if r["source"] == "scanner" and r["mkey"] == k],
+                                  gid=f"scanner:{k}", label=_scanner_label(k), source="scanner", model_key_value=k))
+    scanner = [r for r in records if r["source"] == "scanner"]
+    if len(scanner_keys) != 1 and scanner:
+        groups.append(skill_group(scanner, gid="scanner", label="Escáner (todos los modelos)", source="scanner",
+                                  common_blocks=True))
+    nexus = [r for r in records if r["source"] == "nexus"]
+    if nexus and model_key_value is None:
+        groups.append(skill_group(nexus, gid="nexus", label="NEXUS (señales)", source="nexus", common_blocks=True))
+    if len(groups) > 1 or not groups:
+        groups.append(skill_group(records, gid="all", label="Todas las predicciones", common_blocks=True))
+    report = clean_report({
+        "generated_at": now_v, "days": days, "since": since or None, "min_windows": MIN_WINDOWS,
+        "groups": groups,
+        "notes": [
+            "Referencia: acertar siempre el resultado más frecuente del mismo periodo (alcista, bajista o neutral); se "
+            "conoce solo a posteriori, por eso es exigente.",
+            "Azar con la misma mezcla: el acierto esperado si las predicciones del modelo no tuvieran relación con el "
+            "resultado.",
+            "Brier frente a climatología: decir siempre la frecuencia de subida del periodo; habilidad > 0 % = mejor.",
+            "Los intervalos del 95 % agrupan las predicciones por ventanas independientes del horizonte (las de una "
+            "misma ventana se mueven juntas) y cuentan también la correlación entre ventanas vecinas; sin conclusiones "
+            f"con menos de {MIN_WINDOWS} ventanas.",
+        ],
+    })
+    if now is None:  # a long window scans every stored row (~0,5 M scanner rows a month): kept longer
+        _SKILL_CACHE.set(key, report, ttl=SKILL_CACHE_TTL_S if days and days <= 7 else SKILL_CACHE_LONG_TTL_S)
+    return report
+
+
+def _weakrefable(db: Any) -> bool:
+    try:
+        weakref.ref(db)
+        return True
+    except TypeError:
+        return False
+
+
+def _db_token(db: Any) -> Any:
+    """A process-unique cache token per database object (an id() is reused once its object is gone, so a cached
+    report of a closed database could be served for a new one)."""
+    try:
+        token = _DB_TOKENS.get(db)
+        if token is None:
+            token = _DB_TOKENS[db] = next(_TOKEN_SEQ)
+        return token
+    except TypeError:
+        return ("id", id(db))
+
+
+def clean_report(obj: Any) -> Any:
+    """Round floats (6 decimals) and replace NaN/inf with None, recursively."""
+    if isinstance(obj, float):
+        return round(obj, 6) if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: clean_report(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [clean_report(v) for v in obj]
+    return obj
+
+
+# ----------------------------------------------------------------------------- offline replay of the scanner
+# Resolved scanner rows keep their packed feature vector `scanner.replay_days` (default 7). The replay predicts every
+# stored scan again, in order, with fresh models of each design that have learned only the scans whose horizon had
+# already ended at that moment (what the live system could know), and compares them with the recorded live predictions
+# and the baseline on exactly the same rows. It measures designs on past data: with few independent windows it says
+# so. Cost: ≈ 0,13 ms per row (a week of the default background scan, ≈ 110 k rows: ≈ 15 s in a worker thread).
+
+REPLAY_MAX_ROWS = 300_000  # rows replayed at most (the oldest of the period first)
+REPLAY_CHUNK = 20_000  # rows per query: memory stays bounded whatever the period (see Replayer)
+REPLAY_DESIGNS = ("v2", "v1", "recorded")
+REPLAY_LABELS = {"v2": "Modelo v2 (actual, entrenado desde cero en la repetición)",
+                 "v1": "Modelo v1 (anterior, entrenado desde cero en la repetición)",
+                 "recorded": "Predicciones registradas en vivo"}
+_AGG_FIELDS = ("n", "hits", "up", "flat", "p_sum", "brier_sum")
+
+
+def _replay_record(hz_ms: int, target_ms: int, direction: int, p: float, ret: float) -> dict:
+    """One row as a skill record (see _skill_records), judged with the live rule."""
+    horizon_s = hz_ms / 1000.0
+    up = 1 if ret > 0 else 0
+    return {"source": "scanner", "mkey": "", "hz": hz_ms, "hr": target_ms // 3_600_000, "d": direction,
+            "bin": prob_bin(p), "n": 1, "hits": 1 if judge_prediction(direction, ret, horizon_s) else 0, "up": up,
+            "flat": 1 if abs(ret) <= flat_band_pct(horizon_s) else 0, "p_sum": p, "brier_sum": (p - up) ** 2}
+
+
+class _DesignAgg:
+    """Skill records of one replayed design, aggregated like `_skill_records` (per target hour, call and bin) as they
+    come; the per-row records are kept only on request (tests)."""
+
+    def __init__(self, keep: bool) -> None:
+        self.groups: dict[tuple[int, int, int, int], dict] = {}
+        self.rows: list[dict] | None = [] if keep else None
+        self.n = 0
+
+    def add(self, rec: dict) -> None:
+        self.n += 1
+        if self.rows is not None:
+            self.rows.append(rec)
+        key = (rec["hz"], rec["hr"], rec["d"], rec["bin"])
+        agg = self.groups.get(key)
+        if agg is None:
+            self.groups[key] = dict(rec)
+        else:
+            for name in _AGG_FIELDS:
+                agg[name] += rec[name]
+
+    def records(self) -> list[dict]:
+        return list(self.groups.values())
+
+
+class Replayer:
+    """Prequential replay of the stored scans of one model key (pure: no database).
+
+    Rows arrive in created_at order, possibly in several chunks (a scan split between two chunks is completed by the
+    next one). Each scan is predicted by fresh v2 and v1 models that have learned only the scans whose horizon had
+    ended by then (what the live system could know), then waits in a queue until its own horizon ends. Vectors are
+    decoded per scan and dropped once learned and the outcomes are aggregated as they come, so the memory does not
+    grow with the number of rows (≈ one horizon of decoded scans)."""
+
+    def __init__(self, key: str, *, keep_records: bool = False) -> None:
+        self.key = key
+        self.market, self.tf, horizon = parse_model_key(key)
+        self.hz_ms = int(horizon) * 1000
+        self.v2 = ScannerModel(key)
+        self.v1 = OnlineLogit()
+        self.aggs = {k: _DesignAgg(keep_records) for k in REPLAY_DESIGNS}
+        self.paired: dict[tuple[int, int], list[float]] = {}  # (horizon, window) → [n, Δhits, ΔBrier] of v2 − v1
+        self.scans = 0
+        self.with_context = 0
+        # scans waiting for their horizon: (created, [(row, features)], v2 inputs, v1 vectors) — the inputs built for
+        # the prediction are the ones the models learn from, so nothing is computed twice
+        self._queue: deque[tuple[int, list[tuple[dict, dict]], Any, list[Any]]] = deque()
+        self._created: int | None = None
+        self._pending: list[dict] = []
+
+    def feed(self, rows: Iterable[dict]) -> None:
+        for r in rows:
+            if r.get("outcome_return_pct") is None or int(r["target_at"]) - int(r["created_at"]) != self.hz_ms:
+                continue
+            created = int(r["created_at"])
+            if self._created is not None and created != self._created and self._pending:
+                self._scan(self._created, self._pending)
+                self._pending = []
+            self._created = created
+            self._pending.append(r)
+
+    def finish(self) -> dict:
+        if self._pending and self._created is not None:
+            self._scan(self._created, self._pending)
+            self._pending = []
+        designs = [skill_group(self.aggs[k].records(), gid=k, label=REPLAY_LABELS[k], source="scanner",
+                               model_key_value=self.key) for k in REPLAY_DESIGNS]
+        out = {"key": self.key, "rows": self.aggs["v2"].n, "scans": self.scans, "with_context": self.with_context,
+               "horizon": _hz_text(self.hz_ms), "designs": designs,
+               "comparison": _paired_verdict(self.paired, self.hz_ms)}
+        if self.aggs["v2"].rows is not None:
+            out["records"] = {k: self.aggs[k].rows for k in REPLAY_DESIGNS}
+        return out
+
+    @staticmethod
+    def _base(f: dict) -> dict:
+        return {k: f[k] for k in FEATURE_NAMES if k in f}
+
+    def _learn(self, created: int, items: list[tuple[dict, dict]], batch: Any, vectors: list[Any]) -> None:
+        self.v2.learn_scan([LearnSample(key=self.key, feats=f, up=1 if float(r["outcome_return_pct"]) > 0 else 0,
+                                        label_time=int(r["target_at"]) // 1000, created_ms=created,
+                                        ret_pct=float(r["outcome_return_pct"]), symbol=str(r["symbol"]),
+                                        direction=int(r["direction"] or 0), correct=int(r["correct"] or 0))
+                            for r, f in items], batch=batch)
+        for (r, _), x in zip(items, vectors):
+            self.v1.update(x, 1 if float(r["outcome_return_pct"]) > 0 else 0, int(r["target_at"]) // 1000)
+
+    def _scan(self, created: int, raw: list[dict]) -> None:
+        while self._queue and self._queue[0][0] + self.hz_ms <= created:
+            self._learn(*self._queue.popleft())
+        items = [(r, f) for r in raw if (f := decode_features(r.get("features")))]
+        if not items:
+            return
+        self.scans += 1
+        feats_list = [f for _, f in items]
+        ctx = {k: feats_list[0][k] for k in CONTEXT_NAMES if k in feats_list[0]}
+        if context_regime(ctx) is None:  # stored without its context (older encoding): rebuilt from the rows
+            ctx = market_context(feats_list, [str(r["symbol"]) for r, _ in items], self.market)
+        else:
+            self.with_context += len(items)
+        batch = self.v2.batch(feats_list, ctx)
+        _, p_up, p_move = self.v2.predict(batch)
+        vectors = []
+        for i, (r, f) in enumerate(items):
+            ret, target = float(r["outcome_return_pct"]), int(r["target_at"])
+            p2 = float(p_up[i])
+            rec2 = _replay_record(self.hz_ms, target, decide_direction(p2, float(p_move[i])), p2, ret)
+            base = self._base(f)
+            x1 = self.v1.vector(base)
+            vectors.append(x1)
+            # the rule prior reads base features only: the one in the v2 inputs is the same value
+            p1, s1, _, _ = evaluate_features(base, len(base) / len(FEATURE_NAMES), self.tf, self.v1, x1,
+                                             float(batch.prior[i]))
+            a1 = action_for(s1)
+            rec1 = _replay_record(self.hz_ms, target, 1 if a1 == "BUY" else -1 if a1 == "SELL" else 0, p1, ret)
+            self.aggs["v2"].add(rec2)
+            self.aggs["v1"].add(rec1)
+            self.aggs["recorded"].add(_replay_record(self.hz_ms, target, int(r["direction"] or 0),
+                                                     float(r["prob_up"]), ret))
+            c = self.paired.setdefault((self.hz_ms, rec2["hr"] * 3_600_000 // self.hz_ms), [0, 0.0, 0.0])
+            c[0] += 1
+            c[1] += rec2["hits"] - rec1["hits"]
+            c[2] += rec2["brier_sum"] - rec1["brier_sum"]
+        self._queue.append((created, items, batch, vectors))
+
+
+def replay_compute(rows: list[dict], key: str, *, keep_records: bool = False) -> dict:
+    """Prequential replay of the stored scans of one model key (pure: no database). `rows` = resolved, scored rows
+    with features (symbol, created_at, target_at, direction, prob_up, correct, outcome_return_pct, features), in any
+    order. `keep_records` adds the per-row records of every design (tests)."""
+    replayer = Replayer(key, keep_records=keep_records)
+    replayer.feed(sorted(rows, key=lambda r: int(r["created_at"])))
+    return replayer.finish()
+
+
+def _paired_verdict(clusters: dict[tuple[int, int], list[float]], hz_ms: int) -> dict:
+    """v2 − v1 on the same rows (per window: [n, Δhits, ΔBrier]): hit-rate difference (pp) and Brier difference, 95 %
+    intervals clustered by windows (with the Newey–West term for neighbouring ones), and an honest verdict."""
+    n = int(sum(c[0] for c in clusters.values()))
+    if not n:
+        return {"n": 0, "windows": 0, "diff_pp": None, "diff_ci": None, "brier_diff": None, "brier_ci": None,
+                "verdict": "none", "text": "No hay predicciones con su vector de características guardado en el "
+                                           "periodo: todavía no se puede repetir."}
+    blocks = list(clusters)
+    cs = [clusters[b] for b in blocks]
+    counts = [int(c[0]) for c in cs]
+    windows = len(cs)
+    acc = _bounded(cluster_ci([c[1] for c in cs], counts, blocks), -1.0, 1.0)
+    bri = _bounded(cluster_ci([c[2] for c in cs], counts, blocks), -1.0, 1.0)
+    diff = sum(c[1] for c in cs) / n
+    bdiff = sum(c[2] for c in cs) / n
+    out = {"n": n, "windows": windows, "diff_pp": diff * 100.0,
+           "diff_ci": [acc[1] * 100.0, acc[2] * 100.0] if acc else None, "brier_diff": bdiff,
+           "brier_ci": [bri[1], bri[2]] if bri else None}
+    head = (f"Diferencia v2 − v1 en la repetición: {fmt_num(diff * 100.0, 1, True)} pp de acierto y "
+            f"{fmt_num(bdiff, 3, True)} de Brier (negativo = mejor) sobre {fmt_num(n, 0)} predicciones")
+    noun = "ventana independiente" if windows == 1 else "ventanas independientes"
+    if windows < MIN_WINDOWS or n < MIN_WINDOWS:
+        out.update(verdict="insufficient", text=f"{head}, pero solo {windows} {noun} de "
+                                                 f"{_hz_text(max(hz_ms, 3_600_000))}: no se puede "
+                                                 f"afirmar que un diseño sea mejor (se necesitan {MIN_WINDOWS}).")
+    elif acc and acc[1] > 0:
+        out.update(verdict="better", text=f"{head}: el v2 acierta más (IC 95 %: {fmt_num(acc[1] * 100, 1, True)} a "
+                                          f"{fmt_num(acc[2] * 100, 1, True)} pp). Medición sobre datos pasados, no una "
+                                          "garantía.")
+    elif acc and acc[2] < 0:
+        out.update(verdict="worse", text=f"{head}: el v2 acierta menos (IC 95 %: {fmt_num(acc[1] * 100, 1, True)} a "
+                                         f"{fmt_num(acc[2] * 100, 1, True)} pp).")
+    else:
+        ci = f"IC 95 %: {fmt_num(acc[1] * 100, 1, True)} a {fmt_num(acc[2] * 100, 1, True)} pp" if acc else "sin IC"
+        out.update(verdict="no_edge", text=f"{head}: sin diferencia demostrada ({ci}).")
+    return out
+
+
+class ReplayBusy(RuntimeError):
+    """Another offline replay of the same database is still running."""
+
+
+_REPLAY_RUNNING: set = set()
+
+
+async def replay_report(db: Any, *, model_key_value: str | None = None, days: float = REPLAY_DAYS_DEFAULT,
+                        now: int | None = None) -> dict:
+    """Offline prequential replay of the scanner on the stored feature vectors (see the section comment). One at a
+    time per database (it takes seconds of CPU): a second request while one runs raises ReplayBusy."""
+    token = _db_token(db)
+    if token in _REPLAY_RUNNING:
+        raise ReplayBusy("Ya hay una repetición del escáner en curso: espera a que termine.")
+    _REPLAY_RUNNING.add(token)
+    try:
+        return await _replay_report(db, model_key_value=model_key_value, days=days, now=now)
+    finally:
+        _REPLAY_RUNNING.discard(token)
+
+
+async def _replay_report(db: Any, *, model_key_value: str | None, days: float, now: int | None) -> dict:
+    now_v = int(now if now is not None else now_ms())
+    days = float(clamp(float(days or REPLAY_DAYS_DEFAULT), 1.0 / 24.0, 30.0))
+    since = now_v - int(days * 86_400_000)
+    stored = "source='scanner' AND resolved=1 AND correct IS NOT NULL AND outcome_return_pct IS NOT NULL " \
+             "AND features IS NOT NULL AND target_at >= ?"
+    key = model_key_value
+    if not key:
+        top = await db.fetchone(
+            f"SELECT model_key, COUNT(*) AS n FROM predictions WHERE {stored} AND model_key IS NOT NULL "
+            "GROUP BY model_key ORDER BY 2 DESC LIMIT 1", (since,))
+        key = top["model_key"] if top else None
+    base = {"generated_at": now_v, "days": days, "since": since, "min_windows": MIN_WINDOWS,
+            "note": "Repetición secuencial: cada predicción se evalúa antes de aprender de ella; cada escaneo se "
+                    "predice solo con lo aprendido de los escaneos cuyo horizonte ya había vencido, así que nada se "
+                    "aprende antes de tiempo."}
+    if not key:
+        return clean_report({**base, "key": None, "rows": 0, "scans": 0, "with_context": 0, "horizon": None,
+                             "truncated": False, "designs": [], "comparison": _paired_verdict({}, 14_400_000)})
+    replayer = Replayer(key)
+    after_created, after_id, fetched = -1, -1, 0
+    while fetched < REPLAY_MAX_ROWS:  # keyset pages in (created_at, id) order: a scan may span two pages
+        limit = int(min(REPLAY_CHUNK, REPLAY_MAX_ROWS - fetched))
+        rows = await db.fetchall(
+            "SELECT id, symbol, created_at, target_at, direction, prob_up, correct, outcome_return_pct, features "
+            f"FROM predictions WHERE {stored} AND model_key=? AND (created_at > ? OR (created_at = ? AND id > ?)) "
+            f"ORDER BY created_at, id LIMIT {limit}",
+            (since, key, after_created, after_created, after_id),
+        )
+        if not rows:
+            break
+        await asyncio.to_thread(replayer.feed, rows)
+        fetched += len(rows)
+        after_created, after_id = int(rows[-1]["created_at"]), int(rows[-1]["id"])
+        if len(rows) < limit:
+            break
+    result = await asyncio.to_thread(replayer.finish)
+    return clean_report({**base, **result, "truncated": fetched >= REPLAY_MAX_ROWS})

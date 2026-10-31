@@ -1,4 +1,8 @@
 * text=auto
+# Read by Linux tools: LF in every checkout, also on Windows with core.autocrlf=true (a CR breaks the shebang of a
+# shell script and the RUN lines of the Dockerfile). tools/ci/portability.py checks it in CI.
 *.sh text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
 *.bat text eol=crlf
 *.ps1 text eol=crlf

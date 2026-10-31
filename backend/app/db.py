@@ -1,4 +1,7 @@
-"""SQLite access (aiosqlite, WAL). One shared connection guarded by an asyncio.Lock."""
+"""SQLite access (aiosqlite, WAL). One shared connection guarded by an asyncio.Lock.
+
+`init_schema` runs the versioned migrations (app.migrations): baseline schema.sql + numbered migrations, recorded in
+schema_migrations; the result is kept in `Database.schema_info`."""
 from __future__ import annotations
 
 import asyncio
@@ -8,7 +11,8 @@ from typing import Any, AsyncIterator, Iterable, Sequence
 
 import aiosqlite
 
-SCHEMA_VERSION = "1"
+from app import migrations
+
 SCHEMA_FILE = Path(__file__).with_name("schema.sql")
 
 
@@ -47,6 +51,8 @@ class Database:
         self.path = Path(path)
         self.conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
+        # Result of the last init_schema: {version, latest, baseline, applied, unknown} (see app.migrations)
+        self.schema_info: dict[str, Any] = {}
 
     @classmethod
     async def open(cls, path: Path | str) -> "Database":
@@ -69,14 +75,12 @@ class Database:
         await db.conn.commit()
         return db
 
-    async def init_schema(self) -> None:
-        sql = SCHEMA_FILE.read_text(encoding="utf-8")
+    async def init_schema(self, migration_set: list[migrations.Migration] | None = None) -> dict[str, Any]:
+        """Baseline + pending migrations in one BEGIN IMMEDIATE transaction (`migration_set`: tests only)."""
+        baseline = SCHEMA_FILE.read_text(encoding="utf-8")
         async with self._lock:
-            await self.conn.executescript(sql)
-            await self.conn.commit()
-        await self.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)", (SCHEMA_VERSION,)
-        )
+            self.schema_info = await migrations.apply_sqlite(self.conn, baseline, migration_set)
+        return self.schema_info
 
     async def execute(self, sql: str, params: Sequence[Any] = ()) -> int:
         async with self._lock:

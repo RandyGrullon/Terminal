@@ -135,6 +135,12 @@ class NexusResult:
     state: dict | None = None
     context: Any = None  # GateContext of the last bar (lets the service re-check user entry/SL/TP ideas)
     decision_gate: dict | None = None  # gate learner state applied at the last bar (prior chain + live state)
+    # anchor snapshot of the bar before the first processed one of a run that started cold (kind "origin"):
+    # a later run anchored there replays this run's path (NexusService stores it when the run had no anchor)
+    origin: dict | None = None
+    # gate decisions of the last bar taken with the global gate state that the bar would not show once it is history
+    # (nexus_decide.gate_record); the service stores those of a bar-close decision and passes them back as live_gates
+    live_gates: list[dict] = field(default_factory=list)
 
     def to_response(self, cs: Any = None) -> dict[str, Any]:
         """NexusResponse without provider/note/quick (the service fills them)."""
@@ -156,15 +162,22 @@ class NexusResult:
 
 
 def run_nexus(cs: Any, params: NexusParams | None = None, prior: dict | None = None, *,
-              gate_state: dict | None = None, vetoed_entries: Any = None) -> NexusResult:
-    """Run the engine over the candle set. `prior` = a learner snapshot state (see NexusResult.snapshots);
+              gate_state: dict | None = None, vetoed_entries: Any = None, live_gates: Any = None) -> NexusResult:
+    """Run the engine over the candle set. `prior` = a snapshot state (see NexusResult.snapshots). An anchor
+    snapshot whose resume block fits (`app.engine.nexus_resume.resume_fit`: same engine version and path params,
+    and the candle set starts at the bar its features restart from) is continued exactly: the run processes from
+    the bar after the anchor and reproduces the stored path bit for bit; any other prior only seeds the learners.
     `gate_state` = the global GateLearner state (model_state kind='gate'), pooled into the gate weights of the LAST
     bar only (historical decisions use the causal prior chain + what the run learns).
 
     `vetoed_entries` = entries the market-conditions check (semáforo) vetoed when they were the live decision:
     [{"time": decision bar open time, "direction": "long" | "short", "level": "red" | "amber", "detail": str}].
     That candidate is rejected (REJECTED_* marker with the macro reason) instead of opening a position. The veto
-    was known at the close of its bar, so the run stays causal and deterministic for the same inputs."""
+    was known at the close of its bar, so the run stays causal and deterministic for the same inputs.
+
+    `live_gates` = gate decisions taken at a bar's close with the global gate state pooled in (NexusResult.live_gates
+    of that bar-close run): at that bar the candidate is decided as it was then (verdict, score, reasons, check
+    vector), so a bar-close decision never changes once the bar is history. Known at that close: still causal."""
     from app.engine.nexus_loop import NexusRun
 
     if params is None:
@@ -174,4 +187,4 @@ def run_nexus(cs: Any, params: NexusParams | None = None, prior: dict | None = N
         params = NexusParams(**{k: v for k, v in params.items() if k in names})
     elif not isinstance(params, NexusParams):
         raise TypeError("params debe ser NexusParams")
-    return NexusRun(cs, params, prior, gate_state, vetoed_entries).run()
+    return NexusRun(cs, params, prior, gate_state, vetoed_entries, live_gates).run()

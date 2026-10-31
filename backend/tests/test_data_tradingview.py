@@ -272,7 +272,9 @@ def test_quotes_lookup_fallback_and_caches():
     first, n1, second, n2 = run(tv, go)
     assert set(first) == {"BINANCE:BTCUSDT", "TVC:DXY"}
     q = first["BINANCE:BTCUSDT"]
-    assert set(q) == {"symbol", "price", "change_pct", "change", "volume", "high", "low", "open", "ts"}
+    # streaming data (update_mode) is announced with the optional `realtime` key (types-realtime.ts)
+    assert set(q) == {"symbol", "price", "change_pct", "change", "volume", "high", "low", "open", "ts", "realtime"}
+    assert q["realtime"] is True and "realtime" not in first["TVC:DXY"] and "delay_s" not in first["TVC:DXY"]
     assert (q["price"], q["change_pct"], q["change"], q["open"]) == (77449.06, -0.672, -524.1, 77991.89)
     assert first["TVC:DXY"]["price"] == 101.978 and first["TVC:DXY"]["high"] is None
     assert [m for m, _, _ in fake.requests] == ["global", "cfd"] and n1 == 2

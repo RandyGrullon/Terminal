@@ -1,0 +1,166 @@
+/* Walk-forward validation card (Aprendizaje page, components/brain/ValidationCard.tsx) */
+
+/* Inside the two-column .brain-row it takes a whole row of its own, after the other cards of that row. */
+.val-card {
+  grid-column: 1 / -1;
+  order: 1;
+  min-width: 0;
+}
+
+.val-verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.val-verdict strong {
+  font-size: 13.5px;
+}
+.val-verdict.val-pos {
+  background: var(--pos-bg);
+  border-color: rgba(22, 199, 132, 0.35);
+}
+.val-verdict.val-neg {
+  background: var(--neg-bg);
+  border-color: rgba(234, 57, 67, 0.35);
+}
+.val-verdict.val-warn {
+  background: var(--warn-bg);
+  border-color: rgba(245, 165, 36, 0.35);
+}
+
+.val-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.val-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) auto minmax(130px, 1fr) auto;
+  gap: 10px 12px;
+  align-items: end;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+@media (max-width: 900px) {
+  .val-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* The tables fit the card down to a ~1024 px window: headers, secondary lines and verdict badges wrap and the cells
+   are a bit tighter than the app's default tables. Narrower than that, each table scrolls inside its own frame. All
+   rules are scoped with .table so they never depend on the order in which the stylesheets load. */
+.val-card .table-wrap {
+  container-type: inline-size; /* 100cqw = the visible width of the table (used by the expanded detail) */
+}
+.table.val-table th {
+  white-space: normal;
+  vertical-align: bottom;
+  line-height: 1.25;
+  padding: 7px 8px;
+}
+.table.val-table td {
+  padding: 7px 8px;
+  vertical-align: top;
+}
+.table.val-table td .tiny {
+  white-space: normal;
+  line-height: 1.3;
+}
+.table.val-table .badge {
+  white-space: normal;
+  line-height: 1.25;
+  border-radius: 10px;
+}
+.val-row-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.val-row-btn svg {
+  color: var(--muted);
+}
+.val-row-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+.table tbody tr.val-detail-row:hover td,
+.table .val-detail-row > td {
+  background: var(--panel-2);
+  white-space: normal;
+  padding: 10px 12px;
+}
+
+.val-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  line-height: 1.45;
+  /* When the series table scrolls sideways (narrow windows), the detail keeps the visible width and stays in view
+     instead of being laid out across the whole scrolled table. */
+  position: sticky;
+  left: 12px;
+  width: calc(100cqw - 24px);
+  max-width: 100%;
+}
+.val-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+.val-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  font-size: 12px;
+  min-width: 0;
+}
+.val-box h4 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.val-method summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.val-method ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-2);
+}

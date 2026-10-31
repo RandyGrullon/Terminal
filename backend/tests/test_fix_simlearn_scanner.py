@@ -28,9 +28,12 @@ def _resp(action: str, *, long_verdict: str = "AVOID", short_verdict: str = "AVO
 
 
 def _rows() -> list[dict]:
-    return [scan_row("BINANCE:BTCUSDT", value=3e9), scan_row("BINANCE:ETHUSDT", value=2e9),
+    # Volatile assets (8 % a day): the quick model expects moves larger than the neutral band, so these bullish rows
+    # read as BUY (with 3 % a day the scanner model v2 would call them neutral: a small move is the likelier outcome).
+    rows = [scan_row("BINANCE:BTCUSDT", value=3e9), scan_row("BINANCE:ETHUSDT", value=2e9),
             scan_row("BINANCE:SOLUSDT", value=1e9), scan_row("BINANCE:XRPUSDT", value=9e8),
             scan_row("BINANCE:ADAUSDT", value=8e8)]
+    return [{**r, "Volatility.D": 8.0} for r in rows]
 
 
 async def _deep_scan(rt, monkeypatch, analyze_map: dict[str, dict]) -> tuple[dict, list[dict]]:

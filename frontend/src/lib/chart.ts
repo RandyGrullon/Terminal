@@ -107,6 +107,45 @@ function deepMerge<T>(base: T, extra: unknown): T {
   return out as T
 }
 
+// ----------------------------------------------------------------------------- chart lifetime
+//
+// After chart.remove() nothing of that chart may be touched again. lightweight-charts does not throw right away: a
+// call that changes the model (series.setData, detaching the markers plugin, removing a price line, applyOptions…)
+// schedules a redraw, and that animation frame resizes the destroyed widgets -> "Uncaught Error: Object is disposed"
+// (fancy-canvas resizeCanvasElement) when leaving a section with a chart. React runs useChart's cleanup before the
+// cleanups of the effects declared after it, so those cleanups (and any late callback) find the chart removed: the
+// layers below check `isSeriesRemoved` / `isChartRemoved` and do nothing then, and components guard their own calls.
+
+const removedCharts = new WeakSet<object>()
+const removedSeries = new WeakSet<object>()
+
+/** True once `removeChart` ran for this chart (or for a missing one). */
+export function isChartRemoved(chart: IChartApi | null | undefined): boolean {
+  return !chart || removedCharts.has(chart)
+}
+
+/** True when the series belonged to a chart that was removed with `removeChart`. */
+export function isSeriesRemoved(series: ISeriesApi<SeriesType> | null | undefined): boolean {
+  return !series || removedSeries.has(series)
+}
+
+/** Removes a chart once: first marks it and all its series as removed (so the layers and guards stop touching them),
+ *  then calls chart.remove(). Further calls are ignored. */
+export function removeChart(chart: IChartApi): void {
+  if (removedCharts.has(chart)) return
+  removedCharts.add(chart)
+  try {
+    for (const pane of chart.panes()) for (const s of pane.getSeries()) removedSeries.add(s)
+  } catch {
+    /* the series of a broken chart cannot be listed: the chart flag still guards the layers that know their chart */
+  }
+  try {
+    chart.remove()
+  } catch (err) {
+    console.warn('[chart] no se pudo liberar el gráfico', err)
+  }
+}
+
 export function createBaseChart(el: HTMLElement, opts: DeepPartial<ChartOptions> = {}): IChartApi {
   const base: DeepPartial<ChartOptions> = {
     autoSize: true,
@@ -127,9 +166,11 @@ export function createBaseChart(el: HTMLElement, opts: DeepPartial<ChartOptions>
 }
 
 /**
- * React hook: creates a chart in the returned ref'd div and removes it on unmount.
+ * React hook: creates a chart in the returned ref'd div and removes it on unmount (with `removeChart`).
  *   const { ref, chart } = useChart()
  *   return <div ref={ref} style={{ height: 400 }} />
+ * Its cleanup runs BEFORE the cleanups of the component's later effects: those must not touch the chart or its series
+ * any more (the lib/chart layers already check; for direct calls use `isChartRemoved(chart)`).
  */
 export function useChart(opts: DeepPartial<ChartOptions> = {}) {
   const ref = useRef<HTMLDivElement | null>(null)
@@ -140,7 +181,7 @@ export function useChart(opts: DeepPartial<ChartOptions> = {}) {
     setChart(c)
     return () => {
       setChart(null)
-      c.remove()
+      removeChart(c)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -305,18 +346,26 @@ export function outputData(output: IndicatorOutput, time: number[], values: (num
 
 // ----------------------------------------------------------------------------- overlays
 
+/** Markers plugin of a series. Every call is a no-op once the chart was removed (see `removeChart`): detaching the
+ *  plugin of a removed chart is exactly the call that used to schedule the "Object is disposed" redraw. */
 export class MarkerLayer {
   private plugin: ISeriesMarkersPluginApi<Time>
-  constructor(series: ISeriesApi<SeriesType>) {
+  private attached = true
+  constructor(private series: ISeriesApi<SeriesType>) {
     this.plugin = createSeriesMarkers(series, [])
   }
+  private get live(): boolean {
+    return this.attached && !isSeriesRemoved(this.series)
+  }
   set(markers: ChartMarker[], tf: ChartTf): void {
-    this.plugin.setMarkers(toMarkers(markers, tf))
+    if (this.live) this.plugin.setMarkers(toMarkers(markers, tf))
   }
   clear(): void {
-    this.plugin.setMarkers([])
+    if (this.live) this.plugin.setMarkers([])
   }
   detach(): void {
+    if (!this.live) return
+    this.attached = false
     this.plugin.detach()
   }
 }
@@ -330,12 +379,13 @@ export interface LevelLine {
   axisLabel?: boolean
 }
 
-/** Horizontal price lines on a series ("hasta aquí" lines, hlines). */
+/** Horizontal price lines on a series ("hasta aquí" lines, hlines). No-op once the chart was removed. */
 export class LevelLines {
   private lines: IPriceLine[] = []
   constructor(private series: ISeriesApi<SeriesType>) {}
   set(levels: LevelLine[]): void {
     this.clear()
+    if (isSeriesRemoved(this.series)) return
     for (const l of levels) {
       if (l.price === null || l.price === undefined || !Number.isFinite(l.price)) continue
       this.lines.push(
@@ -351,11 +401,13 @@ export class LevelLines {
     }
   }
   clear(): void {
-    for (const line of this.lines) {
+    // removePriceLine on a removed chart does not throw here: it schedules a redraw of the destroyed widgets
+    const live = !isSeriesRemoved(this.series)
+    for (const line of live ? this.lines : []) {
       try {
         this.series.removePriceLine(line)
       } catch {
-        /* series already removed */
+        /* series already removed from its (live) chart */
       }
     }
     this.lines = []
@@ -393,6 +445,7 @@ export class TradeLevelsLayer {
     this.tp3 = mk(COLORS.tp3, LineStyle.Dashed, 1)
   }
   set(bars: NexusBars, tf: ChartTf): void {
+    if (isChartRemoved(this.chart)) return
     this.entry.setData(toLineData(bars.time, bars.pos_entry, tf))
     this.sl.setData(toLineData(bars.time, bars.pos_sl, tf))
     this.tp1.setData(toLineData(bars.time, bars.pos_tp1, tf))
@@ -400,9 +453,11 @@ export class TradeLevelsLayer {
     this.tp3.setData(toLineData(bars.time, bars.pos_tp3, tf))
   }
   clear(): void {
+    if (isChartRemoved(this.chart)) return
     for (const s of [this.entry, this.sl, this.tp1, this.tp2, this.tp3]) s.setData([])
   }
   remove(): void {
+    if (isChartRemoved(this.chart)) return // remove() already freed every series
     for (const s of [this.entry, this.sl, this.tp1, this.tp2, this.tp3]) {
       try {
         this.chart.removeSeries(s)
@@ -428,6 +483,7 @@ export class ConeLayer {
     ]
   }
   set(cone: ConePoint[], anchor: { time: number; price: number } | undefined, tf: ChartTf): void {
+    if (isChartRemoved(this.chart)) return
     const keys: (keyof ConePoint)[] = ['p90', 'p75', 'p50', 'p25', 'p10']
     keys.forEach((k, i) => {
       const pts = cone.map((p) => ({ time: ts(p.time, tf), value: p[k] as number }))
@@ -436,9 +492,11 @@ export class ConeLayer {
     })
   }
   clear(): void {
+    if (isChartRemoved(this.chart)) return
     for (const s of this.series) s.setData([])
   }
   remove(): void {
+    if (isChartRemoved(this.chart)) return // remove() already freed every series
     for (const s of this.series) {
       try {
         this.chart.removeSeries(s)
@@ -451,6 +509,7 @@ export class ConeLayer {
 
 /** Remove every pane above `keep` (panes are 0-based; pane 0 holds the price). */
 export function trimPanes(chart: IChartApi, keep = 1): void {
+  if (isChartRemoved(chart)) return
   for (let i = chart.panes().length - 1; i >= keep; i--) {
     try {
       chart.removePane(i)

@@ -19,6 +19,7 @@ import {
   addSeriesForOutput,
   addVolume,
   fromTs,
+  isChartRemoved,
   outputData,
   positionLevels,
   timeScaleFor,
@@ -213,7 +214,7 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
   const prediction = ok ? (nexus?.prediction ?? null) : null
 
   const resetView = useCallback(() => {
-    if (!chart) return
+    if (!chart || isChartRemoved(chart)) return
     const arr = candleArrRef.current
     if (arr.length === 0) return
     try {
@@ -230,7 +231,7 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
   }, [chart])
 
   const fitAll = useCallback(() => {
-    if (!chart) return
+    if (!chart || isChartRemoved(chart)) return
     try {
       chart.timeScale().fitContent()
     } catch {
@@ -313,20 +314,21 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
     el?.addEventListener('mouseleave', onLeave)
 
     return () => {
-      try {
-        chart.unsubscribeCrosshairMove(onMove)
-      } catch {
-        /* chart already removed */
+      // On unmount useChart's cleanup has already removed the chart (it runs first): its series and plugins must not
+      // be touched now. Detaching the markers plugin of a removed chart scheduled a redraw of the destroyed widgets,
+      // the "Uncaught Error: Object is disposed" seen when leaving the chart (MarkerLayer is a no-op by now anyway).
+      if (!isChartRemoved(chart)) {
+        try {
+          chart.unsubscribeCrosshairMove(onMove)
+          base.markers.detach()
+        } catch {
+          /* chart in a broken state */
+        }
       }
       el?.removeEventListener('wheel', markMoved)
       el?.removeEventListener('mousedown', markMoved)
       el?.removeEventListener('touchstart', markMoved)
       el?.removeEventListener('mouseleave', onLeave)
-      try {
-        base.markers.detach()
-      } catch {
-        /* chart already removed */
-      }
       baseRef.current = null
       structRef.current = null
       viewKeyRef.current = null

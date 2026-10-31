@@ -71,8 +71,9 @@ def build_warnings(run: Any, i: int, ev: float | None) -> list[dict]:
     f, p, pos = run.f, run.p, run.pos
     out: list[dict] = []
     updates = run.learner.updates
-    if run.n < 300 or updates < 50:
-        out.append(_w("LOW_DATA", "info", f"Pocos datos: {run.n} velas y {updates} actualizaciones del modelo; "
+    bars = run.n - int(getattr(run, "out_start", 0))  # the bars shown (not the extra ones a resumed run needs)
+    if bars < 300 or updates < 50:
+        out.append(_w("LOW_DATA", "info", f"Pocos datos: {bars} velas y {updates} actualizaciones del modelo; "
                                           "trata las señales con cautela"))
     exit_info = run.bar_info.get("exit")
     if exit_info is not None and exit_info.get("reason") == "EARLY" and not exit_info.get("at_open"):

@@ -1,5 +1,9 @@
 // Settings form schema: every key of ARCHITECTURE §4 with a Spanish label, help text, control type and limits.
 import { Brain, Eye, FlaskConical, HardDrive, Radar, Satellite, Scale, ShieldCheck, Wallet, type LucideIcon } from 'lucide-react'
+import { GROUPS_EXT as ALERT_GROUPS } from './schema-alerts'
+import { GROUPS_EXT as PAPER_RISK_GROUPS } from './schema-paper-risk'
+import { GROUPS_EXT as REALTIME_GROUPS } from './schema-realtime'
+import { GROUPS_EXT as VALIDATION_GROUPS } from './schema-validation'
 
 export type FieldKind =
   | 'number' // float
@@ -8,7 +12,10 @@ export type FieldKind =
   | 'bool'
   | 'tf' // timeframe select
   | 'select'
-  | 'secret' // API key (password input with show / hide)
+  | 'multi' // several values of `options` (chips); the value is a list
+  | 'text' // plain text (server name, address, chat id…): no masking, spaces allowed
+  | 'secret' // API key or token (password input with show / hide; no spaces inside)
+  | 'password' // password (masked with show / hide like `secret`, but spaces are allowed: passphrases, app passwords)
   | 'markets' // multi-select of scanner markets
   | 'tp3' // three ascending R multiples
   | 'symbols' // list of symbols (tags)
@@ -28,6 +35,10 @@ export interface FieldDef {
   options?: { value: string; label: string }[]
   link?: { href: string; label: string }
   wide?: boolean
+  /** text / secret / password: example shown while the field is empty. */
+  placeholder?: string
+  /** text: the on-screen keyboard to offer on phones (never 'numeric' when a value can start with '-' or '@'). */
+  inputMode?: 'text' | 'email' | 'url' | 'numeric'
 }
 
 export interface GroupDef {
@@ -69,7 +80,7 @@ export const FALLBACK_MARKETS = [
   { id: 'bond', name: 'Bonos' },
 ]
 
-export const GROUPS: GroupDef[] = [
+const BASE_GROUPS: GroupDef[] = [
   {
     id: 'risk',
     title: 'Riesgo',
@@ -359,6 +370,16 @@ export const GROUPS: GroupDef[] = [
         unit: 's',
         help: 'Tiempo tras el cual se comprueba si cada predicción del escáner acertó.',
       },
+      {
+        key: 'scanner.replay_days',
+        label: 'Días de vectores para la repetición',
+        kind: 'int',
+        min: 0,
+        max: 30,
+        step: 1,
+        unit: 'días',
+        help: 'Cuántos días se guardan las características de cada predicción del escáner ya resuelta para medir el modelo con «skill replay». 0 = no guardarlas. Ocupa ≈ 3 MB por día con el escaneo por defecto. Con menos de 5 días (30 ventanas de 4 h con el horizonte por defecto) la repetición no puede llegar a una conclusión.',
+      },
     ],
   },
   {
@@ -470,5 +491,9 @@ export const GROUPS: GroupDef[] = [
     ],
   },
 ]
+
+/** Every settings group: the base ones plus those contributed by feature modules (alerts, paper risk, data,
+ *  validation). */
+export const GROUPS: GroupDef[] = [...BASE_GROUPS, ...ALERT_GROUPS, ...PAPER_RISK_GROUPS, ...REALTIME_GROUPS, ...VALIDATION_GROUPS]
 
 export const FIELD_BY_KEY: Record<string, FieldDef> = Object.fromEntries(GROUPS.flatMap((g) => g.fields.map((f) => [f.key, f])))

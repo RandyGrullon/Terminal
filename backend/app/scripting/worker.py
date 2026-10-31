@@ -14,22 +14,53 @@ Defence in depth (the AST validation of ``validator.py`` is layer 1):
    non-whitelisted imports, ``compile`` or a second ``exec``). Its state lives only in a closure (nothing in the
    module globals can disarm it);
 5. OS limits (memory cap ``memory_mb``): Windows job object (memory, no child processes) / POSIX rlimits (address
-   space, file size, no child processes).
-The parent kills the process on timeout and reads its output with hard size limits.
+   space, file size, no child processes) + OOM priority; on Linux also OS isolation (best effort, each step
+   recorded): a new user + network namespace (only a loopback interface, down: no IP route anywhere) when the
+   platform allows it, ``PR_SET_NO_NEW_PRIVS``, and every inherited descriptor above stderr closed. The server is
+   non-dumpable (``app.hardening``), so this worker cannot read ``/proc/<server>/environ`` or ``/proc/<server>/mem``.
+What was applied travels back in the result under ``OS_ISOLATION_KEY`` (internal: the launcher removes it and logs
+it once; it is not part of ScriptRunResult). The parent kills the process on timeout and reads its output with hard
+size limits.
 """
 from __future__ import annotations
 
 import os
+import sys
 
 for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
     os.environ[_var] = "1"  # before numpy is imported: no BLAS thread pools in the sandbox
 
+
+def _list_open_fds() -> list[int] | None:
+    """Descriptors open right now (Linux /proc/self/fd), None when they cannot be listed (or off Linux)."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        names = os.listdir("/proc/self/fd")
+    except OSError:
+        return None
+    fds: list[int] = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            os.fstat(int(name))
+        except OSError:  # the descriptor of the listing itself, already closed again
+            continue
+        fds.append(int(name))
+    return sorted(fds)
+
+
+# What this worker inherited from its launcher, listed before numpy & co. open anything of their own: only these
+# are closed by the hardening (see _close_inherited_fds), so no descriptor a library still holds is touched.
+_INHERITED_FDS = _list_open_fds()
+
 import builtins
+import errno
 import json
 import math
 import re
 import statistics
-import sys
 import time
 import types
 import warnings
@@ -119,6 +150,7 @@ MEMORY_MB_RANGE = (128, 8192)
 # POSIX only: extra *virtual* address space over memory_mb for RLIMIT_AS (see _limit_posix for the trade-off).
 POSIX_AS_HEADROOM_MB = 512
 MAX_RESULT_BYTES = 40 * 1024 * 1024  # serialized result; below the launcher's read limit (sandbox.MAX_STDOUT_BYTES)
+OS_ISOLATION_KEY = "_os_isolation"  # internal result key (same value as sandbox.OS_ISOLATION_KEY), never in the API
 MESSAGE_MAX = 2000  # characters of an exception message shown to the user
 STDERR_SINK_MAX = 4000  # characters of Python-level stderr kept while the script runs (the rest is dropped)
 
@@ -341,21 +373,23 @@ def _limit_windows(memory_mb: int) -> None:
     _JOB_HANDLE = job
 
 
-def _raise_oom_priority() -> None:
+def _raise_oom_priority() -> bool:
     """Best effort (Linux): make the kernel OOM killer sacrifice THIS short-lived sandbox worker before anything else
     (above all the server) when the VM runs out of memory. Raising one's own oom_score_adj needs no privilege; on
-    macOS / inside containers without the file, or on any error, this is a silent no-op."""
+    macOS / inside containers without the file, or on any error, this is a silent no-op (False)."""
     try:
         with open("/proc/self/oom_score_adj", "w", encoding="ascii") as fh:
             fh.write("1000")  # max: most killable
     except OSError:
-        pass
+        return False
+    return True
 
 
-def _limit_posix(memory_mb: int) -> None:
+def _limit_posix(memory_mb: int) -> dict[str, Any]:
+    """rlimits + OOM priority -> {"oom_score_adj": bool, "rlimits": [names of the limits applied]}."""
     import resource
 
-    _raise_oom_priority()
+    status: dict[str, Any] = {"oom_score_adj": bool(_raise_oom_priority())}
     # RLIMIT_AS caps *virtual* address space, not resident memory. numpy / BLAS reserve large virtual mappings that are
     # mostly non-resident, so the cap must sit well above memory_mb or legitimate vector math fails with MemoryError;
     # yet every extra MB of cap is memory a hostile script can actually fault in, and on a small VM (e.g. Fly 1 GB with
@@ -363,23 +397,173 @@ def _limit_posix(memory_mb: int) -> None:
     # guard with enough headroom for numpy (BLAS threads are already disabled above), trimmed from +1024 to
     # +POSIX_AS_HEADROOM_MB MB; the real protection against taking the server down is _raise_oom_priority() above.
     address_space = (memory_mb + POSIX_AS_HEADROOM_MB) * 1024 * 1024
-    limits = [(resource.RLIMIT_AS, address_space), (resource.RLIMIT_FSIZE, 0), (resource.RLIMIT_CORE, 0)]
+    limits = [("AS", resource.RLIMIT_AS, address_space), ("FSIZE", resource.RLIMIT_FSIZE, 0),
+              ("CORE", resource.RLIMIT_CORE, 0)]
     if hasattr(resource, "RLIMIT_NPROC"):  # no child processes (nor threads), like the Windows job object
-        limits.append((resource.RLIMIT_NPROC, 0))
-    for res, value in limits:
+        limits.append(("NPROC", resource.RLIMIT_NPROC, 0))
+    applied: list[str] = []
+    for name, res, value in limits:
         try:
             _, hard = resource.getrlimit(res)
             new = value if hard == resource.RLIM_INFINITY else min(value, hard)
             resource.setrlimit(res, (new, new))
         except (ValueError, OSError):
             continue
+        applied.append(name)
+    status["rlimits"] = applied
+    return status
 
 
-def harden_process(memory_mb: int = DEFAULT_MEMORY_MB) -> None:
+# ----------------------------------------------------------------------------- Linux isolation (best effort)
+
+_PR_SET_NO_NEW_PRIVS = 38
+_PR_GET_NO_NEW_PRIVS = 39
+_CLONE_NEWUSER = 0x10000000
+_CLONE_NEWNET = 0x40000000
+
+
+def _err_name(exc: BaseException) -> str:
+    """Short, stable name of an error for the status dict (``EPERM``, ``AttributeError`` ...)."""
+    code = getattr(exc, "errno", None)
+    if isinstance(code, int) and code in errno.errorcode:
+        return errno.errorcode[code]
+    return type(exc).__name__
+
+
+def _prctl(option: int, arg2: int = 0) -> int:
+    """prctl(option, arg2, 0, 0, 0) through libc -> its result; OSError (errno) when it fails."""
+    import ctypes
+
+    fn = ctypes.CDLL(None, use_errno=True).prctl
+    fn.restype = ctypes.c_int
+    fn.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    res = fn(option, arg2, 0, 0, 0)
+    if res < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err) if err else "prctl")
+    return int(res)
+
+
+def _unshare(flags: int) -> None:
+    """unshare(2): ``os.unshare`` on Python 3.12+, libc before. OSError (errno) when the kernel refuses."""
+    native = getattr(os, "unshare", None)
+    if native is not None:
+        native(flags)
+        return
+    import ctypes
+
+    fn = ctypes.CDLL(None, use_errno=True).unshare
+    fn.restype = ctypes.c_int
+    fn.argtypes = [ctypes.c_int]
+    if fn(flags) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err) if err else "unshare")
+
+
+def _net_namespace_id() -> str | None:
     try:
-        _limit_windows(memory_mb) if os.name == "nt" else _limit_posix(memory_mb)
-    except Exception as exc:  # the run continues with the other layers
+        return os.readlink("/proc/self/ns/net")  # e.g. "net:[4026531840]"
+    except OSError:
+        return None
+
+
+def _enter_empty_network() -> tuple[bool, str]:
+    """Moves this worker into a new user + network namespace -> (active, error name).
+
+    The new network namespace has only a loopback interface, and it is down: no IP connection can leave the worker,
+    not even to 127.0.0.1 of the host (a Unix socket with a path is a file: the namespace does not isolate it, nor
+    does it isolate the filesystem). The user namespace is what lets an unprivileged process create it (no uid
+    map is written). Platforms may refuse, and then the run goes on without it: EPERM (container seccomp profile,
+    restricted unprivileged user namespaces), ENOSPC / EUSERS (namespace limit reached), EINVAL (the process has
+    threads), ENOSYS."""
+    before = _net_namespace_id()
+    try:
+        _unshare(getattr(os, "CLONE_NEWUSER", _CLONE_NEWUSER) | getattr(os, "CLONE_NEWNET", _CLONE_NEWNET))
+    except OSError as exc:
+        return False, _err_name(exc)
+    if before is not None and _net_namespace_id() == before:
+        return False, "sin cambio"
+    return True, ""
+
+
+def _close_inherited_fds(inherited: list[int] | None = None) -> int:
+    """Closes every inherited descriptor above stderr (``_INHERITED_FDS``, listed at start-up) -> how many. The
+    launcher already starts the worker with close_fds, so this is normally 0; it covers a launcher that passes more.
+    Raises OSError when /proc/self/fd could not be listed at start-up."""
+    fds = _INHERITED_FDS if inherited is None else inherited
+    if fds is None:
+        raise OSError(errno.ENOENT, "no se pudo listar /proc/self/fd")
+    closed = 0
+    for fd in fds:
+        if fd <= 2:
+            continue
+        try:
+            os.close(fd)
+        except OSError:  # closed meanwhile
+            continue
+        closed += 1
+    return closed
+
+
+def _isolate_linux() -> dict[str, Any]:
+    """Linux OS isolation of this worker, step by step (a failing step never skips the next ones) -> which
+    protections are active. Runs once, right before the script, while the worker is still single-threaded.
+
+    The namespace comes first: an LSM may move a task to another profile when it creates a user namespace (Ubuntu's
+    AppArmor restriction of unprivileged user namespaces), and AppArmor may refuse a profile transition to a task
+    that already has no_new_privs. no_new_privs needs no privilege, so setting it afterwards always works."""
+    status: dict[str, Any] = {}
+    try:
+        active, problem = _enter_empty_network()
+    except Exception as exc:  # noqa: BLE001 - best effort, recorded
+        active, problem = False, _err_name(exc)
+    status["net_namespace"] = active
+    if problem:
+        status["net_namespace_error"] = problem
+    try:  # irreversible and inherited: no execve can ever grant privileges again (setuid bits, file capabilities)
+        status["no_new_privs"] = _prctl(_PR_SET_NO_NEW_PRIVS, 1) == 0 and _prctl(_PR_GET_NO_NEW_PRIVS) == 1
+    except Exception as exc:  # noqa: BLE001
+        status["no_new_privs"] = False
+        status["no_new_privs_error"] = _err_name(exc)
+    try:
+        status["fds_closed"] = _close_inherited_fds()
+    except Exception as exc:  # noqa: BLE001
+        status["fds_error"] = _err_name(exc)
+    return status
+
+
+def _os_kind() -> str:
+    """Which OS layer applies: "nt", "linux" or "posix" (macOS & co.)."""
+    if os.name == "nt":
+        return "nt"
+    return "linux" if sys.platform.startswith("linux") else "posix"
+
+
+def harden_process(memory_mb: int = DEFAULT_MEMORY_MB) -> dict[str, Any]:
+    """Applies the OS layer -> what is active (internal: sent back under OS_ISOLATION_KEY). Never raises: the run
+    continues with the other layers whatever fails here."""
+    status: dict[str, Any] = {"platform": sys.platform}
+    kind = _os_kind()
+    if kind == "nt":
+        try:
+            _limit_windows(memory_mb)
+            status["job_object"] = True
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"pychart worker: no se aplicaron los límites del sistema: {exc}\n")
+            status.update(job_object=False, error=_err_name(exc))
+        return status
+    if kind == "linux":
+        try:
+            status.update(_isolate_linux())
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"pychart worker: aislamiento del sistema incompleto: {exc}\n")
+            status["error"] = _err_name(exc)
+    try:
+        status.update(_limit_posix(memory_mb))
+    except Exception as exc:  # noqa: BLE001
         sys.stderr.write(f"pychart worker: no se aplicaron los límites del sistema: {exc}\n")
+        status["error"] = _err_name(exc)
+    return status
 
 
 # ============================================================================= errors
@@ -530,7 +714,7 @@ def run_payload(payload: dict) -> dict[str, Any]:
     except Exception as exc:
         result["errors"] = [make_error("runtime", f"No se pudo preparar la ejecución del script: {exc}")]
         return result
-    harden_process(memory_mb)
+    os_isolation = harden_process(memory_mb)
     warnings.simplefilter("ignore")
     np.seterr(all="ignore")
     real_stderr = sys.stderr
@@ -558,6 +742,7 @@ def run_payload(payload: dict) -> dict[str, Any]:
     set_phase("report")
     sys.stderr = real_stderr
     result["duration_ms"] = round((time.perf_counter() - started) * 1000.0, 1)
+    result[OS_ISOLATION_KEY] = os_isolation  # internal: the launcher removes it (not part of ScriptRunResult)
     return result
 
 

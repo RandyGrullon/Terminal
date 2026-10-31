@@ -9,9 +9,13 @@
   `stale=True` and a Spanish note ("Datos desactualizados: última vela hace 3 días"); quotes older than 2 minutes
   carry `stale: True` and `ts` = the real time of the price.
 - Symbols: resolve / search / symbol_info (`symbols` table), quotes, universe and raw scans through TradingView.
+- Quotes: source priority exchange (crypto followed live) > real-time quote of an API-key provider
+  (app.data.realtime) > TradingView (with the delay it announces) > local cache (stale); optional fields `source`,
+  `realtime`, `delay_s`, `market_open`.
 - Live feed: ref-counted subscriptions, one task per polled key (a slow venue only delays its own keys) plus one for
-  the TradingView snapshots, bar-close detection (missed bars after a stall are fetched and emitted in order),
-  WS `market:SYMBOL:tf` + listeners.
+  the TradingView snapshots (placed by app.data.stamping, shared with the recorder) and one per API-key provider
+  for the real-time quotes of charts / demo positions, bar-close detection (missed bars after a stall are fetched
+  and emitted in order), WS `market:SYMBOL:tf` (+ the `source` of the price) + listeners.
 - Watchlist (`watchlist` table).
 """
 from __future__ import annotations
@@ -31,6 +35,8 @@ from app.data.base import CandleSet, ProviderError, make_symbol_info, merge_cand
 from app.data.recorder import (
     RECORDER_BASE, RECORDER_TFS, ROLLOVER_JITTER_S, CandleRecorder, normalize_candle, same_bar, signature,
 )
+from app.data.realtime import RealtimeQuotes, market_group, session_open
+from app.data.stamping import PLACE_RANK
 from app.util import (
     RateLimitedLog,
     TTLCache,
@@ -91,6 +97,9 @@ UNIVERSE_TV_COLUMNS = {
     "adx": "ADX", "atr": "ATR", "volatility_d": "Volatility.D", "perf_w": "Perf.W", "perf_1m": "Perf.1M",
 }
 QUOTE_FIELDS = ("price", "change_pct", "change", "volume", "high", "low", "open")
+# optional Quote fields (types-realtime.ts): where the price comes from and how fresh it is
+QUOTE_SOURCES = frozenset({"binance", "okx", "coinbase", "kraken", "kucoin", "twelvedata", "polygon", "alphavantage",
+                           "tradingview", "cache"})
 KEYED_SETTINGS = (
     ("twelvedata", "providers.twelvedata_key", S.twelvedata_params),
     ("polygon", "providers.polygon_key", S.polygon_ticker),
@@ -146,6 +155,16 @@ def normalize_quote(symbol: str, q: Any) -> dict | None:
     out["ts"] = int(ts) if ts is not None and ts > 0 else now_ms()
     if q.get("stale"):
         out["stale"] = True
+    source = q.get("source")
+    if isinstance(source, str) and source in QUOTE_SOURCES:
+        out["source"] = source
+    if isinstance(q.get("realtime"), bool):
+        out["realtime"] = q["realtime"]
+    delay = safe_float(q.get("delay_s"))
+    if delay is not None and delay >= 1 and not isinstance(q.get("delay_s"), bool):
+        out["delay_s"] = int(round(delay))
+    if isinstance(q.get("market_open"), bool):
+        out["market_open"] = q["market_open"]
     return out
 
 
@@ -232,6 +251,10 @@ class MarketDataHub:
         self._gap_jobs: dict[tuple[str, str], asyncio.Future] = {}
         self._snap_seen: dict[tuple[str, str], tuple[int, Any]] = {}  # (symbol, TradingView tf) -> (time, OHLCV)
         self._closed_at: dict[tuple[str, str], int] = {}  # snapshot keys: bar already emitted closed (market shut)
+        self._price_meta: dict[str, dict] = {}  # symbol -> source of the newest live price (see _dispatch)
+        self._live_meta: dict[tuple[str, str], dict] = {}  # (symbol, tf) -> source of the newest live bar
+        self._rt_vol: dict[str, tuple[int, float]] = {}  # symbol -> (UTC day, day volume) of the last keyed quote
+        self.realtime = RealtimeQuotes(self)
         self.feed_polls = 0
         self.feed_updates = 0
         # stats
@@ -271,7 +294,10 @@ class MarketDataHub:
                     asyncio.get_running_loop().create_task(self.recorder.stop())
                 except RuntimeError:
                     pass
+        elif key.startswith("realtime."):
+            self.realtime.reset()
         elif key.startswith("providers."):
+            self.realtime.reset()
             self._remembered.clear()
             self._resolve_cache.clear()
             self._keyed_fresh.clear()
@@ -298,6 +324,7 @@ class MarketDataHub:
                 except (asyncio.CancelledError, Exception):
                     pass
         await self.recorder.stop()
+        await self.realtime.stop()
         for fut in list(self._inflight.values()):
             fut.cancel()
         self._inflight.clear()
@@ -326,6 +353,7 @@ class MarketDataHub:
             "fetch_errors": self.fetch_errors,
             "listeners": len(self._listeners),
             "feed": self._feed_task is not None and not self._feed_task.done(),
+            "realtime": {k: v for k, v in self.realtime.status().items() if k in ("enabled", "polls", "errors")},
             "offline": bool(config.OFFLINE),
         }
 
@@ -742,6 +770,7 @@ class MarketDataHub:
             gap = (floor_time(now_s(), tf) - int(cached[-1]["time"])) // tf_seconds(tf)
             if 0 <= gap < limit:
                 want = int(max(gap + 2, 2))  # incremental refresh
+        self.realtime.budget(provider).spend(1)
         try:
             raw = await self._keyed_module().fetch_keyed_candles(
                 provider, symbol, route.asset_class, tf, want, api_key=api_key, client=self._http()
@@ -749,6 +778,8 @@ class MarketDataHub:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if getattr(exc, "kind", None) == "rate_limit":
+                self.realtime.budget(provider).block(60.0)
             self.fetch_errors += 1
             errors.append(f"{label}: {exc}")
             self._warn_once(f"keyed:{provider}:{symbol}:{tf}", f"{symbol} {tf}: error de {label} → {exc}")
@@ -1056,6 +1087,8 @@ class MarketDataHub:
                 await self._absorb_details(symbol, details)
         info = await self.symbol_info(symbol, fetch=False)
         quote = normalize_quote(symbol, (details or {}).get("quote"))
+        if quote is not None:
+            quote = self._best_quote(symbol, {**quote, "source": "tradingview"})
         if quote is None:
             quote = (await self.quotes([symbol])).get(symbol)
         raw_tech = (details or {}).get("technicals")
@@ -1196,7 +1229,10 @@ class MarketDataHub:
     # ================================================================== quotes & prices
 
     async def quotes(self, symbols: list[str] | str) -> dict[str, dict]:
-        """Quote by symbol: SIM from the synthetic set, others from TradingView, then live feed / DB cache."""
+        """Quote by symbol. Source priority (optional fields `source`, `realtime`, `delay_s`, `market_open`): SIM
+        from the synthetic set; the exchange's live price (crypto followed live); a fresh real-time quote of an
+        API-key provider (app.data.realtime); TradingView (with the delay it announces); the local live feed / DB
+        cache (`stale` when older than 2 min)."""
         if isinstance(symbols, str):
             symbols = symbols.split(",")
         wanted: list[str] = []
@@ -1218,13 +1254,46 @@ class MarketDataHub:
             else:
                 real.append(sym)
         if real:
-            out.update(await self._tv_quotes(real))
+            tvq = await self._tv_quotes(real)
+            for sym in real:
+                q = self._best_quote(sym, tvq.get(sym))
+                if q is not None:
+                    out[sym] = q
         for sym in real:
             if sym not in out:
                 q = await self._local_quote(sym)
                 if q is not None:
                     out[sym] = q
         return out
+
+    def _best_quote(self, symbol: str, tv: dict | None) -> dict | None:
+        """Exchange live price (crypto) > fresh keyed real-time quote > TradingView quote (None: local cache)."""
+        meta = self._price_meta.get(symbol)
+        live = self._prices.get(symbol)
+        if meta and live and meta.get("kind") == "exchange" and time.monotonic() - live[1] <= LIVE_PRICE_TTL_S:
+            q = {"symbol": symbol, **{k: None for k in QUOTE_FIELDS}, **(tv or {})}
+            price = float(live[0])
+            ref = safe_float(q.get("price"))
+            change = safe_float(q.get("change"))
+            if ref is not None and change is not None and ref - change:  # previous close from TradingView's change
+                prev = ref - change
+                q["change"], q["change_pct"] = price - prev, (price - prev) / prev * 100.0
+            q.update(price=price, ts=int(meta.get("at") or now_ms()), source=meta.get("source"), realtime=True)
+            q.pop("delay_s", None)
+            q.pop("stale", None)
+            q.pop("market_open", None)
+            return normalize_quote(symbol, q)
+        keyed = self.realtime.quote(symbol)
+        if keyed is not None:
+            return normalize_quote(symbol, keyed)
+        q = normalize_quote(symbol, tv) if tv else None
+        if q is not None and "market_open" not in q:
+            # TradingView does not say when a market is closed: outside the regular session (US stocks, forex; holidays
+            # not known) the quote is the last price of a closed market, not a live (or 15-min-old) one
+            group = market_group(symbol, self.route(symbol).asset_class)
+            if session_open(group, float(now_s())) is False:
+                q["market_open"] = False
+        return q
 
     async def _tv_quotes(self, symbols: list[str]) -> dict[str, dict]:
         if not symbols or not self.tv_online():
@@ -1238,7 +1307,8 @@ class MarketDataHub:
             return {}
         out: dict[str, dict] = {}
         for sym in symbols:
-            q = normalize_quote(sym, got.get(sym) if isinstance(got, dict) else None)
+            raw = got.get(sym) if isinstance(got, dict) else None
+            q = normalize_quote(sym, {**raw, "source": "tradingview"} if isinstance(raw, dict) else None)
             if q is not None:
                 out[sym] = q
         return out
@@ -1316,7 +1386,7 @@ class MarketDataHub:
             return None
         at, price = min(float(now), best[0]), best[1]
         q = {"symbol": symbol, "price": price, "change_pct": None, "change": None, "volume": None, "high": None,
-             "low": None, "open": None, "ts": int(at) * 1000}
+             "low": None, "open": None, "ts": int(at) * 1000, "source": "cache"}
         if now - at > QUOTE_STALE_S:
             q["stale"] = True
         if days:
@@ -1330,8 +1400,9 @@ class MarketDataHub:
         return q
 
     async def last_price(self, symbol: str, *, allow_stale: bool = True) -> float | None:
-        """Most recent price: SIM set, live feed, TradingView quote, exchange ticker, then the DB cache. The DB
-        cache may be old (see _local_quote): with allow_stale=False such a price gives None instead."""
+        """Most recent price: SIM set, live feed, real-time keyed quote, TradingView quote, exchange ticker, then the
+        DB cache. The DB cache may be old (see _local_quote): with allow_stale=False such a price gives None
+        instead."""
         symbol = self._clean(symbol)
         if S.is_sim(symbol):
             cs = self._sim_reference(symbol)
@@ -1339,6 +1410,9 @@ class MarketDataHub:
         live = self._prices.get(symbol)
         if live and time.monotonic() - live[1] <= LIVE_PRICE_TTL_S:
             return live[0]
+        keyed = self.realtime.quote(symbol)
+        if keyed and keyed.get("realtime") and (keyed.get("price") or 0) > 0:
+            return float(keyed["price"])
         q = (await self._tv_quotes([symbol])).get(symbol)
         if q and (q.get("price") or 0) > 0 and not q.get("stale"):
             return float(q["price"])
@@ -1530,6 +1604,7 @@ class MarketDataHub:
             self._next_poll.pop(key, None)
             self._last.pop(key, None)
             self._closed_at.pop(key, None)
+            self._live_meta.pop(key, None)
 
     def subscriptions(self) -> list[dict]:
         return [{"symbol": s, "tf": tf, "owners": sorted(o)} for (s, tf), o in sorted(self._subs.items())]
@@ -1582,16 +1657,27 @@ class MarketDataHub:
                 cs = cs.tail(SIM_MAX_BARS)
         self._sim[key] = cs
 
-    async def _dispatch(self, symbol: str, tf: str, candle: dict, closed: bool) -> None:
-        """WS `market:SYMBOL:tf` message + every listener (errors isolated per listener)."""
+    async def _dispatch(self, symbol: str, tf: str, candle: dict, closed: bool, meta: dict | None = None) -> None:
+        """WS `market:SYMBOL:tf` message + every listener (errors isolated per listener). `meta` = where the live
+        price comes from ({source, kind: exchange | keyed | tradingview, realtime, delay_s, at}); the WS message
+        carries the optional `source`, `realtime` and `delay_s` of it (types-realtime.ts)."""
         self._prices[symbol] = (float(candle["close"]), time.monotonic())
+        if meta:
+            self._price_meta[symbol] = dict(meta)
+        else:
+            self._price_meta.pop(symbol, None)
         self.feed_updates += 1
         ws = self.rt.ws
         if ws is not None:
+            message = {"type": "candle", "symbol": symbol, "tf": tf, "candle": dict(candle), "closed": bool(closed)}
+            if meta and meta.get("source"):
+                message["source"] = meta["source"]
+                if isinstance(meta.get("realtime"), bool):
+                    message["realtime"] = meta["realtime"]
+                if meta.get("delay_s"):
+                    message["delay_s"] = int(meta["delay_s"])
             try:
-                ws.publish(market_topic(symbol, tf), {
-                    "type": "candle", "symbol": symbol, "tf": tf, "candle": dict(candle), "closed": bool(closed),
-                })
+                ws.publish(market_topic(symbol, tf), message)
             except Exception as exc:
                 self._warn_once("ws-publish", f"No se pudo publicar la vela de {symbol} {tf}: {exc}")
         for cb in list(self._listeners):
@@ -1615,13 +1701,23 @@ class MarketDataHub:
             await asyncio.sleep(FEED_TICK_S)
 
     async def _feed_tick(self) -> list[asyncio.Future]:
-        """Start the polls that are due: one task per crypto (symbol, tf) and one task for every TradingView
-        snapshot, so a slow venue only delays its own keys. Keys whose previous poll is still running are skipped.
-        Returns the tasks started."""
+        """Start the polls that are due: one task per crypto (symbol, tf), one task for every TradingView
+        snapshot and one per API-key provider for the real-time quotes (app.data.realtime), so a slow venue only
+        delays its own keys. Keys whose previous poll is still running are skipped. Keyed symbols served by
+        real-time quotes skip the TradingView snapshots (their last bar is closed when its bucket ends). Returns
+        the tasks started."""
         now = time.monotonic()
         started: list[asyncio.Future] = []
         snaps: list[tuple[str, str]] = []
         snap_busy = self._snap_job is not None and not self._snap_job.done()
+        selected = self.realtime.select()
+        # real-time polls first: a symbol is served by them (TradingView skipped) only while a fresh quote exists or a
+        # poll of it is in flight; when the plan's limits leave nothing for it, TradingView keeps its chart live
+        for provider, symbols in self.realtime.due():
+            task = asyncio.ensure_future(self._poll_realtime(provider, symbols))
+            self.realtime.track(provider, task)
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            started.append(task)
         for key in list(self._subs):
             symbol, tf = key
             if S.is_sim(symbol) or now < self._next_poll.get(key, 0.0):
@@ -1631,6 +1727,10 @@ class MarketDataHub:
                 continue  # the previous poll of this key is still running
             await self._load_info(symbol)
             history = self.history_kind(symbol)[1]
+            if history == "keyed" and symbol in selected and self.realtime.serves(symbol):
+                self._next_poll[key] = now + FEED_TICK_S
+                await self._close_if_over(symbol, tf, now_s(), "keyed", tf)
+                continue
             if history == "full" and self._feed_tv.get(symbol) is None:
                 self._next_poll[key] = now + CRYPTO_POLL_S
                 task = asyncio.ensure_future(self._poll_key(symbol, tf))
@@ -1644,6 +1744,66 @@ class MarketDataHub:
             self._snap_job = asyncio.ensure_future(self._poll_snapshots(snaps))
             started.append(self._snap_job)
         return started
+
+    async def _poll_realtime(self, provider: str, symbols: list[str]) -> None:
+        """One real-time quote request; every fresh quote updates the live bars of its subscribed timeframes."""
+        got = await self.realtime.poll(provider, symbols)
+        for symbol, quote in got.items():
+            try:
+                await self._apply_rt_quote(symbol, quote)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._warn_once("feed-rt", f"Feed en vivo (tiempo real): error procesando {symbol} "
+                                           f"({type(exc).__name__}: {exc})")
+
+    async def _apply_rt_quote(self, symbol: str, q: dict) -> None:
+        """Live bars from a real-time keyed quote (published only: the provider bars are downloaded at the bar
+        close). A closed market or a delayed price never opens a bar."""
+        if q.get("realtime") is not True or q.get("market_open") is False:
+            return
+        price = safe_float(q.get("price"))
+        if price is None or price <= 0:
+            return
+        at = int(now_s())
+        day = at // 86400
+        volume = safe_float(q.get("volume"))
+        seen = self._rt_vol.get(symbol)
+        dv = max(0.0, volume - seen[1]) if volume is not None and seen and seen[0] == day else 0.0
+        if volume is not None:
+            self._rt_vol[symbol] = (day, volume)
+        meta = {"source": q.get("source"), "kind": "keyed", "realtime": True, "at": int(q.get("ts") or now_ms())}
+        for key in [k for k in self._subs if k[0] == symbol]:
+            bar = await self._rt_bar(symbol, key[1], q, float(price), dv, at)
+            if bar is not None:
+                await self._apply_live(symbol, key[1], [bar], "keyed", store=False, meta=meta)
+
+    async def _rt_bar(self, symbol: str, tf: str, q: dict, price: float, dv: float, at: int) -> dict | None:
+        """Forming bar of (symbol, tf) in the alignment of the provider: the bar already shown, or the stored
+        provider bar of that bucket, widened with the price (volume grows with the day volume of the quotes). The
+        daily bar takes the day values of the quote."""
+        if tf == "1d":
+            o, h, lo = safe_float(q.get("open")), safe_float(q.get("high")), safe_float(q.get("low"))
+            return {"time": floor_time(at, "1d"), "open": o or price, "high": max(h or price, price),
+                    "low": min(lo or price, price), "close": price, "volume": safe_float(q.get("volume"), 0.0) or 0.0}
+        bucket = await self._keyed_stamp(symbol, tf, at, floor_time(at, tf))
+        prev = self._last.get((symbol, tf))
+        base = prev if prev is not None and int(prev["time"]) == bucket else await self._keyed_bar_at(symbol, tf, bucket)
+        if base is None:
+            return {"time": bucket, "open": price, "high": price, "low": price, "close": price, "volume": dv}
+        return {"time": bucket, "open": float(base["open"]), "high": max(float(base["high"]), price),
+                "low": min(float(base["low"]), price), "close": price, "volume": float(base.get("volume") or 0.0) + dv}
+
+    async def _keyed_bar_at(self, symbol: str, tf: str, bucket: int) -> dict | None:
+        try:
+            row = await self.rt.db.fetchone(
+                "SELECT time, open, high, low, close, volume FROM candles WHERE symbol = ? AND tf = ? AND time = ? "
+                "AND source <> 'recorder'",
+                (symbol, tf, int(bucket)),
+            )
+        except Exception:
+            return None
+        return normalize_candle(row) if row else None
 
     def _job_done(self, key: tuple[str, str], task: asyncio.Future) -> None:
         if self._jobs.get(key) is task:
@@ -1688,8 +1848,9 @@ class MarketDataHub:
             return
         self._feed_failures.pop(symbol, None)
         self.feed_polls += 1
+        meta = {"source": venue.provider, "kind": "exchange", "realtime": True, "at": now_ms()}
         try:
-            await self._apply_live(symbol, tf, clean_rows(raw), venue.provider, venue=venue)
+            await self._apply_live(symbol, tf, clean_rows(raw), venue.provider, venue=venue, meta=meta)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1723,35 +1884,77 @@ class MarketDataHub:
             self._warn_once("feed-tv", f"Feed en vivo (TradingView): {exc}", "tradingview")
             return
         self.feed_polls += 1
-        frozen: dict[tuple[str, str], dict | None] = {}
-        for symbol, tf, tv_tf, history in plan:
+        stamper = self.recorder.stamper
+        # the recorded timeframes are placed once per (symbol, TradingView tf) by the stamper shared with the
+        # recorder (content first, lag-corrected clock; coarse timeframes first: they decide 1m corrections)
+        placed: dict[tuple[str, str], tuple[dict, Any, int] | None] = {}
+        for symbol, tv_tf in sorted({(p[0], p[2]) for p in plan}, key=lambda k: (k[0], PLACE_RANK.get(k[1], 9))):
             bars = (data or {}).get(symbol) if isinstance(data, dict) else None
             raw = bars.get(tv_tf) if isinstance(bars, dict) else None
             c = normalize_candle(raw)
             if c is None:
+                placed[(symbol, tv_tf)] = None
                 continue
             c["time"] = floor_time(c["time"], tv_tf)
             asof = int(safe_float(raw.get("asof"), c["time"]))
             try:
-                if (symbol, tv_tf) not in frozen:
-                    frozen[(symbol, tv_tf)] = await self._snapshot_frozen(symbol, tv_tf, c, asof)
-                if frozen[(symbol, tv_tf)] is not None:
-                    await self._close_if_over(symbol, tf, asof, history, tv_tf, frozen[(symbol, tv_tf)])
-                    continue
+                where = await stamper.place(symbol, tv_tf, c, asof) if tv_tf in RECORDER_TFS else None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._warn_once("feed-stamp", f"Feed en vivo: no se pudo situar la vela ({type(exc).__name__}: {exc})")
+                where = None if tv_tf not in RECORDER_TFS else False
+            placed[(symbol, tv_tf)] = None if where is False else (c, where, asof)
+        frozen: dict[tuple[str, str], dict | None] = {}
+        for symbol, tf, tv_tf, history in plan:
+            item = placed.get((symbol, tv_tf))
+            if item is None:
+                continue
+            base, where, asof = item
+            c = dict(base)
+            try:
+                if where is None:  # timeframes TradingView aligns to sessions (1h, 4h, 1w): clock + frozen check
+                    if (symbol, tv_tf) not in frozen:
+                        frozen[(symbol, tv_tf)] = await self._snapshot_frozen(symbol, tv_tf, c, asof)
+                    if frozen[(symbol, tv_tf)] is not None:
+                        await self._close_if_over(symbol, tf, asof, history, tv_tf, frozen[(symbol, tv_tf)])
+                        continue
+                else:
+                    if where.bucket is None or where.status == "old":
+                        continue  # a rollover inside our bucket late in it, or a late copy of an earlier bar
+                    c["time"] = where.bucket
+                    market = asof - stamper.lag(symbol)  # market time corrected by the estimated lag
+                    if where.status in ("repeat", "same") and market >= where.bucket + tf_seconds(tv_tf):
+                        # still the last known bar although its bucket is over (market closed, no trades, data
+                        # still finishing): no new bar; the last live bar is emitted closed once
+                        await self._close_if_over(symbol, tf, int(market), history, tv_tf, c)
+                        continue
                 if tv_tf != tf:
                     c = await self._aggregate_current(symbol, tf, c)
                 elif history == "keyed":
                     c["time"] = await self._keyed_stamp(symbol, tf, asof, c["time"])
                 if c is None:
                     continue
+                delay = max(0, now_s() - int(asof))
+                delay = delay if delay >= 5 else 0  # a streaming row stamped a second earlier is not delayed
+                meta = {"source": "tradingview", "kind": "tradingview", "realtime": delay == 0,
+                        "delay_s": delay or None, "at": int(asof) * 1000}
                 if history == "recorder":
-                    await self._apply_live(symbol, tf, [c], "recorder", store=tf in RECORDER_TFS)
+                    await self._apply_live(symbol, tf, [c], "recorder", store=tf in RECORDER_TFS, meta=meta)
                 else:
-                    await self._apply_live(symbol, tf, [c], "keyed" if history == "keyed" else "snapshot", store=False)
+                    await self._apply_live(symbol, tf, [c], "keyed" if history == "keyed" else "snapshot",
+                                           store=False, meta=meta)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self._warn_once("feed-apply", f"Feed en vivo: error procesando velas ({type(exc).__name__}: {exc})")
+
+    def _stamp_shifted(self, symbol: str, tv_tf: str, d: int) -> None:
+        """The stamper moved the recorded bars of (symbol, tv_tf) by d seconds: live bars built on the old buckets
+        are forgotten (the next snapshot starts the forming bar again at the right bucket)."""
+        for key in [k for k in self._last if k[0] == symbol and (k[1] == tv_tf or RECORDER_BASE.get(k[1]) == tv_tf)]:
+            self._last.pop(key, None)
+            self._closed_at.pop(key, None)
 
     async def _snapshot_frozen(self, symbol: str, tv_tf: str, c: dict, asof: int) -> dict | None:
         """When a TradingView snapshot with a newer stamp is still the last known bar (market closed, no trades,
@@ -1798,7 +2001,7 @@ class MarketDataHub:
             await self._store_closed(symbol, tf, [final], "recorder")
         elif history == "keyed":
             self._keyed_refresh(symbol, tf)
-        await self._dispatch(symbol, tf, final, True)
+        await self._dispatch(symbol, tf, final, True, self._live_meta.get(key))
 
     async def _keyed_stamp(self, symbol: str, tf: str, asof: int, utc_time: int) -> int:
         """Open time of the forming bar in the keyed provider's alignment (US stocks: 1h bars at :30 UTC)."""
@@ -1843,7 +2046,7 @@ class MarketDataHub:
 
     async def _apply_live(
         self, symbol: str, tf: str, rows: list[dict], source: str, *, store: bool = True,
-        venue: S.Venue | None = None,
+        venue: S.Venue | None = None, meta: dict | None = None,
     ) -> None:
         """Bar-close detection. A newer bar emits every bar closed since the previous update (oldest first; after a
         feed stall the missed bars are downloaded from the exchange) and then the forming bar. Exchange bars are
@@ -1857,6 +2060,9 @@ class MarketDataHub:
         prev = self._last.get(key)
         if prev is not None and latest["time"] < prev["time"]:
             return  # out-of-order answer
+        if meta:
+            self._live_meta[key] = dict(meta)
+        meta = self._live_meta.get(key) if meta is None else meta
         exchange = source not in SNAPSHOT_SOURCES
         if prev is None:
             if exchange and store and len(rows) > 1:
@@ -1883,10 +2089,10 @@ class MarketDataHub:
             if source == "keyed":
                 self._keyed_refresh(symbol, tf)
             for bar in closed:
-                await self._dispatch(symbol, tf, bar, True)
+                await self._dispatch(symbol, tf, bar, True, meta)
         if prev is None or latest != prev:
             self._last[key] = latest
-            await self._dispatch(symbol, tf, latest, False)
+            await self._dispatch(symbol, tf, latest, False, meta)
 
     async def _continues_cache(self, symbol: str, tf: str, first_time: int) -> bool:
         """True when bars starting at `first_time` continue the cached series (or nothing is cached yet). The cache

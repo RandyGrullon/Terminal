@@ -22,6 +22,24 @@ closed on live advice: manual positions get a warning event, and the auto-trader
 closed (never on the forming bar), where it closes its positions on those exits and opens new ones on BUY / SELL
 with gate TOMAR.
 Positions with origin 'sim' belong to the simulator: they are priced and managed only through `sim_bar`.
+
+Pending orders (account 1, table paper_orders, migration 0002): limit / stop entries with an expiry (GTC, N bars of
+the order's tf, or a date). They trigger on live prices only (live 1m bars or polled live quotes): a limit when
+touched (at its price or better, the open on a gap), a stop when crossed (at market with slippage, the open on a gap).
+A final bar that did not arrive live (replayed after a feed stall, or delayed data) never fills one: the gate at the
+fill would be asked now, with prices that came after that bar, and the new position would miss the rest of the replay
+(a stop crossed meanwhile). After a stall, as after a restart, the bars that began before the feed came back count by
+close only; an order whose level such a bar reached gets a notice and stays pending. At the fill the gate is asked
+again at the fill price and a NO TOMAR cancels the order with the reason; the position is then opened and managed
+exactly like a market one (SL / TP relative to the fill, R net of fees), in the same transaction that marks the order
+filled.
+
+Portfolio risk (account 1 only, settings paper.max_open_risk_pct / paper.max_positions_per_group /
+paper.crypto_one_group / paper.daily_loss_limit_pct, 0 = off): new orders and pending fills (manual, auto-trading,
+terminal) are blocked (PaperRiskBlocked, never forced) when the total open risk (entry -> current stop, % of equity)
+would exceed the cap, when the correlated group (asset class; crypto as one group by default) already has the
+maximum of positions, or once the realized loss of the UTC day reached the daily limit (% of the balance the day
+started with): blocked until 00:00 UTC. Closing positions is never blocked.
 """
 from __future__ import annotations
 
@@ -34,7 +52,8 @@ from typing import Any
 import numpy as np
 
 from app import config
-from app.engine.costs import fee_pct_for
+from app.data.symbols import split_pair, strip_derivative
+from app.engine.costs import asset_class, fee_pct_for
 from app.engine.levels import ev_hold
 from app.engine.nexus_current import EARLY_EV
 from app.engine.service_watch import gate_target_ms
@@ -55,7 +74,7 @@ from app.sim.common import (
     json_loads,
     side_sign,
 )
-from app.util import RateLimitedLog, normalize_tf, now_ms, now_s, safe_float, tf_seconds
+from app.util import RateLimitedLog, clamp, normalize_tf, now_ms, now_s, safe_float, tf_seconds
 
 ACCOUNTS = {1: "Principal", 2: "Simulación"}
 MAX_LEVERAGE = M.DEFAULT_MAX_LEVERAGE
@@ -83,6 +102,120 @@ class PaperRejected(Exception):
         super().__init__(message)
         self.gate = gate
         self.message = message
+
+
+class PaperRiskBlocked(PaperError):
+    """A portfolio-risk rule of the demo account blocks a new order or a pending fill (never forced with `force`).
+
+    `rule`: daily_loss | open_risk | group. `risk`: the account's PaperRisk state when it was blocked."""
+
+    def __init__(self, message: str, rule: str, risk: dict | None = None):
+        super().__init__(message)
+        self.message = message
+        self.rule = rule
+        self.risk = risk
+
+
+# ----------------------------------------------------------------------------- pending orders & portfolio risk
+
+ORDER_KINDS = ("limit", "stop")
+ORDER_LABEL = {("long", "limit"): "Compra límite", ("long", "stop"): "Compra stop",
+               ("short", "limit"): "Venta límite", ("short", "stop"): "Venta stop"}
+ORDER_STATUS_LABEL = {"pending": "Pendiente", "filled": "Ejecutada", "cancelled": "Cancelada", "expired": "Caducada"}
+MAX_PENDING_ORDERS = 50
+MAX_EXPIRY_BARS = 1000
+MAX_EXPIRY_DAYS = 365
+ORDERS_LIMIT = 50  # non-pending orders returned by list_orders(status="all")
+DAY_S = 86400
+RISK_GROUP_LABEL = {"crypto": "Cripto", "stock": "Acciones", "fund": "Fondos y ETF", "forex": "Forex",
+                    "commodity": "Materias primas", "index": "Índices", "futures": "Futuros", "cfd": "CFD",
+                    "bond": "Bonos", "other": "Otros", "sim": "Mercado simulado"}
+DEMO_NOTE = "Cuenta demo: órdenes simuladas, nunca se envían a un bróker"
+
+
+def order_trigger(s: int, kind: str, level: float, high: float, low: float, close: float, *,
+                  open_: float | None = None, use_hl: bool = True) -> float | None:
+    """Fill reference price when a pending entry order triggers on this price update, else None.
+
+    limit (buy below / sell above the market) triggers when TOUCHED and fills at its price or better: at the bar's
+    open when the market gaps through it. stop (buy above / sell below) triggers when the price CROSSES it and fills
+    at market: at its price, at the open on a gap through it, or at the observed price when only a close is known
+    (pessimistic, like a stop loss); the caller adds slippage to stop fills. `use_hl=False` (a polled price, or a bar
+    that began before the order was watched) uses the close only and never fills a limit better than its price."""
+    if not use_hl:
+        high = low = close
+        open_ = None
+    if kind == "limit":
+        if s > 0:
+            if low > level:
+                return None
+            return open_ if open_ is not None and open_ < level else level
+        if high < level:
+            return None
+        return open_ if open_ is not None and open_ > level else level
+    if s > 0:
+        if high < level:
+            return None
+        if open_ is not None and open_ > level:
+            return open_
+        return level if use_hl else max(level, close)
+    if low > level:
+        return None
+    if open_ is not None and open_ < level:
+        return open_
+    return level if use_hl else min(level, close)
+
+
+def risk_group(symbol: str, crypto_one_group: bool = True) -> str:
+    """Correlated group of a symbol for the per-group position limit: the asset class (cripto counts as ONE group
+    by default: the coins tend to move together), each crypto asset on its own when `crypto_one_group` is off (BTC
+    against any quote is one asset), and 'sim' for simulated markets."""
+    sym = str(symbol or "").strip().upper()
+    if sym.startswith("SIM:"):
+        return "sim"
+    cls = asset_class(sym)
+    if cls == "crypto" and not crypto_one_group:
+        ticker = sym.partition(":")[2] or sym
+        pair = split_pair(strip_derivative(ticker)[0])
+        return f"crypto:{pair[0] if pair else ticker}"
+    return cls
+
+
+def risk_group_label(group: str) -> str:
+    if group.startswith("crypto:"):
+        return f"Cripto {group.partition(':')[2]}"
+    return RISK_GROUP_LABEL.get(group, group)
+
+
+def utc_day(ts_s: int) -> int:
+    """Start (unix s) of the UTC day containing ts_s."""
+    return int(ts_s) - int(ts_s) % DAY_S
+
+
+def _norm_side(side: Any) -> str:
+    text = str(side or "").strip().lower()
+    if text in ("buy", "compra", "largo"):
+        return "long"
+    if text in ("sell", "venta", "corto"):
+        return "short"
+    if text not in ("long", "short"):
+        raise PaperError("Lado no válido: usa 'long' (compra) o 'short' (venta)")
+    return text
+
+
+def _finite_or_none(value: Any, label: str) -> float | None:
+    """None stays None; a number must be finite (NaN / ±inf -> PaperError instead of being silently dropped)."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise PaperError(f"Valor no válido para {label}")
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        raise PaperError(f"Valor no válido para {label}") from None
+    if not math.isfinite(out):
+        raise PaperError(f"Valor no válido para {label}: debe ser un número finito")
+    return out
 
 
 # ----------------------------------------------------------------------------- pure level management
@@ -327,6 +460,17 @@ class PaperEngine:
         self._auto_locks: dict[str, asyncio.Lock] = {}  # one auto-trading decision at a time per symbol
         self._auto_bar: dict[tuple[str, str], int] = {}  # last closed bar handed to the auto-trader
         self._stale_warned: set[str] = set()  # symbols whose "sin precio en vivo" warning was already emitted
+        # pending orders (account 1): id -> order dict; ids whose fill is being decided (gate at the fill price)
+        self._orders: dict[int, dict] = {}
+        self._executing: set[int] = set()
+        # unix s from which each pending order has been watched (placement, or this engine's start after a restart):
+        # extremes of a bar that began earlier may predate it, so such a bar is judged by its close only
+        self._watch_from: dict[int, int] = {}
+        self._started_s = 0
+        # worst realized P&L of the current UTC day per account: (day, low). Persisted in meta so the daily loss
+        # block holds until 00:00 UTC even if later closes recover part of the loss (or the server restarts).
+        self._day_low: dict[int, tuple[int, float]] = {}
+        self._day_block_warned: dict[int, int] = {}
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -341,6 +485,14 @@ class PaperEngine:
         for pos in stale_sim:  # the simulator session that owned them no longer exists
             px = safe_float(pos["meta"].get("last_price")) or pos["entry_price"]
             await self._close(pos, px, "MANUAL", "Sesión de simulación finalizada", now_s(), market=False, emit=False)
+        self._started_s = now_s()
+        for row in await self.rt.db.fetchall("SELECT * FROM paper_orders WHERE status='pending' ORDER BY id"):
+            order = _order_from_row(row)
+            self._orders[order["id"]] = order
+            # prices moved while NEXUS was stopped are unknown: bars that began before this start count by close only
+            self._watch_from[order["id"]] = max(int(order["created_at"] // 1000), self._started_s)
+        await self._load_day_low()
+        await self._expire_orders()  # orders whose expiry passed while NEXUS was stopped
         await self._register_listener()
         if self.rt.settings is not None:
             self.rt.settings.add_listener(self._on_setting)
@@ -592,8 +744,14 @@ class PaperEngine:
         if account_id != 1 or self.rt.ws is None:
             return
         try:
-            self.rt.ws.publish("paper", {"type": "paper", "account": await self.account(1),
-                                         "positions": self.open_positions(1)})
+            account = await self.account(1)
+            msg: dict[str, Any] = {"type": "paper", "account": account, "positions": self.open_positions(1),
+                                   "orders": self.pending_orders(1)}
+            try:
+                msg["risk"] = await self.risk_state(1, account)
+            except Exception:
+                msg["risk"] = None
+            self.rt.ws.publish("paper", msg)
             self._last_publish = time.monotonic()
         except Exception:
             pass
@@ -603,6 +761,268 @@ class PaperEngine:
 
     def set_sim_info(self, *, auto_trade: bool, symbols: list[str], tf: str) -> None:
         self._sim_info = {"auto_trade": bool(auto_trade), "symbols": list(symbols), "tf": tf}
+
+    # ------------------------------------------------------------------ pending orders: views
+
+    def _when(self, ts_s: int) -> str:
+        """'hoy 14:00' / 'mañana 9:30' / 'jue 05/11 8:30' in the user's zone (ui.timezone)."""
+        from app.macro.fmt import day_clock
+
+        return day_clock(ts_s, now_s(), self._setting("ui.timezone", ""))
+
+    def _expiry_text(self, order: dict) -> str:
+        if order.get("expiry") == "bars" and order.get("expire_time"):
+            n = order.get("expire_bars")
+            return (f"válida {n} {'vela' if n == 1 else 'velas'} de {order.get('tf') or '1h'} "
+                    f"(hasta {self._when(int(order['expire_time']))})")
+        if order.get("expire_time"):
+            return f"válida hasta {self._when(int(order['expire_time']))}"
+        return "válida hasta cancelarla"
+
+    def order_dict(self, order: dict) -> dict:
+        side, kind = order["side"], order["kind"]
+        pending = order["status"] == "pending"
+        market = self.cached_price(order["symbol"]) if pending else None
+        meta = order.get("meta") or {}
+        return {
+            "id": order["id"],
+            "account_id": order["account_id"],
+            "symbol": order["symbol"],
+            "tf": order.get("tf") or "1h",
+            "side": side,
+            "kind": kind,
+            "label": ORDER_LABEL.get((side, kind), kind),
+            "price": order["price"],
+            "qty": order.get("qty"),
+            "risk_pct": order.get("risk_pct"),
+            "sl": order.get("sl"),
+            "tp": order.get("tp"),
+            "expiry": order.get("expiry") or "gtc",
+            "expire_bars": order.get("expire_bars"),
+            "expire_time": order.get("expire_time"),
+            "expiry_text": self._expiry_text(order),
+            "status": order["status"],
+            "status_label": ORDER_STATUS_LABEL.get(order["status"], order["status"]),
+            "origin": order.get("origin") or "manual",
+            "gate_verdict": order.get("gate_verdict"),
+            "gate_score": order.get("gate_score"),
+            "forced": bool(meta.get("forced")),
+            "market_price": market,
+            "distance_pct": round((order["price"] / market - 1.0) * 100.0, 4) if market else None,
+            "executing": order["id"] in self._executing,
+            "position_id": order.get("position_id"),
+            "fill_price": order.get("fill_price"),
+            "fill_time": order.get("fill_time"),
+            "reason": order.get("reason"),
+            "cancelled_by": order.get("cancelled_by"),
+            "created_at": order["created_at"],
+            "updated_at": order.get("updated_at"),
+        }
+
+    def pending_orders(self, account_id: int = 1, symbol: str | None = None) -> list[dict]:
+        items = [o for o in self._orders.values() if o["account_id"] == account_id
+                 and (symbol is None or o["symbol"] == symbol.upper())]
+        return [self.order_dict(o) for o in sorted(items, key=lambda o: o["id"])]
+
+    async def list_orders(self, account_id: int = 1, status: str = "pending", limit: int = ORDERS_LIMIT) -> list[dict]:
+        """Pending orders (status 'pending'), or the pending ones followed by the latest `limit` filled / cancelled /
+        expired ones (status 'all'), newest first."""
+        await self._expire_orders()
+        out = self.pending_orders(account_id)
+        if status == "all":
+            rows = await self.rt.db.fetchall(
+                "SELECT * FROM paper_orders WHERE account_id=? AND status<>'pending' ORDER BY updated_at DESC, id DESC "
+                "LIMIT ?",
+                (account_id, int(clamp(int(limit), 1, 500))),
+            )
+            out = out[::-1] + [self.order_dict(_order_from_row(r)) for r in rows]
+        return out
+
+    # ------------------------------------------------------------------ portfolio risk (account 1)
+
+    def _risk_limits(self) -> dict[str, Any]:
+        """Current limits; 0 or a negative / invalid value switches a rule off."""
+        def positive(key: str, default: float, cap: float) -> float:
+            v = safe_float(self._setting(key, default))
+            return min(v, cap) if v is not None and v > 0 else 0.0
+
+        return {
+            "max_open_risk_pct": positive("paper.max_open_risk_pct", 6.0, 100.0),
+            "max_positions_per_group": int(positive("paper.max_positions_per_group", 3, 1000)),
+            "crypto_one_group": bool(self._setting("paper.crypto_one_group", True)),
+            "daily_loss_limit_pct": positive("paper.daily_loss_limit_pct", 3.0, 100.0),
+        }
+
+    def _position_risk(self, pos: dict) -> float:
+        """Money lost from the entry if the position's current stop is hit (>= 0: 0 once the stop protects it)."""
+        stop = self._level_state(pos).effective_stop()
+        return max(0.0, side_sign(pos["side"]) * (pos["entry_price"] - stop)) * float(pos["qty_open"])
+
+    def _open_risk(self, account_id: int) -> float:
+        return sum(self._position_risk(p) for p in self._open.values() if p["account_id"] == account_id)
+
+    async def _day_realized(self, account_id: int, day: int) -> float:
+        """Realized P&L of the UTC day: gross result of the closing fills minus every fee paid that day (entries too),
+        i.e. exactly what the balance moved by fills since 00:00 UTC."""
+        row = await self.rt.db.fetchone(
+            "SELECT COALESCE(SUM(CASE WHEN (p.side = 'long' AND f.side = 'sell') OR (p.side = 'short' AND f.side = 'buy') "
+            "THEN (CASE WHEN p.side = 'long' THEN 1.0 ELSE -1.0 END) * (f.price - p.entry_price) * f.qty ELSE 0.0 END), 0.0) "
+            "AS gross, COALESCE(SUM(f.fee), 0.0) AS fees FROM paper_fills f JOIN paper_positions p ON p.id = f.position_id "
+            "WHERE f.account_id = ? AND f.time >= ? AND f.time < ?",
+            (account_id, int(day), int(day) + DAY_S),
+        ) or {}
+        return float(row.get("gross") or 0.0) - float(row.get("fees") or 0.0)
+
+    async def _load_day_low(self) -> None:
+        for aid in ACCOUNTS:
+            raw = await self.rt.db.fetchval("SELECT value FROM meta WHERE key=?", (f"paper.day_low.{aid}",))
+            data = json_loads(raw, None)
+            if isinstance(data, dict) and safe_float(data.get("day")) is not None and safe_float(data.get("low")) is not None:
+                self._day_low[aid] = (int(data["day"]), float(data["low"]))
+
+    async def _note_day_low(self, account_id: int, day: int, realized: float) -> float:
+        """Running minimum of the day's realized P&L (persisted when it falls): the daily block latches on it."""
+        prev = self._day_low.get(account_id)
+        low = min(realized, prev[1]) if prev is not None and prev[0] == day else realized
+        if prev is None or prev[0] != day or low < prev[1] - 1e-9:
+            self._day_low[account_id] = (day, low)
+            if low < 0 or prev is not None:
+                await self.rt.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                                         (f"paper.day_low.{account_id}", json_dumps({"day": day, "low": low})))
+        return low
+
+    async def _daily(self, account_id: int, account: dict | None = None) -> dict[str, Any]:
+        limits = self._risk_limits()
+        now = now_s()
+        day = utc_day(now)
+        realized = await self._day_realized(account_id, day)
+        account = account or await self.account(account_id)
+        start_balance = float(account["balance"]) - realized
+        low = await self._note_day_low(account_id, day, realized)
+        pct = limits["daily_loss_limit_pct"]
+        limit = start_balance * pct / 100.0 if pct > 0 and start_balance > 0 else None
+        blocked = limit is not None and low <= -limit + 1e-9
+        reason = None
+        if blocked:
+            low_pct = low / start_balance * 100.0 if start_balance > 0 else None
+            reason = (f"Límite de pérdida diaria alcanzado: la pérdida realizada hoy (día UTC) llegó a "
+                      f"{fmt_num(low, 2, True)} ({fmt_pct(low_pct, 2)}) y el límite es {fmt_pct(pct, 1, False)} del "
+                      "saldo con el que empezó el día. Hasta las 00:00 UTC la cuenta demo no abre operaciones nuevas "
+                      "(manuales ni del auto-trading) ni ejecuta órdenes pendientes: las que lleguen a su precio "
+                      "antes se cancelan")
+            if self._day_block_warned.get(account_id) != day:
+                self._day_block_warned[account_id] = day
+                self._emit("warn", "paper", f"Cuenta demo: {reason[0].lower()}{reason[1:]}.",
+                           {"account_id": account_id, "rule": "daily_loss", "day": day})
+        return {"day": day, "realized": realized, "low": low, "start_balance": start_balance, "pct": pct,
+                "limit": limit, "blocked": blocked, "reason": reason, "until": day + DAY_S}
+
+    async def risk_state(self, account_id: int = 1, account: dict | None = None) -> dict[str, Any]:
+        """PaperRisk: open risk vs its cap, positions per correlated group, the day's realized P&L vs the daily loss
+        limit and whether new orders / pending fills are blocked."""
+        limits = self._risk_limits()
+        account = account or await self.account(account_id)
+        equity = float(account["equity"])
+        daily = await self._daily(account_id, account)
+        open_risk = self._open_risk(account_id)
+        crypto_one = limits["crypto_one_group"]
+        groups: dict[str, dict] = {}
+        for pos in sorted(self._open.values(), key=lambda p: p["id"]):
+            if pos["account_id"] != account_id:
+                continue
+            g = risk_group(pos["symbol"], crypto_one)
+            item = groups.setdefault(g, {"group": g, "label": risk_group_label(g), "positions": 0, "symbols": [],
+                                         "risk": 0.0})
+            item["positions"] += 1
+            item["risk"] += self._position_risk(pos)
+            if pos["symbol"] not in item["symbols"]:
+                item["symbols"].append(pos["symbol"])
+        max_group = limits["max_positions_per_group"] or None
+        cap = limits["max_open_risk_pct"] or None
+        for item in groups.values():
+            item["max"] = max_group
+            item["full"] = max_group is not None and item["positions"] >= max_group
+            item["risk"] = round(item["risk"], 2)
+        start = daily["start_balance"]
+        return {
+            "account_id": account_id,
+            "equity": round(equity, 2),
+            "open_risk": round(open_risk, 2),
+            "open_risk_pct": round(open_risk / equity * 100.0, 4) if equity > 0 else None,
+            "max_open_risk_pct": cap,
+            "open_positions": sum(1 for p in self._open.values() if p["account_id"] == account_id),
+            "groups": sorted(groups.values(), key=lambda g: (-g["positions"], g["label"])),
+            "max_positions_per_group": max_group,
+            "crypto_one_group": crypto_one,
+            "day_start": daily["day"],
+            "day_start_balance": round(start, 2),
+            "daily_pnl": round(daily["realized"], 2),
+            "daily_pnl_pct": round(daily["realized"] / start * 100.0, 4) if start > 0 else None,
+            "daily_low": round(daily["low"], 2),
+            "daily_loss_limit_pct": daily["pct"] or None,
+            "daily_loss_limit": round(daily["limit"], 2) if daily["limit"] is not None else None,
+            "unrealized_pnl": account.get("unrealized_pnl"),
+            "blocked": daily["blocked"],
+            "block_reason": daily["reason"],
+            "blocked_until": daily["until"] if daily["blocked"] else None,
+            "pending_orders": sum(1 for o in self._orders.values() if o["account_id"] == account_id),
+            "note": (f"{DEMO_NOTE}. El riesgo abierto mide la distancia de la entrada al stop actual (sin comisiones); "
+                     "la pérdida diaria solo cuenta lo realizado (cierres y comisiones) en el día UTC."),
+        }
+
+    async def _check_daily(self, account_id: int, account: dict | None = None) -> None:
+        if account_id != 1:
+            return
+        daily = await self._daily(account_id, account)
+        if daily["blocked"]:
+            raise PaperRiskBlocked(f"{daily['reason']}.", "daily_loss", await self._risk_detail(account_id))
+
+    def _check_group(self, account_id: int, symbol: str) -> None:
+        if account_id != 1:
+            return
+        limits = self._risk_limits()
+        mx = limits["max_positions_per_group"]
+        if mx <= 0:
+            return
+        group = risk_group(symbol, limits["crypto_one_group"])
+        same = [p for p in self._open.values()
+                if p["account_id"] == account_id and risk_group(p["symbol"], limits["crypto_one_group"]) == group]
+        if len(same) < mx:
+            return
+        why = (": las criptomonedas suelen moverse juntas, así que cuentan como una sola apuesta" if group == "crypto"
+               else "")
+        n = len(same)
+        raise PaperRiskBlocked(
+            f"Límite de posiciones por grupo correlacionado: ya hay {n} {'abierta' if n == 1 else 'abiertas'} en "
+            f"{risk_group_label(group)} (máximo {mx}){why}. Cierra alguna o cambia el límite en Ajustes › Riesgo de "
+            "cartera.", "group")
+
+    def _check_open_risk(self, account_id: int, account: dict, new_risk: float) -> None:
+        if account_id != 1:
+            return
+        cap = self._risk_limits()["max_open_risk_pct"]
+        if cap <= 0 or new_risk <= 0:
+            return
+        equity = float(account["equity"])
+        if equity <= 0:
+            raise PaperRiskBlocked("Sin capital disponible en la cuenta demo para abrir más riesgo.", "open_risk")
+        open_risk = self._open_risk(account_id)
+        allowed = equity * cap / 100.0
+        if open_risk + new_risk <= allowed * (1.0 + 1e-9):
+            return
+        room = allowed - open_risk
+        hint = (f" Como mucho puedes arriesgar {fmt_pct(room / equity * 100.0, 2, False)} en esta orden." if room > 0
+                else " Cierra alguna posición o protégela (stop en punto de equilibrio) antes de abrir otra.")
+        raise PaperRiskBlocked(
+            f"Riesgo abierto máximo superado: con esta orden el riesgo total sería "
+            f"{fmt_pct((open_risk + new_risk) / equity * 100.0, 2, False)} del capital (máximo {fmt_pct(cap, 1, False)}; "
+            f"las posiciones abiertas ya suman {fmt_pct(open_risk / equity * 100.0, 2, False)}).{hint}", "open_risk")
+
+    async def _risk_detail(self, account_id: int) -> dict | None:
+        try:
+            return await self.risk_state(account_id)
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------ orders
 
@@ -624,15 +1044,15 @@ class PaperEngine:
         check_gate: bool = True,
         time_s: int | None = None,
         tps: list[float | None] | None = None,
+        slippage: bool = True,
+        order: dict | None = None,
     ) -> dict:
-        """Open a paper position. Returns {"position": Position, "gate": GateResult | None}."""
-        side = str(side or "").strip().lower()
-        if side in ("buy", "compra", "largo"):
-            side = "long"
-        elif side in ("sell", "venta", "corto"):
-            side = "short"
-        if side not in ("long", "short"):
-            raise PaperError("Lado no válido: usa 'long' (compra) o 'short' (venta)")
+        """Open a paper position. Returns {"position": Position, "gate": GateResult | None}.
+
+        Account 1 is subject to the portfolio-risk rules (PaperRiskBlocked, never forced). `slippage=False`: the fill
+        is exactly `price` (a limit order). `order`: the pending order being filled, marked filled in the same
+        transaction (PaperError when it stopped being pending meanwhile, e.g. cancelled by the user)."""
+        side = _norm_side(side)
         symbol = str(symbol or "").strip().upper()
         if not symbol:
             raise PaperError("Falta el símbolo")
@@ -660,17 +1080,12 @@ class PaperEngine:
             ref = await self.last_price(symbol)
         if ref is None or ref <= 0:
             raise PaperError(f"No hay precio disponible para {symbol}")
+        if account_id == 1:  # fast checks first: no gate evaluation for an order the risk rules refuse anyway
+            await self._check_daily(account_id)
+            self._check_group(account_id, symbol)
 
-        if gate is None and check_gate and self.rt.nexus is not None and hasattr(self.rt.nexus, "gate"):
-            try:
-                gate = await asyncio.wait_for(
-                    self.rt.nexus.gate(symbol, tf_n, side, entry=ref, sl=sl, tp=tp), timeout=90
-                )
-            except Exception as exc:
-                gate = None
-                if self._log.should_log(f"gate:{symbol}", 60):
-                    self._emit("warn", self._source(origin),
-                               f"No se pudo evaluar el filtro para {symbol}: {type(exc).__name__}: {exc}")
+        if gate is None and check_gate:
+            gate = await self._gate_for(symbol, tf_n, side, entry=ref, sl=sl, tp=tp, origin=origin)
         if not isinstance(gate, dict):
             gate = None
         if gate is not None and gate.get("verdict") == "AVOID" and not force:
@@ -678,7 +1093,7 @@ class PaperEngine:
             raise PaperRejected(gate, f"Operación bloqueada por el filtro ({gate_line(gate)}): {summary}")
 
         s = side_sign(side)
-        fill = M.slipped_price(ref, s, self._slip_pct(), opening=True)
+        fill = M.slipped_price(ref, s, self._slip_pct(), opening=True) if slippage else float(ref)
         stop = await self._choose_stop(symbol, tf_n, s, fill, sl, gate)
         risk_unit = abs(fill - stop)
         targets = self._choose_targets(s, fill, risk_unit, sl, tp, tps, gate)
@@ -712,9 +1127,17 @@ class PaperEngine:
             "gate_summary": gate.get("summary") if gate else None,
             "forced": bool(force and gate is not None and gate.get("verdict") == "AVOID"),
         }
+        if order is not None:
+            meta.update({"order_id": order["id"], "order_kind": order["kind"], "order_price": order["price"]})
         verdict = gate.get("verdict") if gate else None
         gate_score = safe_float(gate.get("score")) if gate else None
         async with self._lock:
+            if order is not None and self._orders.get(order["id"]) is not order:
+                raise PaperError(f"La orden #{order['id']} ya no está pendiente")
+            if account_id == 1:  # authoritative check, atomic with the insert (no other order opens meanwhile)
+                await self._check_daily(account_id)
+                self._check_group(account_id, symbol)
+                self._check_open_risk(account_id, await self.account(account_id), qty * risk_unit)
             async with self.rt.db.transaction() as tx:
                 pid = await tx.execute(
                     "INSERT INTO paper_positions(account_id, symbol, tf, side, qty, qty_open, entry_price, entry_time, sl, "
@@ -743,6 +1166,15 @@ class PaperEngine:
                             json_dumps(gate_checks_vector(gate)), self._gate_source(symbol, origin), now_ms(), target_at,
                         ),
                     )
+                if order is not None:
+                    order_meta = dict(order.get("meta") or {})
+                    order_meta.update({"fill_gate": verdict, "fill_gate_score": gate_score, "fill_ref": ref,
+                                       "fill_slippage": bool(slippage)})
+                    await tx.execute(
+                        "UPDATE paper_orders SET status='filled', position_id=?, fill_price=?, fill_time=?, updated_at=?, "
+                        "meta=? WHERE id=?",
+                        (pid, fill, entry_time, now_ms(), json_dumps(order_meta), order["id"]),
+                    )
             pos = {
                 "id": pid, "account_id": account_id, "symbol": symbol, "tf": tf_n, "side": side, "qty": qty,
                 "qty_open": qty, "entry_price": fill, "entry_time": entry_time, "sl": stop, "tp1": targets[0],
@@ -751,22 +1183,49 @@ class PaperEngine:
                 "exit_reason": None, "origin": origin, "gate_verdict": verdict, "gate_score": gate_score, "meta": meta,
             }
             self._open[pid] = pos
+            if order is not None:
+                order.update({"status": "filled", "position_id": pid, "fill_price": fill, "fill_time": entry_time,
+                              "updated_at": now_ms()})
+                self._orders.pop(order["id"], None)
+                self._watch_from.pop(order["id"], None)
         if origin != "sim":
             self._prices.setdefault(symbol, (ref, time.monotonic()))
             self._stale_warned.discard(symbol)  # a new position gets its own "sin precio en vivo" notice
-        forced =" · FORZADA contra el filtro" if meta["forced"] else ""
+        forced = " · FORZADA contra el filtro" if meta["forced"] else ""
         tps_txt = " · ".join(f"TP{i + 1} {fmt_price(t)}" for i, t in enumerate(targets) if t is not None)
+        via = ""
+        if order is not None:
+            via = (f" · {ORDER_LABEL.get((side, order['kind']), 'orden').lower()} #{order['id']} a "
+                   f"{fmt_price(order['price'])} ejecutada" + ("" if gate else " · sin filtro (no disponible)"))
+        data: dict[str, Any] = {"position_id": pid, "account_id": account_id, "symbol": symbol, "side": side}
+        if order is not None:
+            data["order_id"] = order["id"]
         self._emit(
             "trade",
             self._source(origin),
             f"Abierto {symbol} {SIDE_LABEL[side]} {fmt_qty(qty)} @ {fmt_price(fill)} · SL {fmt_price(stop)}"
-            + (f" · {tps_txt}" if tps_txt else "") + (f" · Filtro {gate_line(gate)}" if gate else "") + forced,
-            {"position_id": pid, "account_id": account_id, "symbol": symbol, "side": side},
+            + (f" · {tps_txt}" if tps_txt else "") + (f" · Filtro {gate_line(gate)}" if gate else "") + forced + via,
+            data,
         )
         await self.publish(account_id)
         if config.BACKGROUND and origin != "sim":
             await self._sync_subscriptions()
         return {"position": self.position_dict(pos), "gate": gate}
+
+    async def _gate_for(self, symbol: str, tf: str, side: str, *, entry: float, sl: float | None, tp: float | None,
+                        origin: str) -> dict | None:
+        """The Trade Gate for an idea (None when the engine is not loaded or the evaluation failed: logged)."""
+        nexus = self.rt.nexus
+        if nexus is None or not hasattr(nexus, "gate"):
+            return None
+        try:
+            gate = await asyncio.wait_for(nexus.gate(symbol, tf, side, entry=entry, sl=sl, tp=tp), timeout=90)
+        except Exception as exc:
+            if self._log.should_log(f"gate:{symbol}", 60):
+                self._emit("warn", self._source(origin),
+                           f"No se pudo evaluar el filtro para {symbol}: {type(exc).__name__}: {exc}")
+            return None
+        return gate if isinstance(gate, dict) else None
 
     async def _choose_stop(self, symbol: str, tf: str, s: int, fill: float, sl: float | None, gate: dict | None) -> float:
         side_word = "por debajo" if s > 0 else "por encima"
@@ -824,6 +1283,359 @@ class PaperEngine:
         except Exception:
             atr = None
         return atr if atr else fallback
+
+    # ------------------------------------------------------------------ pending orders (limit / stop)
+
+    def _order_expiry(self, expiry: Any, bars: Any, when: Any, tf: str) -> tuple[str, int | None, int | None]:
+        """(expiry, expire_bars, expire_time): 'gtc' (until cancelled), 'bars' (N bars of tf from now) or 'date'."""
+        text = str(expiry or "").strip().lower()
+        if not text:
+            text = "date" if when is not None else "bars" if bars is not None else "gtc"
+        text = {"hasta cancelar": "gtc", "hasta cancelarla": "gtc", "velas": "bars", "fecha": "date"}.get(text, text)
+        now = now_s()
+        if text == "gtc":
+            return "gtc", None, None
+        if text == "bars":
+            n = _finite_or_none(bars, "las velas de validez")
+            if n is None or n != int(n) or not 1 <= n <= MAX_EXPIRY_BARS:
+                raise PaperError(f"Indica cuántas velas es válida la orden: un número entero de 1 a {MAX_EXPIRY_BARS}")
+            return "bars", int(n), now + int(n) * _bar_seconds(tf)
+        if text == "date":
+            t = _finite_or_none(when, "la fecha de caducidad")
+            if t is None:
+                raise PaperError("Falta la fecha de caducidad de la orden")
+            if t > 1e11:  # unix milliseconds
+                t /= 1000.0
+            if t <= now + 60:
+                raise PaperError("La fecha de caducidad debe estar en el futuro (al menos dentro de 1 minuto)")
+            if t > now + MAX_EXPIRY_DAYS * DAY_S:
+                raise PaperError(f"La caducidad puede estar como mucho a {MAX_EXPIRY_DAYS} días")
+            return "date", None, int(t)
+        raise PaperError("Caducidad no válida: usa 'gtc' (hasta cancelarla), 'bars' (N velas) o 'date' (una fecha)")
+
+    @staticmethod
+    def _check_order_side(s: int, kind: str, level: float, market: float) -> None:
+        lvl, mkt = fmt_price(level), fmt_price(market)
+        if kind == "limit" and s > 0 and level >= market:
+            raise PaperError(f"Una compra límite va por debajo del precio actual ({mkt}): a {lvl} se ejecutaría ya. "
+                             f"Para comprar si el precio sube hasta {lvl}, usa una compra stop.")
+        if kind == "stop" and s > 0 and level <= market:
+            raise PaperError(f"Una compra stop va por encima del precio actual ({mkt}). Para comprar más barato, a "
+                             f"{lvl}, usa una compra límite.")
+        if kind == "limit" and s < 0 and level <= market:
+            raise PaperError(f"Una venta límite va por encima del precio actual ({mkt}): a {lvl} se ejecutaría ya. "
+                             f"Para vender si el precio cae hasta {lvl}, usa una venta stop.")
+        if kind == "stop" and s < 0 and level >= market:
+            raise PaperError(f"Una venta stop va por debajo del precio actual ({mkt}). Para vender más caro, a "
+                             f"{lvl}, usa una venta límite.")
+
+    async def place_order(
+        self,
+        account_id: int = 1,
+        symbol: str = "",
+        side: str = "long",
+        kind: str = "limit",
+        price: float | None = None,
+        tf: str | None = None,
+        qty: float | None = None,
+        risk_pct: float | None = None,
+        sl: float | None = None,
+        tp: float | None = None,
+        expiry: str | None = None,
+        expire_bars: int | None = None,
+        expire_time: int | None = None,
+        force: bool = False,
+        origin: str = "manual",
+    ) -> dict:
+        """Leave a pending limit / stop entry order in the demo account. Returns {"order": PaperOrder, "gate"}.
+
+        The gate is asked at the order's own price (NO TOMAR -> PaperRejected unless `force`) and asked AGAIN when the
+        order fills, where a NO TOMAR cancels it. The risk rules are checked now (daily loss, group, estimated risk)
+        and again at the fill."""
+        side = _norm_side(side)
+        kind = {"limite": "limit", "límite": "limit", "lmt": "limit"}.get(str(kind or "").strip().lower(),
+                                                                          str(kind or "").strip().lower())
+        if kind not in ORDER_KINDS:
+            raise PaperError("Tipo de orden no válido: usa 'limit' (límite) o 'stop'")
+        symbol = str(symbol or "").strip().upper()
+        if not symbol:
+            raise PaperError("Falta el símbolo")
+        if account_id != 1:
+            raise PaperError("Las órdenes pendientes solo existen en la cuenta demo Principal")
+        try:
+            tf_n = normalize_tf(tf or self._setting("paper.auto_tf", "1h") or "1h")
+        except ValueError as exc:
+            raise PaperError(str(exc)) from None
+        if origin not in ("manual", "auto", "script"):
+            origin = "manual"
+        level = _finite_or_none(price, "el precio de la orden")
+        if level is None or level <= 0:
+            raise PaperError("Indica el precio de la orden (mayor que 0)")
+        sl = _finite_or_none(sl, "el stop")
+        tp = _finite_or_none(tp, "el objetivo")
+        qty = _finite_or_none(qty, "la cantidad")
+        risk = _finite_or_none(risk_pct, "el riesgo")
+        if qty is not None and qty <= 0:
+            raise PaperError("La cantidad debe ser mayor que 0")
+        if risk is not None and not 0 < risk <= 100:
+            raise PaperError("El riesgo por operación debe estar entre 0 y 100 %")
+        s = side_sign(side)
+        if sl is not None and s * (level - sl) <= 0:
+            raise PaperError(f"El stop ({fmt_price(sl)}) debe estar {'por debajo' if s > 0 else 'por encima'} del precio "
+                             f"de la orden ({fmt_price(level)})")
+        if tp is not None and s * (tp - level) <= 0:
+            raise PaperError(f"El objetivo ({fmt_price(tp)}) debe estar {'por encima' if s > 0 else 'por debajo'} del "
+                             f"precio de la orden ({fmt_price(level)})")
+        exp, exp_bars, exp_time = self._order_expiry(expiry, expire_bars, expire_time, tf_n)
+        if sum(1 for o in self._orders.values() if o["account_id"] == account_id) >= MAX_PENDING_ORDERS:
+            raise PaperError(f"Ya hay {MAX_PENDING_ORDERS} órdenes pendientes: cancela alguna antes de dejar otra")
+        market = await self.last_price(symbol)
+        if market is None or market <= 0:
+            raise PaperError(f"No hay precio disponible para {symbol}: hace falta para comprobar el lado de la orden")
+        self._check_order_side(s, kind, level, market)
+        account = await self.account(account_id)
+        await self._check_daily(account_id, account)
+        self._check_group(account_id, symbol)
+
+        gate = await self._gate_for(symbol, tf_n, side, entry=level, sl=sl, tp=tp, origin=origin)
+        if gate is not None and gate.get("verdict") == "AVOID" and not force:
+            summary = gate.get("summary") or "el filtro desaconseja esta operación"
+            raise PaperRejected(gate, f"Orden bloqueada por el filtro ({gate_line(gate)}) a {fmt_price(level)}: {summary}")
+        # estimated risk at the fill: the sizing target (risk % of equity), or a fixed size times the stop distance
+        equity = float(account["equity"])
+        if qty is None:
+            estimate = equity * (risk if risk is not None else float(self._setting("risk.per_trade_pct", 1.0) or 1.0)) / 100.0
+        else:
+            gsl = safe_float(gate.get("sl")) if gate else None
+            stop = sl if sl is not None else gsl if gsl is not None and s * (level - gsl) > 0 else level * (1 - s * 0.02)
+            estimate = qty * abs(level - stop)
+        self._check_open_risk(account_id, account, estimate)
+
+        ts = now_ms()
+        verdict = gate.get("verdict") if gate else None
+        gate_score = safe_float(gate.get("score")) if gate else None
+        meta = {"forced": bool(force and verdict == "AVOID"), "gate_summary": gate.get("summary") if gate else None,
+                "market_at_placement": market}
+        async with self._lock:
+            oid = await self.rt.db.execute(
+                "INSERT INTO paper_orders(account_id, symbol, tf, side, kind, price, qty, risk_pct, sl, tp, expiry, "
+                "expire_bars, expire_time, status, origin, gate_verdict, gate_score, created_at, updated_at, meta) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
+                (account_id, symbol, tf_n, side, kind, level, qty, risk, sl, tp, exp, exp_bars, exp_time, origin,
+                 verdict, gate_score, ts, ts, json_dumps(meta)),
+            )
+            order = {"id": int(oid), "account_id": account_id, "symbol": symbol, "tf": tf_n, "side": side,
+                     "kind": kind, "price": level, "qty": qty, "risk_pct": risk, "sl": sl, "tp": tp, "expiry": exp,
+                     "expire_bars": exp_bars, "expire_time": exp_time, "status": "pending", "origin": origin,
+                     "gate_verdict": verdict, "gate_score": gate_score, "position_id": None, "fill_price": None,
+                     "fill_time": None, "reason": None, "cancelled_by": None, "created_at": ts, "updated_at": ts,
+                     "meta": meta}
+            self._orders[order["id"]] = order
+            self._watch_from[order["id"]] = now_s()
+        self._prices.setdefault(symbol, (market, time.monotonic()))
+        levels = " · ".join(x for x in (f"SL {fmt_price(sl)}" if sl is not None else "",
+                                        f"objetivo {fmt_price(tp)}" if tp is not None else "") if x)
+        self._emit(
+            "info", "paper",
+            f"Orden demo #{order['id']}: {ORDER_LABEL[(side, kind)].lower()} {symbol} a {fmt_price(level)}"
+            + (f" · {levels}" if levels else " · niveles de NEXUS al ejecutarse") + f" · {self._expiry_text(order)}"
+            + (f" · Filtro {gate_line(gate)}" if gate else "") + (" · FORZADA contra el filtro" if meta["forced"] else ""),
+            {"order_id": order["id"], "account_id": account_id, "symbol": symbol, "side": side, "kind": kind},
+        )
+        await self.publish(account_id)
+        if config.BACKGROUND:
+            await self._sync_subscriptions()
+        return {"order": self.order_dict(order), "gate": gate}
+
+    async def cancel_orders(self, order_id: int | None = None, symbol: str | None = None, all: bool = False, *,
+                            account_id: int = 1) -> list[dict]:
+        """Cancel pending orders: one by id, every one of a symbol, or all of the account."""
+        if order_id is None and not symbol and not all:
+            raise PaperError("Indica qué cancelar: un id de orden, un símbolo o 'all'")
+        if order_id is not None:
+            order = self._orders.get(int(order_id))
+            if order is None or order["account_id"] != account_id:
+                raise PaperError(f"No hay una orden pendiente con id {order_id}")
+            targets = [order]
+        elif all:
+            targets = [o for o in self._orders.values() if o["account_id"] == account_id]
+        else:
+            sym = str(symbol).upper()
+            targets = [o for o in self._orders.values() if o["account_id"] == account_id and o["symbol"] == sym]
+            if not targets:
+                raise PaperError(f"No hay órdenes pendientes en {sym}")
+        out: list[dict] = []
+        for order in sorted(targets, key=lambda o: o["id"]):
+            if await self._end_order(order, "Cancelada por el usuario", "user"):
+                out.append(self.order_dict(order))
+        if out:
+            await self.publish(account_id)
+            if config.BACKGROUND:
+                await self._sync_subscriptions()
+        elif order_id is not None:
+            # it stopped being pending while waiting for the engine (its fill was being booked): never report a
+            # cancellation that did not happen
+            raise PaperError(f"No hay una orden pendiente con id {order_id}: se acaba de ejecutar, cancelar o caducar")
+        return out
+
+    async def _end_order(self, order: dict, reason: str, by: str, *, status: str = "cancelled",
+                         level: str = "info") -> bool:
+        """Mark a pending order cancelled / expired (no-op when it is no longer pending). True when it changed."""
+        async with self._lock:
+            if self._orders.get(order["id"]) is not order:
+                return False
+            ts = now_ms()
+            cancelled_by = by if status == "cancelled" else None
+            await self.rt.db.execute(
+                "UPDATE paper_orders SET status=?, reason=?, cancelled_by=?, updated_at=? WHERE id=? AND status='pending'",
+                (status, reason, cancelled_by, ts, order["id"]),
+            )
+            order.update({"status": status, "reason": reason, "cancelled_by": cancelled_by, "updated_at": ts})
+            self._orders.pop(order["id"], None)
+            self._watch_from.pop(order["id"], None)
+        word = "caducada" if status == "expired" else "cancelada"
+        self._emit(level, "paper",
+                   f"Orden demo #{order['id']} {word}: {ORDER_LABEL.get((order['side'], order['kind']), '').lower()} "
+                   f"{order['symbol']} a {fmt_price(order['price'])} · {reason}",
+                   {"order_id": order["id"], "account_id": order["account_id"], "status": status, "by": by})
+        return True
+
+    async def _expire_orders(self, now: int | None = None) -> int:
+        """Expire the pending orders whose validity ended (never one whose fill is being decided)."""
+        t = now_s() if now is None else int(now)
+        due = [o for o in self._orders.values() if o.get("expire_time") is not None and t >= int(o["expire_time"])
+               and o["id"] not in self._executing]
+        n = 0
+        for order in sorted(due, key=lambda o: o["id"]):
+            if order.get("expiry") == "bars":
+                bars = order.get("expire_bars")
+                passed = "pasó 1 vela" if bars == 1 else f"pasaron {bars} velas"
+                reason = f"Caducada: {passed} de {order.get('tf') or '1h'} sin ejecutarse"
+            else:
+                reason = "Caducada: llegó su fecha límite sin ejecutarse"
+            n += int(await self._end_order(order, reason, "expiry", status="expired"))
+        if n:
+            await self.publish(1)
+            if config.BACKGROUND:
+                await self._sync_subscriptions()
+        return n
+
+    def _check_orders(self, sym: str, high: float, low: float, close: float, *, open_: float | None,
+                      bar_time: int | None, bar_s: int, live: bool, fill_time: int) -> int:
+        """Trigger the pending orders of `sym` touched / crossed by this live price update (bar_time None = a polled
+        price; replayed bars go to `_orders_missed_live` instead). Each triggered order is decided in its own task
+        (gate at the fill price), never inside the feed listener."""
+        sim_symbol = sym.startswith("SIM:")
+        started = 0
+        for order in [o for o in self._orders.values() if o["symbol"] == sym]:
+            oid = order["id"]
+            if oid in self._executing:
+                continue
+            watched = self._watch_from.get(oid, int(order["created_at"] // 1000))
+            exp = order.get("expire_time")
+            moment = now_s() if live or bar_time is None else bar_time
+            if exp is not None and moment >= int(exp):
+                continue  # out of its validity (the monitor expires it)
+            if bar_time is not None and not sim_symbol:
+                if not live and bar_time + bar_s <= watched:
+                    continue  # a replayed bar that ended before the order was watched
+                use_hl = bar_time >= watched
+            else:
+                use_hl = bar_time is not None  # synthetic bars come after the order; a polled price is a close
+            ref = order_trigger(side_sign(order["side"]), order["kind"], float(order["price"]), high, low, close,
+                                open_=open_ if use_hl else None, use_hl=use_hl)
+            if ref is None or ref <= 0:
+                continue
+            self._executing.add(oid)
+            self._spawn(self._execute_order(oid, ref, int(fill_time)))
+            started += 1
+        return started
+
+    def _orders_missed_live(self, sym: str, high: float, low: float, close: float, *, open_: float | None,
+                            bar_time: int, bar_s: int) -> int:
+        """A final bar that did not arrive live (replayed after a feed stall, or delayed data stamped in market time)
+        never fills a pending entry of `sym`: the gate would be asked now about a fill dated in the past, with prices
+        that came after it, and the new position would miss the rest of the replay. As after a restart, the orders are
+        judged by close only until a bar that begins after now; an order whose level that bar reached gets one notice
+        (at most every 6 h) and stays pending. Returns how many such orders were noticed."""
+        now = now_s()
+        noticed = 0
+        for order in [o for o in self._orders.values() if o["symbol"] == sym]:
+            oid = order["id"]
+            watched = self._watch_from.get(oid, int(order["created_at"] // 1000))
+            if bar_time + bar_s <= watched:
+                continue  # a bar that ended before the order was watched
+            self._watch_from[oid] = max(watched, now)
+            if oid in self._executing:
+                continue
+            use_hl = bar_time >= watched
+            ref = order_trigger(side_sign(order["side"]), order["kind"], float(order["price"]), high, low, close,
+                                open_=open_ if use_hl else None, use_hl=use_hl)
+            if ref is None or not self._log.should_log(f"order-missed:{oid}", 6 * 3600):
+                continue
+            noticed += 1
+            self._emit(
+                "info", "paper",
+                f"Orden demo #{oid} ({ORDER_LABEL.get((order['side'], order['kind']), 'orden').lower()} {sym} a "
+                f"{fmt_price(order['price'])}): el precio llegó a ese nivel en una vela de 1m que no llegó en vivo (la "
+                f"de {self._when(int(bar_time))}, recuperada tras un corte del feed o con datos retrasados). Las "
+                "órdenes pendientes solo se ejecutan con precios en vivo, así que sigue pendiente.",
+                {"order_id": oid, "account_id": order["account_id"], "symbol": sym, "bar_time": int(bar_time)},
+            )
+        return noticed
+
+    async def _execute_order(self, oid: int, ref: float, fill_time: int) -> None:
+        """Fill a triggered pending order: risk rules, the gate at the fill price (NO TOMAR cancels the order), then
+        the position exactly like a market one (SL / TP relative to the fill). Any refusal cancels the order with a
+        Spanish reason; a limit fills at `ref` (no slippage), a stop at market (slippage)."""
+        order = self._orders.get(oid)
+        try:
+            if order is None or order["status"] != "pending":
+                return
+            try:
+                # the risk rules at the trigger, before asking the gate (an order they refuse needs no verdict);
+                # open_position checks them again, atomically with the insert
+                await self._check_daily(order["account_id"])
+                self._check_group(order["account_id"], order["symbol"])
+            except PaperRiskBlocked as blk:
+                await self._end_order(order, f"No se ejecutó al llegar a {fmt_price(ref)}: {blk.message}", "risk",
+                                      level="warn")
+            else:
+                gate = await self._gate_for(order["symbol"], order.get("tf") or "1h", order["side"], entry=ref,
+                                            sl=order.get("sl"), tp=order.get("tp"),
+                                            origin=order.get("origin") or "manual")
+                try:
+                    await self.open_position(
+                        order["account_id"], order["symbol"], order["side"], order.get("tf"), qty=order.get("qty"),
+                        risk_pct=order.get("risk_pct"), sl=order.get("sl"), tp=order.get("tp"), force=False,
+                        origin=order.get("origin") or "manual", price=ref, gate=gate, check_gate=False,
+                        time_s=fill_time, slippage=order["kind"] == "stop", order=order,
+                    )
+                except PaperRejected as rej:
+                    summary = (rej.gate or {}).get("summary") or "el filtro desaconseja la operación"
+                    await self._end_order(
+                        order,
+                        f"Cancelada al ejecutarse a {fmt_price(ref)}: el filtro dice {gate_line(rej.gate)} ({summary})",
+                        "gate", level="warn")
+                except PaperRiskBlocked as blk:
+                    await self._end_order(order, f"No se ejecutó al llegar a {fmt_price(ref)}: {blk.message}", "risk",
+                                          level="warn")
+                except PaperError as exc:
+                    await self._end_order(order, f"No se ejecutó al llegar a {fmt_price(ref)}: {exc}", "levels",
+                                          level="warn")
+                else:
+                    return  # filled: open_position published the account and synced the subscriptions
+            # refused: the order left the pending list -> the page and the live subscriptions follow
+            await self.publish(order["account_id"])
+            if config.BACKGROUND:
+                await self._sync_subscriptions()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if self._log.should_log(f"order:{oid}", 300):
+                self._emit("error", "paper", f"Orden demo #{oid}: no se pudo ejecutar: {type(exc).__name__}: {exc}")
+        finally:
+            self._executing.discard(oid)
 
     # ------------------------------------------------------------------ fills & closing
 
@@ -911,6 +1723,11 @@ class PaperEngine:
                 {"position_id": pos["id"], "account_id": pos["account_id"], "pnl": pos["pnl"],
                  "r_multiple": pos.get("r_multiple"), "reason": pos["exit_reason"]},
             )
+        if delta_balance < 0 and pos["account_id"] == 1:
+            try:  # a realized loss: record the day's low now (the daily block latches on it and warns once)
+                await self._daily(1)
+            except Exception:
+                pass
         return closed
 
     async def _close(self, pos: dict, price: float, reason: str, label: str | None, time_s: int, *,
@@ -976,9 +1793,16 @@ class PaperEngine:
             for pid in [pid for pid, p in self._open.items() if p["account_id"] == account_id]:
                 self._open.pop(pid, None)
                 self._warned.pop(pid, None)
+            for oid in [oid for oid, o in self._orders.items() if o["account_id"] == account_id]:
+                self._orders.pop(oid, None)
+                self._watch_from.pop(oid, None)
+            self._day_low.pop(account_id, None)
+            self._day_block_warned.pop(account_id, None)
             async with self.rt.db.transaction() as tx:
                 await tx.execute("DELETE FROM paper_fills WHERE account_id=?", (account_id,))
                 await tx.execute("DELETE FROM paper_positions WHERE account_id=?", (account_id,))
+                await tx.execute("DELETE FROM paper_orders WHERE account_id=?", (account_id,))
+                await tx.execute("DELETE FROM meta WHERE key=?", (f"paper.day_low.{account_id}",))
                 await tx.execute(
                     "UPDATE paper_accounts SET balance=?, initial_balance=?, updated_at=? WHERE id=?",
                     (amount, amount, now_ms(), account_id),
@@ -1067,7 +1891,8 @@ class PaperEngine:
             # A final bar delivered late (after a feed stall the hub replays the missed bars, oldest first, as
             # closed=True with the exchange's final OHLC) is not a live price, but its high/low still decide the
             # stops and targets crossed meanwhile, filled at the end of that bar. Only bars that end after a
-            # position was opened count for it (never the last session's bar of a closed market).
+            # position was opened count for it (never the last session's bar of a closed market). It never fills a
+            # pending entry order (see _orders_missed_live).
             catch_up = closed and not live and candle_time > 0
             if live:
                 self._prices[sym] = (close, time.monotonic())
@@ -1093,6 +1918,17 @@ class PaperEngine:
                                 changed_accounts.add(pos["account_id"])
                     for aid in changed_accounts:
                         await self.publish(aid)
+                if self._orders:
+                    if catch_up:  # a replayed final bar is not a live price: it never fills a pending entry
+                        self._orders_missed_live(sym, safe_float(candle.get("high")) or close,
+                                                 safe_float(candle.get("low")) or close, close,
+                                                 open_=safe_float(candle.get("open")), bar_time=candle_time,
+                                                 bar_s=bar_s)
+                    else:
+                        self._check_orders(sym, safe_float(candle.get("high")) or close,
+                                           safe_float(candle.get("low")) or close, close,
+                                           open_=safe_float(candle.get("open")), bar_time=candle_time or now_s(),
+                                           bar_s=bar_s, live=live, fill_time=now_s())
             if closed and candle_time and self._setting("paper.auto_trade", False):
                 auto_symbols = {str(s).upper() for s in (self._setting("paper.auto_symbols", []) or [])}
                 if sym in auto_symbols and tf == str(self._setting("paper.auto_tf", "1h")):
@@ -1234,6 +2070,13 @@ class PaperEngine:
                     side = "short"
                 else:
                     return
+                try:
+                    await self._check_daily(1)
+                    self._check_group(1, symbol)
+                except PaperRiskBlocked as blk:
+                    if self._log.should_log(f"auto-risk:{symbol}:{blk.rule}", 3600):
+                        self._emit("info", "paper", f"Auto: {symbol} {SIDE_LABEL[side]} descartado: {blk.message}")
+                    return
                 gate = ((current.get("gate") or {}).get(side)) or None
                 if not isinstance(gate, dict) or gate.get("verdict") != "TAKE":
                     self._emit("info", "paper",
@@ -1241,6 +2084,9 @@ class PaperEngine:
                                + (f": {gate.get('summary')}" if isinstance(gate, dict) and gate.get("summary") else ""))
                     return
                 await self.open_position(1, symbol, side, tf, origin="auto", gate=gate, check_gate=False)
+        except PaperRiskBlocked as blk:
+            if self._log.should_log(f"auto-risk:{symbol}:{blk.rule}", 3600):
+                self._emit("info", "paper", f"Auto: {symbol} descartado: {blk.message}")
         except (PaperError, PaperRejected) as exc:
             self._emit("warn", "paper", f"Auto-trading {symbol}: {exc}")
         except Exception as exc:
@@ -1317,6 +2163,9 @@ class PaperEngine:
                 continue
             tf = (pos.get("tf") or "1h") if pos["symbol"].startswith("SIM:") else "1m"
             wanted.add((pos["symbol"], tf, "paper"))
+        for order in self._orders.values():
+            tf = (order.get("tf") or "1h") if order["symbol"].startswith("SIM:") else "1m"
+            wanted.add((order["symbol"], tf, "paper"))
         if self._setting("paper.auto_trade", False):
             tf = str(self._setting("paper.auto_tf", "1h"))
             for s in self._setting("paper.auto_symbols", []) or []:
@@ -1341,6 +2190,7 @@ class PaperEngine:
         while True:
             try:
                 await asyncio.sleep(PUBLISH_EVERY_S)
+                await self._expire_orders()
                 await self._poll_stale_prices()
                 await self.refresh_advice()
                 if any(p["account_id"] == 1 for p in self._open.values()):
@@ -1358,7 +2208,9 @@ class PaperEngine:
         left) never moves a stop or fills a target; the user is told once and the levels wait for a live price.
         """
         symbols = sorted({p["symbol"] for p in self._open.values()
-                          if p["origin"] != "sim" and self.cached_price(p["symbol"], PRICE_STALE_S) is None})
+                          if p["origin"] != "sim" and self.cached_price(p["symbol"], PRICE_STALE_S) is None}
+                         | {o["symbol"] for o in self._orders.values()
+                            if self.cached_price(o["symbol"], PRICE_STALE_S) is None})
         hub = self.rt.hub
         if not symbols or hub is None or not hasattr(hub, "quotes"):
             return
@@ -1380,8 +2232,11 @@ class PaperEngine:
                     self._stale_warned.add(sym)
                     ts = safe_float(q.get("ts"))
                     age = f"el último es de hace {_age_text((now - ts) / 1000.0)}" if ts else "solo hay uno antiguo"
-                    self._emit("warn", "paper", f"{sym}: sin precio en vivo ({age}); el stop y los objetivos se "
-                                                "vigilarán cuando vuelva a cotizar", {"symbol": sym})
+                    has_position = any(p["symbol"] == sym and p["origin"] != "sim" for p in self._open.values())
+                    what = ("el stop y los objetivos se vigilarán" if has_position
+                            else "las órdenes pendientes solo se ejecutan con precios en vivo: se vigilarán")
+                    self._emit("warn", "paper", f"{sym}: sin precio en vivo ({age}); {what} cuando vuelva a cotizar",
+                               {"symbol": sym})
                 continue
             self._stale_warned.discard(sym)
             self._prices[sym] = (price, time.monotonic())
@@ -1390,8 +2245,43 @@ class PaperEngine:
                     before = (pos["qty_open"], pos["tp_hits"])
                     await self._process_price(pos, price, price, price, open_=None, use_hl=False, time_s=now_s())
                     changed = changed or (pos["qty_open"], pos["tp_hits"]) != before
+            if self._orders:
+                self._check_orders(sym, price, price, price, open_=None, bar_time=None, bar_s=60, live=True,
+                                   fill_time=now_s())
         if changed:
             await self.publish(1)
+
+
+def _order_from_row(row: dict) -> dict:
+    meta = json_loads(row.get("meta"), {}) or {}
+    return {
+        "id": int(row["id"]),
+        "account_id": int(row["account_id"]),
+        "symbol": str(row["symbol"]).upper(),
+        "tf": row.get("tf") or "1h",
+        "side": row["side"],
+        "kind": row["kind"],
+        "price": float(row["price"]),
+        "qty": safe_float(row.get("qty")),
+        "risk_pct": safe_float(row.get("risk_pct")),
+        "sl": safe_float(row.get("sl")),
+        "tp": safe_float(row.get("tp")),
+        "expiry": row.get("expiry") or "gtc",
+        "expire_bars": int(row["expire_bars"]) if row.get("expire_bars") is not None else None,
+        "expire_time": int(row["expire_time"]) if row.get("expire_time") is not None else None,
+        "status": row.get("status") or "pending",
+        "origin": row.get("origin") or "manual",
+        "gate_verdict": row.get("gate_verdict"),
+        "gate_score": safe_float(row.get("gate_score")),
+        "position_id": int(row["position_id"]) if row.get("position_id") is not None else None,
+        "fill_price": safe_float(row.get("fill_price")),
+        "fill_time": int(row["fill_time"]) if row.get("fill_time") is not None else None,
+        "reason": row.get("reason"),
+        "cancelled_by": row.get("cancelled_by"),
+        "created_at": int(row["created_at"]),
+        "updated_at": int(row["updated_at"]) if row.get("updated_at") is not None else None,
+        "meta": meta if isinstance(meta, dict) else {},
+    }
 
 
 def _pos_from_row(row: dict) -> dict:
