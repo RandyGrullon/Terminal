@@ -6,7 +6,8 @@ Forwarded events (anything else is ignored):
   end of a no-trade window. red -> critical, amber -> warn, green -> info.
 - NEXUS watcher (source 'nexus'): entries BUY / SELL and exits EXIT_LONG / EXIT_SHORT (level 'signal') -> warn; early
   exits (level 'warn', data.code EARLY_EXIT) -> critical. Synthetic markets (SIM:*) are never forwarded.
-- demo account (source 'paper', level 'trade', account 1; the simulator's source 'sim' is not): opened and closed ->
+- demo account (source 'paper', level 'trade', account 1 only: neither the simulator's source 'sim' / account 2 nor
+  NEXUS's own account 3): opened and closed ->
   warn, stops (SL / trailing) -> critical when the trade lost money, else warn; partial targets -> info. The text
   always says "simulado".
 - any module can opt in with data.notify = {category: macro|signals|paper, priority?: info|warn|critical, kind?,
@@ -162,7 +163,7 @@ def _paper(ev: dict, data: dict) -> Alert | None:
         return None
     account = data.get("account_id")
     if account is not None and account != 1:
-        return None  # only the main demo account (account 2 belongs to the simulator)
+        return None  # only the user's demo account (2 belongs to the simulator, 3 to NEXUS itself)
     text = one_line(ev.get("message"))
     if not text:
         return None

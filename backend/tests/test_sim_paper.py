@@ -333,7 +333,8 @@ def test_sim_positions_are_isolated_from_the_live_feed(runtime_factory, no_backg
             assert closed and closed[0]["exit_label"] == "Stop en punto de equilibrio"
             assert closed[0]["exit_time"] == 1_003_600 + 3600
             assert any(e["source"] == "sim" for e in rt.bus.recent(level="trade"))
-            assert engine.status() == {"running": True, "open_positions": 0}
+            assert engine.status() == {"running": True, "open_positions": 0,
+                                       "autopilot": {"enabled": False, "open_positions": 0, "watching": 0}}
             # a restart closes simulator positions left open by a previous session
             await engine.open_position(2, SYM, "long", "1h", origin="sim", price=100.0, gate=gate, check_gate=False)
             engine2 = pp.PaperEngine(rt)

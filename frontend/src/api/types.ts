@@ -544,7 +544,7 @@ export interface Position {
   r_multiple: number | null
   exit_reason: string | null
   exit_label: string | null
-  origin: 'manual' | 'auto' | 'sim' | 'script'
+  origin: 'manual' | 'auto' | 'sim' | 'script' | 'autopilot' // autopilot = NEXUS's own account (3)
   gate_verdict: Verdict | null
   gate_score: number | null
   // Live NEXUS advice for this position: "Cerrar ya: …" only when NEXUS itself leaves this side (EXIT_* or the opposite
@@ -1010,6 +1010,8 @@ export type ServerMessage =
     }
   // orders / risk: pending demo orders and the portfolio risk of account 1 (optional: absent on older servers)
   | { type: 'paper'; account: PaperAccount; positions: Position[]; orders?: PaperOrder[]; risk?: PaperRisk | null }
+  // NEXUS's own account (id 3, "NEXUS automática") on the same 'paper' topic; never mixed with {type: 'paper'}
+  | ({ type: 'paper_autopilot' } & import('./types-autopilot').AutopilotSnapshot)
   | { type: 'scanner'; event: 'started' | 'progress' | 'done' | 'error'; run_id: number; progress?: number; message?: string }
   | { type: 'macro'; conditions: MarketConditions; alert?: MacroAlert | null }
   | ({ type: 'ui' } & UiAction)
@@ -1022,3 +1024,4 @@ export * from './types-alerts'
 export * from './types-validation'
 export * from './types-paper-orders'
 export * from './types-realtime'
+export * from './types-autopilot'

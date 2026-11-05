@@ -19,12 +19,12 @@ def _tool():
 def test_feature_type_files_are_parsed_with_types_ts():
     cc = _tool()
     files = [p.name for p in cc.type_files()]
-    assert files[0] == "types.ts" and {"types-alerts.ts", "types-paper-orders.ts", "types-realtime.ts",
-                                       "types-validation.ts"} <= set(files)
+    assert files[0] == "types.ts" and {"types-alerts.ts", "types-autopilot.ts", "types-paper-orders.ts",
+                                       "types-realtime.ts", "types-validation.ts"} <= set(files)
     ifaces, _notes = cc.load_interfaces()
     for name in ("Health", "AlertsStatus", "AlertChannelStatus", "ValidationStatus", "ValidationLatestResponse",
                  "PaperOrder", "PaperRisk", "PaperRiskGroup", "RealtimeStatus", "RealtimeProvider", "SkillReport",
-                 "SkillGroup", "MacroEvent"):
+                 "SkillGroup", "MacroEvent", "AutopilotSnapshot", "AutopilotStatus", "AutopilotLogEntry"):
         assert name in ifaces, name
     assert ifaces["PaperOrder"]["expiry_text"] is False and ifaces["SkillGroup"].get("window") is True
 
@@ -71,3 +71,4 @@ def test_the_checker_stays_read_only():
     assert '"/api/alerts/test"' not in text.replace("POST /api/alerts/test", "")  # never messages the user
     assert '"/api/validation/run"' not in text and '"/api/paper/orders/cancel"' not in text
     assert 'call("POST", "/api/paper/orders"' not in text
+    assert 'call("POST", "/api/paper/autopilot' not in text  # NEXUS's own account is never switched on by it

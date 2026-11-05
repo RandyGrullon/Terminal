@@ -1,17 +1,20 @@
-// Cuenta demo: simulated (paper) trading account 1. Stats, open positions with the live NEXUS advice, pending limit /
+// Cuenta demo, with an account switch at the top (remembered per browser): "Mi cuenta" and "NEXUS automática".
+// Mi cuenta: simulated (paper) trading account 1. Stats, open positions with the live NEXUS advice, pending limit /
 // stop orders, history, the portfolio-risk panel, a new order ticket that shows the Trade Gate verdict before opening,
 // auto-trading and account reset. Live updates arrive over the socket ('paper' topic: account, positions and the
 // optional `orders` / `risk`); the account is also polled every 20 s as a fallback.
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Hourglass, OctagonAlert, RefreshCw, RotateCcw, Wallet } from 'lucide-react'
+// NEXUS automática: NEXUS's own demo account (id 3, components/paper/AutopilotView), which trades on its own. Only
+// the selected account is mounted, so only its requests, polling and socket listener run.
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Bot, Hourglass, OctagonAlert, RefreshCw, RotateCcw, Wallet } from 'lucide-react'
 import { api, errorMessage } from '../api/client'
 import type { PaperLiveExtra, PaperOrder, PaperRisk, PaperSnapshot, Position } from '../api/types'
 import { socket } from '../api/ws'
 import { fmtAgo, fmtInt, fmtR, splitSymbol } from '../lib/format'
 import { isOne, plural } from '../lib/plural'
 import { useApp } from '../store'
-import { Badge, Button, Card, Disclaimer, Empty, ErrorBox, Loading, Modal } from '../components/ui'
-import { asTimeframe, fmtMoney, useInterval } from '../components/markets/opsUtils'
+import { Badge, Button, Card, Disclaimer, Empty, ErrorBox, Loading, Modal, Tabs } from '../components/ui'
+import { asTimeframe, fmtMoney, useInterval, usePersistentState } from '../components/markets/opsUtils'
 import PaperStats from '../components/paper/PaperStats'
 import PositionsTable from '../components/paper/PositionsTable'
 import HistoryTable from '../components/paper/HistoryTable'
@@ -24,13 +27,57 @@ import { paperOrdersApi } from '../components/paper/ordersApi'
 import { normalizeOrders, normalizeRisk } from '../components/paper/ordersUtils'
 import { adviceLevel, isAccount, normalizePositions, normalizeSnapshot } from '../components/paper/paperUtils'
 import { useMediaQuery } from '../components/paper/useMediaQuery'
+import AutopilotView from '../components/paper/AutopilotView'
 import '../components/paper/paper.css'
 
 const POLL_MS = 20_000
 const RELOAD_DEBOUNCE_MS = 600
 const RECENT_ORDERS = 20
 
+// ----------------------------------------------------------------------------- account switch
+
+export type PaperAccountView = 'mine' | 'nexus'
+/** Per-browser memory of the selected account (localStorage, wrapped in try/catch by usePersistentState). */
+const PAPER_ACCOUNT_KEY = 'nexus.paper.account.v1'
+const isAccountView = (v: unknown): v is PaperAccountView => v === 'mine' || v === 'nexus'
+
+const ACCOUNT_TABS: { id: PaperAccountView; label: ReactNode }[] = [
+  {
+    id: 'mine',
+    label: (
+      <>
+        <Wallet size={14} /> Mi cuenta
+      </>
+    ),
+  },
+  {
+    id: 'nexus',
+    label: (
+      <>
+        <Bot size={14} /> NEXUS automática
+      </>
+    ),
+  },
+]
+
 export default function PaperPage() {
+  const [view, setView] = usePersistentState<PaperAccountView>(PAPER_ACCOUNT_KEY, 'mine', isAccountView)
+  return (
+    <div className="page pp-page">
+      <div className="ap-switch">
+        <Tabs<PaperAccountView> pills tabs={ACCOUNT_TABS} value={view} onChange={setView} />
+        <span className="ap-switch-note">
+          Dos cuentas demo separadas y simuladas: lo que NEXUS hace en la suya nunca toca la tuya.
+        </span>
+      </div>
+      {view === 'nexus' ? <AutopilotView /> : <MyAccount />}
+    </div>
+  )
+}
+
+// ----------------------------------------------------------------------------- Mi cuenta (account 1)
+
+function MyAccount() {
   const notify = useApp((s) => s.notify)
   const [snap, setSnapState] = useState<PaperSnapshot | null>(null)
   const [loading, setLoading] = useState(true)
@@ -328,9 +375,9 @@ export default function PaperPage() {
     </>
   ) : null
 
-  // ------------------------------------------------------------------ render
+  // ------------------------------------------------------------------ render (inside PaperPage's .page container)
   return (
-    <div className="page pp-page">
+    <>
       <div className="page-header">
         <div className="col gap-0">
           <h1 className="pp-title row gap-2">
@@ -439,6 +486,6 @@ export default function PaperPage() {
             : `Se cerrarán a precio de mercado las ${fmtInt(positions.length)} posiciones abiertas de la cuenta demo (operación simulada).`}
         </p>
       </Modal>
-    </div>
+    </>
   )
 }

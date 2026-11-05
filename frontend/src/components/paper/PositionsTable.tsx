@@ -14,6 +14,8 @@ interface Props {
   closingId: number | null
   onClose: (p: Position) => void
   onOpenChart: (p: Position) => void
+  /** Extra origin labels (e.g. NEXUS's own account: autopilot -> "NEXUS"), over the shared ORIGIN_LABEL. */
+  originLabels?: Record<string, string>
 }
 
 function WarningIcons({ warnings }: { warnings: NexusWarning[] }) {
@@ -86,8 +88,9 @@ const Row = memo(function Row(props: {
   cols: number
   onClose: (p: Position) => void
   onOpenChart: (p: Position) => void
+  originLabels?: Record<string, string>
 }) {
-  const { p, closing, busy, inlineAdvice, cols, onClose, onOpenChart } = props
+  const { p, closing, busy, inlineAdvice, cols, onClose, onOpenChart, originLabels } = props
   const { exchange, ticker } = splitSymbol(p.symbol)
   const level = adviceLevel(p)
   const pnlTone = signTone(p.pnl)
@@ -161,7 +164,7 @@ const Row = memo(function Row(props: {
         <div className="pp-stack" style={{ alignItems: 'flex-start', gap: 2 }}>
           {p.gate_verdict ? <VerdictBadge verdict={p.gate_verdict} score={p.gate_score} /> : <span className="tiny muted">sin filtro</span>}
           <span className="pp-sub" style={{ color: p.origin === 'auto' ? 'var(--purple)' : undefined }}>
-            {ORIGIN_LABEL[p.origin] ?? p.origin}
+            {originLabels?.[p.origin] ?? ORIGIN_LABEL[p.origin] ?? p.origin}
           </span>
         </div>
       </td>
@@ -197,7 +200,7 @@ const Row = memo(function Row(props: {
   )
 })
 
-function PositionsTable({ positions, closingId, onClose, onOpenChart }: Props) {
+function PositionsTable({ positions, closingId, onClose, onOpenChart, originLabels }: Props) {
   const inlineAdvice = useMediaQuery('(min-width: 1360px)')
   const cols = inlineAdvice ? 11 : 10
   return (
@@ -231,6 +234,7 @@ function PositionsTable({ positions, closingId, onClose, onOpenChart }: Props) {
               cols={cols}
               onClose={onClose}
               onOpenChart={onOpenChart}
+              originLabels={originLabels}
             />
           ))}
         </tbody>

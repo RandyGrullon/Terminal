@@ -32,7 +32,16 @@ function Breakdown({ history }: { history: Position[] }) {
   )
 }
 
-function HistoryTable({ history, onOpenChart }: { history: Position[]; onOpenChart: (p: Position) => void }) {
+/** `originLabels`: extra origin labels (e.g. NEXUS's own account: autopilot -> "NEXUS"), over the shared ORIGIN_LABEL. */
+function HistoryTable({
+  history,
+  onOpenChart,
+  originLabels,
+}: {
+  history: Position[]
+  onOpenChart: (p: Position) => void
+  originLabels?: Record<string, string>
+}) {
   const [limit, setLimit] = useState(PAGE)
   const sorted = useMemo(
     () => [...history].sort((a, b) => (isNum(b.exit_time) ? b.exit_time : 0) - (isNum(a.exit_time) ? a.exit_time : 0) || b.id - a.id),
@@ -107,7 +116,7 @@ function HistoryTable({ history, onOpenChart }: { history: Position[]; onOpenCha
                     </div>
                   </td>
                   <td>
-                    <Badge tone={p.origin === 'auto' ? 'purple' : p.origin === 'manual' ? 'muted' : 'info'}>{ORIGIN_LABEL[p.origin] ?? p.origin}</Badge>
+                    <Badge tone={p.origin === 'auto' ? 'purple' : p.origin === 'manual' ? 'muted' : 'info'}>{originLabels?.[p.origin] ?? ORIGIN_LABEL[p.origin] ?? p.origin}</Badge>
                   </td>
                   <td>{p.gate_verdict ? <VerdictBadge verdict={p.gate_verdict} score={p.gate_score} /> : <span className="tiny muted">—</span>}</td>
                   <td className="num mono text-2">{dur !== null ? fmtDuration(dur) : '—'}</td>

@@ -5,6 +5,8 @@
 import { authEnabled, currentSession, ensureFreshSession, getAccessToken, refreshSession, signOut, type Session } from '../auth/session'
 import { apiUrl } from '../lib/config'
 import type {
+  AutopilotSnapshot,
+  AutopilotUpdate,
   BacktestResult,
   CandlesResponse,
   CommandInfo,
@@ -276,6 +278,15 @@ export const api = {
     cancelOrders: (body: { order_id?: number; symbol?: string; all?: boolean }) =>
       post<{ cancelled: PaperOrder[] }>('/api/paper/orders/cancel', body),
     risk: () => get<PaperRisk>('/api/paper/risk'),
+    // NEXUS's own demo account (account 3, "NEXUS automática"): it trades on its own with NEXUS's closed-bar signals
+    // and the gate. The user changes how it trades (only the fields sent), resets it or closes its positions by hand.
+    // Every call answers the whole AutopilotSnapshot; a bad value answers 400 {detail: '<Spanish>'}.
+    autopilot: {
+      get: () => get<AutopilotSnapshot>('/api/paper/autopilot'),
+      update: (body: AutopilotUpdate) => post<AutopilotSnapshot>('/api/paper/autopilot', body),
+      reset: (initial_balance?: number) => post<AutopilotSnapshot>('/api/paper/autopilot/reset', { initial_balance }),
+      close: (body: { position_id?: number; all?: boolean }) => post<AutopilotSnapshot>('/api/paper/autopilot/close', body),
+    },
   },
 
   // ------------------------------------------------------------------ scanner / learning

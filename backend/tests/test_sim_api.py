@@ -38,7 +38,8 @@ def _text(res: dict) -> str:
 def test_services_are_registered(client):
     services = client.get("/api/health").json()["services"]
     assert services["scanner"]["running"] is True and "model_updates" in services["scanner"]
-    assert services["paper"] == {"running": True, "open_positions": 0}
+    assert services["paper"] == {"running": True, "open_positions": 0,
+                                 "autopilot": {"enabled": False, "open_positions": 0, "watching": 0}}
     assert set(services["evaluator"]) == {"running", "pending", "resolved_total"}
     assert services["sim"] == {"running": False, "mode": None, "bars_done": 0}
     assert not [e for e in client.get("/api/health").json()["load_errors"] if "app.sim" in e or "api.sim" in e]

@@ -10,10 +10,12 @@ Terminal local de investigación de trading, **solo simulación / papel**: FastA
 Gráficos de cualquier activo de TradingView, motor autoadaptativo NEXUS (comprar / vender / mantener, niveles
 «hasta aquí», salidas anticipadas), filtro «¿Tomo esta operación?» (TOMAR / ESPERAR / NO TOMAR), semáforo de
 mercado (FED, calendario de esta semana y la próxima, futuros, volatilidad), escáner, simulador y backtests, cuenta
-demo (a mercado, órdenes límite / stop, riesgo de cartera, auto-trading), alertas por Telegram y correo, validación
-walk-forward, PyChart (scripts Python estilo Pine en un sandbox) y una terminal de comandos. Base de datos local
-SQLite (`data/nexus.db`) o PostgreSQL/Supabase en modo nube. La validación publicada concluye «sin evidencia de
-ventaja» (`docs/VALIDATION.md`): ningún texto de la app ni de la documentación puede sugerir lo contrario.
+demo (a mercado, órdenes límite / stop, riesgo de cartera, auto-trading), la cuenta propia de NEXUS («NEXUS
+automática», cuenta 3: opera sola con sus señales y el filtro TOMAR; apagada por defecto), alertas por Telegram y
+correo, validación walk-forward, PyChart (scripts Python estilo Pine en un sandbox) y una terminal de comandos. Base
+de datos local SQLite (`data/nexus.db`) o PostgreSQL/Supabase en modo nube. La validación publicada concluye «sin
+evidencia de ventaja» (`docs/VALIDATION.md`): ningún texto de la app ni de la documentación puede sugerir lo
+contrario.
 
 ## Puesta en marcha en una máquina nueva
 
@@ -71,9 +73,9 @@ uv pip install --python backend/.tmp/pgenv/Scripts/python.exe pgserver
 backend/.tmp/pgenv/Scripts/python.exe tools/pg_start.py backend/.tmp/pgdata   # imprime la URI
 ```
 
-Estado al cerrar la ronda de mejoras (31/10/2026, en Windows): backend 1927 passed / 27 skipped sobre SQLite y
-1938 passed / 16 skipped sobre PostgreSQL (las omisiones son las de PostgreSQL, red, solo Linux / POSIX y el lock
-exacto); UI 227 pruebas en 9 suites; `tsc` sin errores; contrato 123 comprobaciones · 0 fallos · 6 avisos (sin red,
+Estado tras añadir «NEXUS automática» (05/11/2026, en Windows): backend 1942 passed / 27 skipped sobre SQLite y
+1953 passed / 16 skipped sobre PostgreSQL (las omisiones son las de PostgreSQL, red, solo Linux / POSIX y el lock
+exacto); UI 244 pruebas en 9 suites; `tsc` sin errores; contrato 127 comprobaciones · 0 fallos · 6 avisos (sin red,
 `--symbol SIM:NEXUS` y base nueva, como en CI: los avisos son listas vacías y ningún informe de validación guardado).
 La prueba más lenta es `tests/test_imp_engine_repaint_history.py` (regresión de repintado: 300 cierres, ~2,5 min).
 
@@ -81,8 +83,8 @@ La prueba más lenta es `tests/test_imp_engine_repaint_history.py` (regresión d
 
 - `backend/app/`: `main.py` (app; middlewares, de fuera a dentro: CORS → comprobación de Origin (CSRF) → Auth →
   Host → StandbyGate; servicios y liderazgo en PostgreSQL), `config.py` (variables de entorno y `DEFAULT_SETTINGS`),
-  `settings_ext/` (valores por defecto de cada módulo: `alerts`, `paper_risk`, `realtime`, `scanner_model`,
-  `validation`; se suman a `DEFAULT_SETTINGS`), `runtime.py` (`rt`, localizador de servicios), `db.py` / `db_pg.py`
+  `settings_ext/` (valores por defecto de cada módulo: `alerts`, `autopilot`, `paper_risk`, `realtime`,
+  `scanner_model`, `validation`; se suman a `DEFAULT_SETTINGS`), `runtime.py` (`rt`, localizador de servicios), `db.py` / `db_pg.py`
   (SQLite / PostgreSQL con traducción de SQL; `TABLE_PKS`, `IDENTITY_TABLES`), `migrations/` (migraciones numeradas
   y `pg_rls.sql`), `settings.py`, `events.py` (bus de eventos), `ws.py`, `terminal.py` (registro de comandos y
   enmascarado de secretos), `auth.py` (Supabase), `hardening.py` (servidor no volcable en Linux), `maintenance.py`
@@ -94,8 +96,9 @@ La prueba más lenta es `tests/test_imp_engine_repaint_history.py` (regresión d
     claves opcionales Twelve Data / Alpha Vantage / Polygon), `realtime.py` (cotizaciones en tiempo real con clave,
     dentro de los límites del plan), `stamping.py` (sellado de las instantáneas de TradingView), TradingView
     (escáner público), grabador de velas.
-  - `sim/`: cuenta demo (`paper.py`: órdenes límite / stop pendientes, riesgo de cartera), escáner, evaluador de
-    predicciones (habilidad frente a la referencia, repetición offline), backtest, simulador, Monte Carlo.
+  - `sim/`: cuenta demo (`paper.py`: órdenes límite / stop pendientes, riesgo de cartera; cuentas 1 «Principal»,
+    2 «Simulación» y 3 «NEXUS automática», que opera sola con un `AutoProfile` como el auto-trading), escáner,
+    evaluador de predicciones (habilidad frente a la referencia, repetición offline), backtest, simulador, Monte Carlo.
   - `scripting/`: PyChart (validador AST, `worker.py` en subproceso aislado, `sandbox.py`).
   - `macro/`: semáforo (calendario económico, FOMC, VIX, futuros, DXY, tipos, funding); `official.py` (ICS en vivo
     del BLS y del BEA), `schedules.py` (fechas fijas de BCE, BoE, BoJ, BLS y BEA hasta dic. 2027: actualízalas cada

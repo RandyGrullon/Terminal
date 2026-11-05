@@ -69,8 +69,9 @@ def test_paper_trades_say_simulated_and_stops_are_critical_when_losing():
     partial = classify(ev("paper", "trade", "BINANCE:BTCUSDT largo: TP1 alcanzado (+1,00 R) · 1/3 cerrado a 66.000",
                           {"position_id": 7, "account_id": 1}))
     assert partial.kind == "partial" and partial.priority == "info"
-    # the simulator (source sim, account 2) and non-trade paper events are not forwarded
+    # the simulator (source sim, account 2), NEXUS's own account 3 and non-trade paper events are not forwarded
     assert classify(paper_close_event(account=2)) is None
+    assert classify(paper_close_event(account=3)) is None
     assert classify({**paper_open_event(), "source": "sim"}) is None
     assert classify(ev("paper", "info", "Auto-trading activado", {"x": 1})) is None
 

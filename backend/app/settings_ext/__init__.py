@@ -4,8 +4,8 @@ Each module only defines a plain ``DEFAULTS`` dict and must not import ``app.con
 """
 from __future__ import annotations
 
-from . import alerts, paper_risk, realtime, scanner_model, validation
+from . import alerts, autopilot, paper_risk, realtime, scanner_model, validation
 
 EXTRA_DEFAULTS: dict = {}
-for _module in (alerts, paper_risk, realtime, scanner_model, validation):
+for _module in (alerts, autopilot, paper_risk, realtime, scanner_model, validation):
     EXTRA_DEFAULTS.update(_module.DEFAULTS)

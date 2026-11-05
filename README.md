@@ -53,7 +53,7 @@ tu servidor de correo.
 | **Mercados** | Los ~458.000 activos del escáner público de TradingView (acciones de muchos países, cripto, forex, futuros, CFD, bonos, índices) con precio, cambio, volumen, rating técnico, RSI, ADX, rendimiento y la lectura rápida de NEXUS. |
 | **Escáner** | Recorre un mercado entero, ordena oportunidades y, en modo profundo, aplica NEXUS + filtro a los mejores. Cada predicción se guarda antes del resultado y se verifica después; el modelo del escáner se reentrena con esos resultados. |
 | **Simulación** | Mercado simulado (sintético con regímenes alcista, bajista, lateral, volátil y crash, o replay vela a vela de un activo real sin mirar el futuro), backtest **con y sin filtro** y Monte Carlo (riesgo de ruina, VaR). |
-| **Cuenta demo** | Operaciones simuladas a mercado, **órdenes límite y stop pendientes**, gestión automática de SL, TP parciales y stop dinámico, avisos de salida, **límites de riesgo de cartera** y auto-trading opcional que solo abre señales TOMAR. |
+| **Cuenta demo** | Operaciones simuladas a mercado, **órdenes límite y stop pendientes**, gestión automática de SL, TP parciales y stop dinámico, avisos de salida, **límites de riesgo de cartera** y auto-trading opcional que solo abre señales TOMAR. Además, **NEXUS automática**: una segunda cuenta demo, propia de NEXUS, que opera sola con sus señales (apagada por defecto). |
 | **PyChart** | Indicadores y estrategias en **Python** con una API estilo Pine Script (`ta.ema`, `plot`, `plotshape`, `strategy.entry`…): errores por línea, ejecución aislada (sandbox) y backtest. |
 | **Aprendizaje** | Cómo se retroalimenta el sistema: acierto fuera de muestra frente a la referencia, calibración, pesos aprendidos, decisiones del filtro y la **validación walk-forward** («¿hay ventaja real?»). |
 | **Ajustes** | Riesgo, NEXUS, filtro, escáner, proveedores de datos y sus claves, cuenta demo, alertas, riesgo de cartera, tiempo real y validación; estado del sistema y de la base de datos. |
@@ -216,6 +216,32 @@ de cero). En «Nueva orden demo» eliges símbolo, lado, tipo, riesgo % y, si qu
 
 Terminal: `buy btc --risk 1`, `limit btc <precio> --exp 2d`, `stop eth <precio> --sl <stop>`, `orders`, `cancel all`,
 `risk`, `positions`, `close all`. Todo es simulado: nada llega a un bróker.
+
+#### NEXUS automática: la cuenta demo propia de NEXUS
+
+Arriba de *Cuenta demo*, el selector **Mi cuenta | NEXUS automática** cambia a una segunda cuenta simulada que
+**opera sola** con los análisis de NEXUS. Es otra cuenta (la 3): su saldo, sus posiciones y su historial nunca se
+mezclan con los tuyos, y sus operaciones no envían alertas por Telegram ni por correo. Está **apagada** hasta que la
+actives en «Cómo opera»:
+
+- **Qué vigila**: las mejores oportunidades TOMAR del último escaneo terminado (filtro TOMAR con señal de NEXUS; por
+  defecto las 10 primeras) o una **lista fija** de símbolos que tú eliges. «Qué está vigilando» muestra cada símbolo,
+  por qué está ahí y qué dijo NEXUS en su última vela cerrada (casi siempre ESPERAR o MANTENER: no operar también es
+  una decisión).
+- **Cuándo y cómo decide**: al cierre de cada vela de su temporalidad (1 h por defecto); un candidato nuevo se decide
+  en el acto con su última vela cerrada. Solo entra si NEXUS da COMPRAR o VENDER **y** el filtro dice TOMAR, y sale
+  con las reglas de salida de NEXUS además del SL, los TP parciales y el stop dinámico de siempre.
+- **Límites**: máximo de posiciones abiertas (5), riesgo por operación (1 % de su capital, hasta el stop) y las mismas
+  reglas de riesgo de cartera que tu cuenta (*Ajustes → Riesgo de cartera*), contadas aparte.
+- **Registro de decisiones**: qué abrió, qué descartó y por qué (filtro, límite de posiciones, riesgo) y qué cerró.
+  Se guarda en memoria: al reiniciar el servidor empieza vacío (las posiciones y el historial sí quedan en la base de
+  datos).
+- Puedes **pausarla** (no abre nada nuevo; sus posiciones siguen con su stop y sus objetivos), cerrar sus posiciones
+  a mano o **reiniciarla** con otro saldo.
+
+Es un experimento honesto, no una promesa: la validación publicada (`docs/VALIDATION.md`) **no encontró ventaja**, así
+que lo esperable es un resultado parecido a entrar al azar, menos las comisiones. Sirve para ver en tiempo real cómo se
+comportan las señales sin tocar tu cuenta.
 
 ### 7. PyChart
 

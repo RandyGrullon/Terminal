@@ -28,7 +28,7 @@ from app.sim.evaluator import (
     skill_report,
 )
 from app.sim.montecarlo import MonteCarloError, run_montecarlo
-from app.sim.paper import PaperError, PaperRejected, PaperRiskBlocked
+from app.sim.paper import AUTOPILOT_ACCOUNT, PaperError, PaperRejected, PaperRiskBlocked
 from app.sim.scanner import ScanError
 from app.sim.simulator import SimError
 from app.util import clamp, clean_json, normalize_tf, safe_float
@@ -434,6 +434,62 @@ async def paper_auto(req: AutoRequest) -> dict:
     except (PaperError, ValueError, KeyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc).strip("'\"")) from None
     return {"auto": clean_json(auto)}
+
+
+# ----------------------------------------------------------------------------- NEXUS's own demo account (account 3)
+
+
+class AutopilotRequest(BaseModel):
+    enabled: bool | None = None
+    source: str | None = None
+    symbols: list[str] | None = None
+    tf: str | None = None
+    max_positions: float | None = None
+    risk_pct: float | None = None
+    scanner_top: float | None = None
+
+
+@router.get("/api/paper/autopilot")
+async def paper_autopilot() -> dict:
+    """AutopilotSnapshot: NEXUS's own demo account (trades on its own), its positions, history, risk and status."""
+    paper = _service("paper", "La cuenta demo")
+    return clean_json(await paper.autopilot_snapshot())
+
+
+@router.post("/api/paper/autopilot")
+async def paper_autopilot_update(req: AutopilotRequest) -> dict:
+    paper = _service("paper", "La cuenta demo")
+    symbols = None
+    if req.symbols is not None:
+        symbols = [await _resolve(s) for s in req.symbols if str(s).strip()]
+    try:
+        snap = await paper.set_autopilot(enabled=req.enabled, source=req.source, symbols=symbols, tf=req.tf,
+                                         max_positions=req.max_positions, risk_pct=req.risk_pct,
+                                         scanner_top=req.scanner_top)
+    except (PaperError, ValueError, KeyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc).strip("'\"")) from None
+    return clean_json(snap)
+
+
+@router.post("/api/paper/autopilot/reset")
+async def paper_autopilot_reset(req: ResetRequest | None = None) -> dict:
+    paper = _service("paper", "La cuenta demo")
+    try:
+        await paper.reset(req.initial_balance if req is not None else None, account_id=AUTOPILOT_ACCOUNT)
+    except PaperError as exc:
+        raise _paper_error(exc) from None
+    return clean_json(await paper.autopilot_snapshot())
+
+
+@router.post("/api/paper/autopilot/close")
+async def paper_autopilot_close(req: CloseRequest) -> dict:
+    """The user may close NEXUS's positions by hand (one, or all of them)."""
+    paper = _service("paper", "La cuenta demo")
+    try:
+        await paper.close_autopilot(req.position_id, bool(req.all))
+    except PaperError as exc:
+        raise _paper_error(exc) from None
+    return clean_json(await paper.autopilot_snapshot())
 
 
 # ----------------------------------------------------------------------------- scanner

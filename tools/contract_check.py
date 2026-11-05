@@ -3,7 +3,8 @@ the TypeScript interfaces in frontend/src/api/types.ts and the feature files nex
 types.ts): missing keys, unexpected keys, NaN, HTTP errors.
 
 Read-only on purpose: it never calls POST /api/alerts/test (it would message the user's Telegram or email), POST
-/api/validation/run (a background job that downloads data) nor places or cancels demo orders.
+/api/validation/run (a background job that downloads data) nor places or cancels demo orders (nor switches on
+NEXUS's own demo account).
 
 Usage (server must be running):
     backend/.venv/Scripts/python.exe tools/contract_check.py [--base http://127.0.0.1:8420] [--symbol BINANCE:BTCUSDT]
@@ -383,6 +384,21 @@ def main() -> int:
         check_obj(rep, ifaces, "PaperRisk", d, "paper.risk")
         if d.get("groups"):
             check_list(rep, ifaces, "PaperRiskGroup", d["groups"], "paper.risk.groups", 2)
+    d = call("GET", "/api/paper/autopilot")  # NEXUS's own demo account: only read here, never switched on
+    if d:
+        check_obj(rep, ifaces, "AutopilotSnapshot", d, "paper.autopilot")
+        check_obj(rep, ifaces, "PaperAccount", d.get("account"), "paper.autopilot.account")
+        st = d.get("autopilot")
+        check_obj(rep, ifaces, "AutopilotStatus", st, "paper.autopilot.status")
+        if d.get("risk"):
+            check_obj(rep, ifaces, "PaperRisk", d["risk"], "paper.autopilot.risk")
+        if isinstance(st, dict):
+            if st.get("scan"):
+                check_obj(rep, ifaces, "AutopilotScan", st["scan"], "paper.autopilot.scan")
+            if st.get("watching"):
+                check_list(rep, ifaces, "AutopilotWatch", st["watching"], "paper.autopilot.watching", 3)
+            if st.get("log"):
+                check_list(rep, ifaces, "AutopilotLogEntry", st["log"], "paper.autopilot.log", 3)
     d = call("GET", "/api/scanner/runs")
     if d:
         check_list(rep, ifaces, "ScanRun", d.get("runs"), "scanner.runs", 1)

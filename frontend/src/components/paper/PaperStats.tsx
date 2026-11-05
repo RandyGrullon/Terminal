@@ -1,12 +1,35 @@
 // Account summary row of the demo account: balance, equity, return, realized / open P&L, trades and win rate.
+// `winTally` (NEXUS's own account): the winners as "x de n", neutral, with no conclusion below 30 closed trades.
 import { memo } from 'react'
 import type { PaperAccount } from '../../api/types'
 import { fmtInt, fmtPct, signTone } from '../../lib/format'
 import { plural } from '../../lib/plural'
 import { Stat } from '../ui'
+import { MIN_EVIDENCE_N } from '../brain/evidence'
 import { fmtMoney, fmtRate, rateTone } from '../markets/opsUtils'
 
-function PaperStats({ account }: { account: PaperAccount }) {
+function WinTally({ account: a }: { account: PaperAccount }) {
+  const n = a.trades
+  const hint =
+    n <= 0
+      ? 'Sin operaciones cerradas todavía'
+      : n < MIN_EVIDENCE_N
+        ? `Aún sin evidencia suficiente (n = ${fmtInt(n)})`
+        : `${fmtRate(a.win_rate)} de las cerradas`
+  return (
+    <Stat
+      label="Ganadoras"
+      value={`${fmtInt(a.wins)} de ${fmtInt(n)}`}
+      hint={hint}
+      title={
+        'Operaciones cerradas con beneficio, de todas las cerradas. No mide una ventaja: un porcentaje alto puede perder ' +
+        'dinero y uno bajo ganarlo, según lo que se gana y se pierde en cada una.'
+      }
+    />
+  )
+}
+
+function PaperStats({ account, winTally = false }: { account: PaperAccount; winTally?: boolean }) {
   const a = account
   return (
     <div className="pp-stats">
@@ -27,13 +50,17 @@ function PaperStats({ account }: { account: PaperAccount }) {
         hint={plural(a.open_positions, 'posición abierta', 'posiciones abiertas')}
       />
       <Stat label="Operaciones" value={fmtInt(a.trades)} hint={`${plural(a.wins, 'ganada', 'ganadas')} · ${plural(a.losses, 'perdida', 'perdidas')}`} />
-      <Stat
-        label="% acierto"
-        value={fmtRate(a.win_rate)}
-        tone={rateTone(a.win_rate, 0.5, 0.35)}
-        hint="Ganadas / cerradas"
-        title="Porcentaje de operaciones cerradas con beneficio. Con objetivos de 1R o más, menos del 50 % puede seguir siendo rentable."
-      />
+      {winTally ? (
+        <WinTally account={a} />
+      ) : (
+        <Stat
+          label="% acierto"
+          value={fmtRate(a.win_rate)}
+          tone={rateTone(a.win_rate, 0.5, 0.35)}
+          hint="Ganadas / cerradas"
+          title="Porcentaje de operaciones cerradas con beneficio. Con objetivos de 1R o más, menos del 50 % puede seguir siendo rentable."
+        />
+      )}
     </div>
   )
 }
