@@ -560,6 +560,211 @@ async def _auto(ctx: CommandContext) -> None:
     ctx.data = auto
 
 
+# ----------------------------------------------------------------------------- NEXUS automática (account 3)
+
+AUTOPILOT_MIN_N = 30  # closed trades before its win share is given as a percentage (no conclusion below 30)
+_AP_LIST = ("lista", "list")
+_AP_SCANNER = ("escaner", "escáner", "scanner")
+_AP_STATUS = ("status", "estado", "ver")
+_AP_POSITIONS = ("pos", "positions", "posiciones")
+_AP_LOG = ("log", "decisiones", "registro")
+_AP_CLOSE = ("close", "cerrar")
+_AP_RESET = ("reset", "reiniciar")
+_AP_KIND = {"open": ("Abre", "success"), "close": ("Cierra", "info"), "skip": ("Descarta", "muted"),
+            "info": ("Nota", "info")}
+AUTOPILOT_USAGE = ("autopilot [on|off] [lista <símbolos…> | escaner [N]] [--tf 1h] [--max 5] [--risk 1] [--top 10] · "
+                   "autopilot pos | log | close <id|símbolo|all> | reset [saldo] --yes")
+
+
+def _ap_when(ctx: CommandContext, ms: Any) -> str:
+    from app.macro.fmt import day_clock
+
+    return day_clock(int(ms) // 1000, now_s(), str(_setting(ctx, "ui.timezone", "") or ""))
+
+
+def _ap_what(st: dict) -> str:
+    if st["source"] == "list":
+        return "lista fija: " + (", ".join(st["symbols"]) or "vacía (añade símbolos: autopilot lista btc eth)")
+    return f"escáner: hasta {st['scanner_top']} oportunidades TOMAR del último escaneo"
+
+
+def _ap_wins(account: dict) -> str:
+    """Winners as "x de n": a percentage only from 30 closed trades on (honest statistics)."""
+    n, wins = int(account.get("trades") or 0), int(account.get("wins") or 0)
+    if n <= 0:
+        return "sin operaciones cerradas todavía"
+    text = f"{wins} de {n}"
+    return text + (f" ({fmt_prob(account.get('win_rate'))})" if n >= AUTOPILOT_MIN_N else " · aún sin evidencia suficiente")
+
+
+def _print_autopilot(ctx: CommandContext, snap: dict) -> None:
+    st, a = snap["autopilot"], snap["account"]
+    ctx.print(f"NEXUS automática (cuenta demo 3, simulada) · {'ACTIVA: opera sola' if st['enabled'] else 'PAUSADA'}",
+              "system")
+    ctx.print(f"Qué vigila: {_ap_what(st)} · decide en velas de {st['tf']} · máximo {st['max_positions']} posiciones · "
+              f"riesgo {fmt_pct(st['risk_pct'], 1, False)} por operación", "info")
+    scan = st.get("scan")
+    if st["source"] == "scanner":
+        if scan is None:
+            ctx.print("Sin escaneos terminados todavía: vigilará las oportunidades TOMAR del próximo", "muted")
+        elif scan.get("finished_at") is None:
+            ctx.print(f"Escaneo #{scan['id']} aún en curso", "muted")
+        else:
+            n = int(scan.get("opportunities") or 0)
+            ctx.print(f"Escaneo #{scan['id']} terminado {_ago(scan['finished_at'])}: {n} "
+                      f"{'oportunidad' if n == 1 else 'oportunidades'} TOMAR", "muted")
+    watching = st.get("watching") or []
+    if watching:
+        rows = []
+        for w in watching:
+            last = w.get("last")
+            read = f"{last['label']} · vela de {_ap_when(ctx, last['bar_time'])}" if last else "—"
+            rows.append([w["symbol"], w["why"], SIDE_LABEL.get(w.get("direction") or "", "según la señal"), read])
+        ctx.table(["Símbolo", "Motivo", "Dirección", "Última vela"], rows)
+    elif st["enabled"]:
+        ctx.print("Ahora mismo no vigila ningún símbolo", "muted")
+    ctx.print(f"Saldo {fmt_num(a['balance'], 2)} · equity {fmt_num(a['equity'], 2)} · rentabilidad "
+              f"{fmt_pct(a['return_pct'], 2)} · ganadoras {_ap_wins(a)} · posiciones abiertas {a['open_positions']}",
+              "info")
+    if st.get("note"):
+        ctx.print(st["note"], "muted")
+
+
+def _ap_number(ctx: CommandContext, flag: str, what: str) -> float | None:
+    value = ctx.flag(flag)
+    return None if value is None else _number(ctx, value, what, flag=f"--{flag}")
+
+
+@command("autopilot", help="NEXUS automática: la cuenta demo propia de NEXUS, que opera sola (simulada)",
+         usage=AUTOPILOT_USAGE, group="Cuenta demo", aliases=("piloto", "automatica", "automática"))
+async def _autopilot(ctx: CommandContext) -> None:
+    paper = _svc(ctx, "paper", "La cuenta demo")
+    args = [str(a) for a in ctx.args]
+    sub = args[0].lower() if args else ""
+
+    if sub in _AP_POSITIONS:
+        positions = paper.open_positions(3)
+        if not positions:
+            on = paper.autopilot_status()["enabled"]
+            ctx.print("NEXUS no tiene posiciones abiertas" + ("" if on else " (está pausada: autopilot on)"), "muted")
+        else:
+            ctx.table(["ID", "Símbolo", "Lado", "Cant.", "Entrada", "Precio", "Stop", "TP1", "P&L", "R"], [[
+                p["id"], p["symbol"], SIDE_LABEL.get(p["side"], p["side"]), fmt_qty(p["qty_open"]),
+                fmt_price(p["entry_price"]), fmt_price(p.get("price")),
+                fmt_price(p["trail"] if p.get("trail") is not None else p["sl"]), fmt_price(p.get("tp1")),
+                fmt_num(p.get("pnl"), 2, True), fmt_r(p.get("r_multiple")),
+            ] for p in positions])
+            ctx.print("Ciérralas a mano con: autopilot close <id|símbolo|all>", "muted")
+        ctx.data = positions
+        return
+
+    if sub in _AP_LOG:
+        log = paper.autopilot_status()["log"]
+        if not log:
+            ctx.print("Sin decisiones todavía: aparecerán al cerrar la próxima vela de los símbolos que vigila "
+                      "(las velas sin señal de entrada no se anotan: mira «Última vela» en autopilot)", "muted")
+        for e in reversed(log):  # oldest first, like the terminal's own output
+            label, level = _AP_KIND.get(e["kind"], ("Nota", "info"))
+            sym = "" if e["symbol"] in ("", "—") else f" {e['symbol']}"
+            ctx.print(f"{_ago(e['ts'])} · {label}{sym}: {e['text']}", level)
+        ctx.data = log
+        return
+
+    if sub in _AP_CLOSE:
+        target = args[1] if len(args) > 1 else None
+        if not target:
+            ctx.fail("Indica qué cerrar: el id de la posición, un símbolo o 'all'")
+        try:
+            if target.lower() in _ALL:
+                closed = await paper.close_autopilot(all=True)
+            elif target.lstrip("#").isdigit():
+                closed = await paper.close_autopilot(int(target.lstrip("#")))
+            else:
+                closed = await paper.close_autopilot(symbol=await ctx.symbol(target))
+        except PaperError as exc:
+            ctx.fail(str(exc))
+        if not closed:
+            ctx.print("NEXUS no tenía posiciones abiertas", "muted")
+        for p in closed:
+            ctx.print(f"Cerrado #{p['id']} {p['symbol']} {SIDE_LABEL.get(p['side'], p['side'])} de NEXUS "
+                      f"{fmt_r(p.get('r_multiple'))} ({fmt_pct(p.get('pnl_pct'), 2)} · {fmt_num(p.get('pnl'), 2, True)})",
+                      "success" if (p.get("pnl") or 0) > 0 else "warn")
+        ctx.data = {"closed": closed}
+        return
+
+    if sub in _AP_RESET:
+        amount = _number(ctx, args[1], "el saldo inicial") if len(args) > 1 else None
+        if not ctx.flag("yes"):
+            ctx.print("Esto borra las posiciones, el historial y las decisiones de la cuenta de NEXUS (tu cuenta no "
+                      "cambia y lo aprendido por NEXUS y el filtro no se pierde). Repite con --yes para confirmar.",
+                      "warn")
+            return
+        try:
+            await paper.reset(amount, account_id=3)
+        except PaperError as exc:
+            ctx.fail(str(exc))
+        snap = await paper.autopilot_snapshot()
+        ctx.print(f"✔ Cuenta de NEXUS reiniciada con saldo {fmt_num(snap['account']['balance'], 2)}", "success")
+        ctx.data = snap
+        return
+
+    # settings: on / off, a source with its symbols or candidates, and flags, in any combination
+    update: dict[str, Any] = {}
+    rest = args
+    if sub in _ON or sub in _OFF:
+        update["enabled"] = sub in _ON
+        rest = args[1:]
+    elif sub in _AP_STATUS:
+        rest = args[1:]
+    if rest:
+        head = rest[0].lower()
+        if head in _AP_SCANNER:
+            update["source"] = "scanner"
+            if len(rest) > 2:
+                ctx.fail(f"Sobra «{rest[2]}». Uso: autopilot escaner [N]")
+            if len(rest) == 2:
+                update["scanner_top"] = _number(ctx, rest[1], "el número de candidatos del escáner")
+        elif head in _AP_LIST or "enabled" in update:  # autopilot on btc eth = a fixed list, like `auto on btc eth`
+            symbols = rest[1:] if head in _AP_LIST else rest
+            if not symbols:
+                ctx.fail("Faltan los símbolos de la lista. Ejemplo: autopilot lista btc eth sol")
+            update["source"] = "list"
+            update["symbols"] = [await ctx.symbol(s) for s in symbols]
+        else:
+            ctx.fail(f"No entiendo «{rest[0]}». Uso: {AUTOPILOT_USAGE}")
+    if ctx.flag("tf") is not None:
+        update["tf"] = _tf(ctx, str(ctx.flag("tf")))
+    for flag, key, what in (("max", "max_positions", "el máximo de posiciones"),
+                            ("risk", "risk_pct", "el riesgo por operación"),
+                            ("top", "scanner_top", "el número de candidatos del escáner")):
+        value = _ap_number(ctx, flag, what)
+        if value is not None:
+            update[key] = value
+    try:
+        snap = await paper.set_autopilot(**update) if update else await paper.autopilot_snapshot()
+    except PaperError as exc:
+        ctx.fail(str(exc))
+    st = snap["autopilot"]
+    if update.get("enabled") is True:
+        if st["source"] == "list":
+            what = (f"su lista fija ({', '.join(st['symbols'])})" if st["symbols"]
+                    else "su lista fija, todavía vacía (añade símbolos: autopilot lista btc eth)")
+        else:
+            what = f"las mejores oportunidades TOMAR del último escaneo (hasta {st['scanner_top']})"
+        ctx.print(f"✔ NEXUS automática activada: opera sola en su cuenta demo (simulada) con {what}. Solo entra con "
+                  f"señal de NEXUS y filtro TOMAR, al cierre de cada vela de {st['tf']}, y solo mientras el servidor "
+                  "está en marcha", "success")
+        if not config.BACKGROUND:
+            ctx.print("Nota: los bucles en segundo plano están deshabilitados en este proceso", "muted")
+    elif update.get("enabled") is False:
+        ctx.print("NEXUS automática pausada: no abre posiciones nuevas; las abiertas siguen con su stop y sus objetivos",
+                  "warn")
+    elif update:
+        ctx.print("✔ Cambios de NEXUS automática guardados", "success")
+    _print_autopilot(ctx, snap)
+    ctx.data = snap
+
+
 # ----------------------------------------------------------------------------- pending orders (limit / stop)
 
 _NUM_PLAIN = re.compile(r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")  # 95000 · 95000.5 · 1.0850

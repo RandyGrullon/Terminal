@@ -238,6 +238,10 @@ actives en «Cómo opera»:
   datos).
 - Puedes **pausarla** (no abre nada nuevo; sus posiciones siguen con su stop y sus objetivos), cerrar sus posiciones
   a mano o **reiniciarla** con otro saldo.
+- **Desde la terminal** (alias `piloto`): `autopilot` muestra su estado; `autopilot on btc eth --tf 4h --max 3 --risk
+  0,5` la activa con una lista fija; `autopilot escaner 10` usa el escáner; `autopilot off` la pausa; `autopilot pos`
+  y `autopilot log` muestran sus posiciones y sus decisiones; `autopilot close <id|símbolo|all>` cierra a mano y
+  `autopilot reset [saldo] --yes` la reinicia (sin `--yes` solo avisa).
 
 Es un experimento honesto, no una promesa: la validación publicada (`docs/VALIDATION.md`) **no encontró ventaja**, así
 que lo esperable es un resultado parecido a entrar al azar, menos las comisiones. Sirve para ver en tiempo real cómo se
@@ -337,6 +341,7 @@ alias en español (`señal btc`, `comprar eth`, `posiciones`).
 | `sim start --speed 8` · `sim start replay btc 1h` · `sim stop` | Simulador de mercado |
 | `buy btc --risk 1` · `sell eth` · `positions` · `close all` · `account` | Cuenta demo a mercado |
 | `limit <símbolo> <precio> [--exp 2d]` · `stop <símbolo> <precio>` · `orders` · `cancel all` · `risk` | Órdenes pendientes y riesgo de cartera |
+| `autopilot` · `autopilot on btc eth --tf 4h` · `autopilot escaner 10` · `autopilot off` · `autopilot pos` · `autopilot log` | NEXUS automática (la cuenta demo propia de NEXUS) |
 | `learning` · `predictions` · `skill` · `skill replay` | Aprendizaje y habilidad frente a la referencia |
 | `validar` · `validar resultado` | Validación walk-forward |
 | `alertas` · `alertas test` | Alertas por Telegram y correo |

@@ -73,8 +73,8 @@ uv pip install --python backend/.tmp/pgenv/Scripts/python.exe pgserver
 backend/.tmp/pgenv/Scripts/python.exe tools/pg_start.py backend/.tmp/pgdata   # imprime la URI
 ```
 
-Estado tras añadir «NEXUS automática» (05/11/2026, en Windows): backend 1942 passed / 27 skipped sobre SQLite y
-1953 passed / 16 skipped sobre PostgreSQL (las omisiones son las de PostgreSQL, red, solo Linux / POSIX y el lock
+Estado tras añadir «NEXUS automática» y su comando `autopilot` (05/11/2026, en Windows): backend 1946 passed /
+27 skipped sobre SQLite y 1957 passed / 16 skipped sobre PostgreSQL (las omisiones son las de PostgreSQL, red, solo Linux / POSIX y el lock
 exacto); UI 244 pruebas en 9 suites; `tsc` sin errores; contrato 127 comprobaciones · 0 fallos · 6 avisos (sin red,
 `--symbol SIM:NEXUS` y base nueva, como en CI: los avisos son listas vacías y ningún informe de validación guardado).
 La prueba más lenta es `tests/test_imp_engine_repaint_history.py` (regresión de repintado: 300 cierres, ~2,5 min).

@@ -2524,11 +2524,13 @@ class PaperEngine:
         await self.publish(AUTOPILOT_ACCOUNT)
         return await self.autopilot_snapshot()
 
-    async def close_autopilot(self, position_id: int | None = None, all: bool = False) -> list[dict]:
-        """The user closes NEXUS's positions by hand (one by id, or all of them): noted in its decision log."""
-        if position_id is None and not all:
+    async def close_autopilot(self, position_id: int | None = None, all: bool = False, *,
+                              symbol: str | None = None) -> list[dict]:
+        """The user closes NEXUS's positions by hand (one by id, those of a symbol, or all of them): noted in its
+        decision log."""
+        if position_id is None and not all and not symbol:
             raise PaperError("Indica la posición a cerrar o «all» para cerrarlas todas")
-        closed = await self.close_position(position_id, None, all, account_id=AUTOPILOT_ACCOUNT)
+        closed = await self.close_position(position_id, symbol, all, account_id=AUTOPILOT_ACCOUNT)
         for pos in closed:
             self._autopilot_note(pos["symbol"], "close", f"Cerrada a mano a {fmt_price(pos.get('exit_price'))} "
                                                          f"({fmt_r(pos.get('r_multiple'))})")

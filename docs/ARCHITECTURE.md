@@ -727,7 +727,8 @@ Python API: `await rt.scanner.quick_signal(symbol, tf) -> dict | None` (QuickSig
 `from app.sim.backtest import run_backtest`; `rt.paper.snapshot(account_id=1)`; `rt.paper.place_order(...)`,
 `cancel_orders(order_id, symbol, all, account_id=1)`, `list_orders(account_id, status, limit)`, `pending_orders`,
 `risk_state(1)` (PaperRisk); `autopilot_snapshot()`, `set_autopilot(enabled=, source=, symbols=, tf=, max_positions=,
-risk_pct=, scanner_top=)`, `close_autopilot(position_id, all)`, `reset(..., account_id=3)`; `rt.sim.state()`; `from app.sim.evaluator import skill_report, replay_report, ReplayBusy`.
+risk_pct=, scanner_top=)`, `close_autopilot(position_id, all, symbol=)`, `reset(..., account_id=3)`;
+`rt.sim.state()`; `from app.sim.evaluator import skill_report, replay_report, ReplayBusy`.
 
 ### 6.5 PyChart scripts [BE-SCRIPT]
 ```
@@ -1195,6 +1196,13 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     `ordenes`, `órdenes`), `cancel <id|#id|símbolo|all>` (alias `cancelar`), `risk` (alias `riesgo`: open risk against
     its cap, positions per group, the day's realized P&L against the daily limit, pending orders). A risk block
     prints the rule and says `--force` cannot bypass it; `stop` without arguments suggests `sim stop`.
+    `autopilot` (aliases `piloto`, `automatica`, `automática`) drives NEXUS's own account: no argument / `estado` =
+    status (what it watches, NEXUS's read of each symbol's last bar, account, winners as "x de n" with a percentage
+    only from 30 closed trades, the honest note); `on` / `off` (the same words as `auto`), `lista <símbolos…>` (also
+    `on btc eth`), `escaner [N]`, and the flags `--tf`, `--max`, `--risk` (Spanish decimals accepted), `--top`, in any
+    combination, saved through `set_autopilot` (its Spanish errors); `pos`, `log` (oldest first), `close
+    <id|símbolo|all>` (`close_autopilot`, noted in its log) and `reset [saldo] --yes` (without `--yes` it only warns).
+    An unknown word is refused with the usage, never read as a symbol.
 
 ## 12. PyChart (BE-SCRIPT) — Python scripts with a Pine-like API
 
@@ -2002,7 +2010,7 @@ Demo account (simulated, never a broker):
   candidates come from the scan's own timeframe, while entries are decided on `autopilot.tf`. Positions opened at
   another `autopilot.tf` are no longer followed by NEXUS's exits after a change of timeframe (their stop and targets
   still manage them). In a multi-instance deployment it trades on the active (leader) instance only, like every
-  background service. No terminal command yet: it is driven from its view and `/api/paper/autopilot`.
+  background service.
 
 Calendar and alerts:
 - **Curated dates need yearly upkeep**: agencies can move a release (as in the 2025 shutdown). The live BLS / BEA
