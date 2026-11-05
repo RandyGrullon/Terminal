@@ -95,6 +95,8 @@ AUTOPILOT_SOURCES = ("scanner", "list")
 AUTOPILOT_LOG_MAX = 30
 AUTOPILOT_REFRESH_S = 60.0  # how often the autopilot looks for a newer scan (its candidates)
 AUTOPILOT_SETTLE_S = 0.5  # quiet time after autopilot.* settings change (saved one key at a time) before re-reading
+AUTOPILOT_STATE_KEY = "autopilot.state"  # meta: its decision log and last read per symbol (kept across restarts)
+AUTOPILOT_KINDS = ("open", "close", "skip", "info")
 AUTOPILOT_NOTE = (
     "Cuenta 100 % simulada que opera sola con las señales de NEXUS y el filtro; nunca se envía nada a un bróker. "
     "La validación publicada (docs/VALIDATION.md) no encontró ventaja: lo esperable son resultados parecidos a "
@@ -477,6 +479,7 @@ class AutoProfile:
     max_positions: int  # 0 = no cap beyond one position per symbol
     risk_pct: float | None  # None = risk.per_trade_pct
     label: str  # prefix of its events ("Auto", "NEXUS automática")
+    entries: bool = True  # False: it only follows the exits of the positions it holds (never opens one)
 
 
 class PaperEngine:
@@ -511,6 +514,8 @@ class PaperEngine:
         self._autopilot_seq = 0  # decision-log entries written so far (a check that wrote one publishes the account)
         self._autopilot_last: dict[str, dict[str, Any]] = {}  # symbol -> NEXUS's read of its last decided bar
         self._autopilot_reads = 0  # reads recorded so far (a check that recorded one publishes the account)
+        self._autopilot_dirty = False  # its log / reads changed since they were last saved (meta autopilot.state)
+        self._autopilot_saving = False
         self._stale_warned: set[str] = set()  # symbols whose "sin precio en vivo" warning was already emitted
         # pending orders (account 1): id -> order dict; ids whose fill is being decided (gate at the fill price)
         self._orders: dict[int, dict] = {}
@@ -546,6 +551,7 @@ class PaperEngine:
         await self._load_day_low()
         await self._expire_orders()  # orders whose expiry passed while NEXUS was stopped
         await self._register_listener()
+        await self._load_autopilot_state()
         self._autopilot_on = self._autopilot_cfg()["enabled"]
         if self.rt.settings is not None:
             self.rt.settings.add_listener(self._on_setting)
@@ -564,6 +570,11 @@ class PaperEngine:
             except (asyncio.CancelledError, Exception):
                 pass
         self._loop_task = None
+        if self._autopilot_dirty:  # its last decisions are not lost with the stop
+            try:
+                await self._autopilot_write()
+            except Exception:
+                pass
         hub = self.rt.hub
         for symbol, tf, owner in list(self._subs):
             try:
@@ -640,10 +651,15 @@ class PaperEngine:
         any SIM:* symbol), so the evaluator can keep them out of the global gate learner; 'paper' otherwise."""
         return "sim" if origin == "sim" or symbol.upper().startswith("SIM:") else "paper"
 
+    @staticmethod
+    def _follows(prof: AutoProfile, pos: dict) -> bool:
+        """This trader manages the position: same account and origin, a symbol it trades and the position's tf."""
+        return (pos["origin"] == prof.origin and pos["account_id"] == prof.account_id and pos["symbol"] in prof.symbols
+                and (pos.get("tf") or "1h") == prof.tf)
+
     def _auto_follows(self, pos: dict) -> bool:
         """True while an automatic trader manages this position (it decides its exits at the bar close)."""
-        return any(pos["origin"] == prof.origin and pos["account_id"] == prof.account_id and pos["symbol"] in prof.symbols
-                   and (pos.get("tf") or "1h") == prof.tf for prof in self._auto_profiles())
+        return any(self._follows(prof, pos) for prof in self._auto_profiles())
 
     # ------------------------------------------------------------------ automatic traders
 
@@ -675,22 +691,105 @@ class PaperEngine:
             "scanner_top": int(num("autopilot.scanner_top", 10, 1, 30)),
         }
 
+    def _autopilot_held(self) -> dict[str, set[str]]:
+        """tf -> symbols of the positions NEXUS's own trader holds."""
+        held: dict[str, set[str]] = {}
+        for pos in self._open.values():
+            if pos["account_id"] == AUTOPILOT_ACCOUNT and pos["origin"] == "autopilot":
+                held.setdefault(pos.get("tf") or "1h", set()).add(pos["symbol"])
+        return held
+
     def _autopilot_profile(self) -> AutoProfile | None:
-        """NEXUS's own account while it is on: its candidates plus the symbols it holds (their exits are its own)."""
+        """NEXUS's own account while it is on: its candidates plus the symbols it holds at autopilot.tf."""
         cfg = self._autopilot_cfg()
         if not cfg["enabled"]:
             return None
-        held = {p["symbol"] for p in self._open.values() if p["account_id"] == AUTOPILOT_ACCOUNT}
-        return AutoProfile(AUTOPILOT_ACCOUNT, "autopilot", cfg["tf"], frozenset(self._autopilot_watch) | held,
+        held = self._autopilot_held().get(cfg["tf"], set())
+        return AutoProfile(AUTOPILOT_ACCOUNT, "autopilot", cfg["tf"], frozenset(self._autopilot_watch) | frozenset(held),
                            cfg["max_positions"], cfg["risk_pct"], "NEXUS automática")
 
+    def _autopilot_profiles(self) -> list[AutoProfile]:
+        """Its trader, plus an exits-only trader per other timeframe it still holds positions on (opened before a
+        change of autopilot.tf): those keep NEXUS's exits on the bars they were opened on; nothing new opens there."""
+        main = self._autopilot_profile()
+        if main is None:
+            return []
+        extra = [AutoProfile(AUTOPILOT_ACCOUNT, "autopilot", tf, frozenset(syms), main.max_positions, main.risk_pct,
+                             main.label, entries=False)
+                 for tf, syms in sorted(self._autopilot_held().items()) if tf != main.tf]
+        return [main, *extra]
+
     def _auto_profiles(self) -> list[AutoProfile]:
-        return [prof for prof in (self._user_auto_profile(), self._autopilot_profile()) if prof is not None]
+        user = self._user_auto_profile()
+        return ([user] if user is not None else []) + self._autopilot_profiles()
 
     def _autopilot_note(self, symbol: str, kind: str, text: str) -> None:
         """Decision log of NEXUS's own account (newest first in its status); `kind`: open | close | skip | info."""
         self._autopilot_seq += 1
         self._autopilot_log.appendleft({"ts": now_ms(), "symbol": symbol, "kind": kind, "text": text[:1].upper() + text[1:]})
+        self._autopilot_save_soon()
+
+    def _autopilot_save_soon(self) -> None:
+        """Save its log and reads in the background (one writer: each write stores the newest state)."""
+        self._autopilot_dirty = True
+        if self._started and not self._autopilot_saving:
+            self._autopilot_saving = True
+            try:
+                self._spawn(self._autopilot_saver())
+            except RuntimeError:  # no running loop
+                self._autopilot_saving = False
+
+    async def _autopilot_saver(self) -> None:
+        try:
+            while self._autopilot_dirty:
+                self._autopilot_dirty = False
+                try:
+                    await self._autopilot_write()
+                except asyncio.CancelledError:
+                    self._autopilot_dirty = True  # stop() saves it
+                    raise
+                except Exception as exc:
+                    if self._log.should_log("autopilot-save", 600):
+                        self._emit("warn", "paper", f"NEXUS automática: no se pudo guardar su registro: {exc}")
+                    return
+        finally:
+            self._autopilot_saving = False
+
+    async def _autopilot_write(self) -> None:
+        state = {"log": list(self._autopilot_log), "reads": {k: dict(v) for k, v in self._autopilot_last.items()}}
+        await self.rt.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                                 (AUTOPILOT_STATE_KEY, json_dumps(state)))
+
+    async def _load_autopilot_state(self) -> None:
+        """Its decision log and last reads as they were saved (a restart keeps them; malformed rows are skipped)."""
+        try:
+            raw = await self.rt.db.fetchval("SELECT value FROM meta WHERE key=?", (AUTOPILOT_STATE_KEY,))
+        except Exception:
+            raw = None
+        data = json_loads(raw, None)
+        if not isinstance(data, dict):
+            return
+        log = []
+        for e in data.get("log") or []:
+            if (isinstance(e, dict) and safe_float(e.get("ts")) is not None and isinstance(e.get("symbol"), str)
+                    and e.get("kind") in AUTOPILOT_KINDS and isinstance(e.get("text"), str)):
+                log.append({"ts": int(e["ts"]), "symbol": e["symbol"], "kind": e["kind"], "text": e["text"]})
+        self._autopilot_log.clear()
+        self._autopilot_log.extend(log[:AUTOPILOT_LOG_MAX])  # stored newest first, as shown
+        reads: dict[str, dict[str, Any]] = {}
+        saved = data.get("reads")
+        for sym, r in (saved.items() if isinstance(saved, dict) else ()):
+            if not isinstance(r, dict) or safe_float(r.get("bar_time")) is None or not isinstance(r.get("label"), str):
+                continue
+            try:
+                tf = normalize_tf(r.get("tf"))
+            except (ValueError, TypeError):
+                continue
+            action = r.get("action")
+            reads[str(sym).upper()] = {"bar_time": int(r["bar_time"]), "tf": tf,
+                                       "action": action if isinstance(action, str) and action else None,
+                                       "label": r["label"]}
+        self._autopilot_last = reads
 
     def _slip_pct(self) -> float:
         return float(self._setting("risk.slippage_pct", 0.02) or 0.0)
@@ -1968,6 +2067,7 @@ class PaperEngine:
             self._emit("info", "paper", f"Cuenta NEXUS automática reiniciada con saldo {fmt_num(amount, 2)}")
             self._autopilot_log.clear()
             self._autopilot_last.clear()
+            self._autopilot_save_soon()
         await self.publish(account_id)
         if config.BACKGROUND:
             await self._sync_subscriptions()
@@ -2219,13 +2319,13 @@ class PaperEngine:
         try:
             async with self._auto_locks.setdefault((acct, symbol), asyncio.Lock()):
                 mine = [p for p in self._open.values() if p["account_id"] == acct and p["symbol"] == symbol]
-                followed = [p for p in mine if self._auto_follows(p)]
+                followed = [p for p in mine if self._follows(prof, p)]
                 if mine and not followed:
                     return  # the user's own position: no pyramiding and nothing for the auto-trader to manage
                 if not followed and not self._newest_bar(symbol, tf, upto, acct):
                     return  # flat, and a newer bar has closed meanwhile: entries are decided on that one
                 current = await asyncio.wait_for(self.rt.nexus.current(symbol, tf, upto=upto), timeout=90)
-                if own:
+                if own and prof.entries:
                     self._autopilot_read(symbol, tf, upto, current)
                 if not isinstance(current, dict):
                     if own and self._log.should_log(f"ap-nodata:{symbol}:{tf}", 6 * 3600):
@@ -2234,6 +2334,8 @@ class PaperEngine:
                     return
                 for pos in followed:
                     await self._auto_exit(pos, current)
+                if not prof.entries:
+                    return  # an exits-only trader (a position from before a change of timeframe)
                 if not self._newest_bar(symbol, tf, upto, acct):
                     return  # a newer bar has closed meanwhile: entries are decided on that one
                 if any(p["account_id"] == acct and p["symbol"] == symbol for p in self._open.values()):
@@ -2289,7 +2391,7 @@ class PaperEngine:
             if own:
                 self._autopilot_note(symbol, "info", f"No se pudo operar: {exc}")
         except Exception as exc:
-            if own:
+            if own and prof.entries:
                 self._autopilot_read(symbol, tf, upto, None, failed=True)
             if self._log.should_log(f"auto:{acct}:{symbol}", 300):
                 self._emit("error", "paper", f"{who} {symbol}: {type(exc).__name__}: {exc}")
@@ -2312,6 +2414,7 @@ class PaperEngine:
         self._autopilot_reads += 1
         self._autopilot_last[symbol] = {"bar_time": int(upto) * 1000 if upto else now_ms(), "tf": tf,
                                         "action": action, "label": label}
+        self._autopilot_save_soon()
 
     def _newest_bar(self, symbol: str, tf: str, upto: int | None, account_id: int = 1) -> bool:
         """False when a newer closed bar of (symbol, tf) has been handed to that account's trader since bar `upto`."""
@@ -2418,8 +2521,11 @@ class PaperEngine:
         changed = watch != self._autopilot_watch
         self._autopilot_watch = watch
         held = {p["symbol"] for p in self._open.values() if p["account_id"] == AUTOPILOT_ACCOUNT}
-        for sym in [s for s in self._autopilot_last if s not in watch and s not in held]:
+        gone = [s for s in self._autopilot_last if s not in watch and s not in held]
+        for sym in gone:
             self._autopilot_last.pop(sym, None)
+        if gone:
+            self._autopilot_save_soon()
         if config.BACKGROUND:
             await self._sync_subscriptions()
         prof = self._autopilot_profile()

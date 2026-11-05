@@ -433,7 +433,9 @@ scan_results paper_accounts paper_positions paper_fills events scripts backtests
   meta (JSON)`; index `idx_orders_status (account_id, status)`.
 - `meta(key, value)` keys: `schema_version` (latest applied migration, informational), `watchlist_seeded`,
   `prediction_daily` (backfill done), `paper.day_low.<account>` = `{day, low}` (the UTC day's worst realized P&L for
-  the daily loss limit, §11; removed by a reset of that account).
+  the daily loss limit, §11; removed by a reset of that account), `autopilot.state` = `{log, reads}` (NEXUS
+  automática's decision log, newest first, ≤ 30, and its last read per symbol; restored at start, emptied by a reset
+  of account 3, §11).
 
 **Migrations** (`app.migrations`, applied by `init_schema` at every start):
 - Version 1 = the **baseline**: `schema.sql` / `schema_pg.sql` as they were when versioning started, **frozen**
@@ -687,8 +689,9 @@ GET  /api/learning/replay?days=&model_key=                       -> scanner repl
   `AutopilotStatus {enabled, account_id: 3, source, tf, symbols, max_positions, risk_pct, scanner_top, watching:
   AutopilotWatch[] {symbol, why: escáner|lista|posición abierta, direction?, last?: AutopilotLast {bar_time (ms, open
   time of the last decided bar), tf, action (null = no analysis), label} | null}, scan: AutopilotScan {id, finished_at
-  (null while running; a failed scan is no source), opportunities} | null, log: AutopilotLogEntry[] {ts (ms), symbol ('—' = not about one symbol), kind:
-  open|close|skip|info, text} (newest first, ≤ 30, in memory: emptied by a restart), note}`. 400 texts: 'Fuente no
+  (null while running; a failed scan is no source), opportunities} | null, log: AutopilotLogEntry[] {ts (ms),
+  symbol ('—' = not about one symbol), kind: open|close|skip|info, text} (newest first, ≤ 30, kept across restarts
+  in meta `autopilot.state`), note}`. 400 texts: 'Fuente no
   válida: usa «scanner» (escáner) o «list» (lista fija)', 'El máximo de posiciones debe ser un número entero entre 1
   y 20', 'El riesgo por operación (%) debe ser un número entre 0,1 y 5,0', 'El número de candidatos del escáner debe
   ser un número entero entre 1 y 30', 'Como máximo 30 símbolos en la lista', an invalid tf. `Position.origin` gains
@@ -1136,25 +1139,28 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     closed-bar trader as auto-trading (`AutoProfile`: account, origin, tf, symbols, position cap, risk %), with its
     own account and origin `autopilot`. Candidates: `source` list = `autopilot.symbols`; scanner = the first
     `autopilot.scanner_top` rows with `opportunity` (gate TOMAR + NEXUS signal, §10) of the newest **finished** scan
-    (a running or failed scan gives none), re-read every 60 s by the monitor and at once when its settings change.
-    A new candidate is decided at once on its last closed bar (`floor_time(now) − tf`; synthetic `SIM:*` markets wait
+    (a running or failed scan gives none), re-read every 60 s by the monitor and at once when its settings change. A
+    new candidate is decided at once on its last closed bar (`floor_time(now) − tf`; synthetic `SIM:*` markets wait
     for their next closed bar), then on every close of `autopilot.tf`; symbols it holds stay watched ('posición
-    abierta') after a newer scan drops them, so its exits stay its own. Entries need NEXUS BUY / SELL and gate TOMAR
-    (ESPERAR / NO TOMAR are logged as discarded), are sized at `autopilot.risk_pct` of the account's equity, and
+    abierta') after a newer scan drops them, so its exits stay its own. After a change of `autopilot.tf`, positions
+    opened on the old timeframe keep NEXUS's exits on their own bars (an exits-only `AutoProfile`, `entries=False`,
+    per timeframe it still holds; it never opens) and the new timeframe adds no second position on those symbols (each
+    trader follows only the positions of its own tf, `PaperEngine._follows`). Entries need NEXUS BUY / SELL and gate
+    TOMAR (ESPERAR / NO TOMAR are logged as discarded), are sized at `autopilot.risk_pct` of the account's equity, and
     respect `autopilot.max_positions` (checked atomically with the insert in `open_position(max_positions=…)`, rule
     `max_positions`: every candidate's bar closes at the same second and their decisions run concurrently) and the
     portfolio risk rules of account 3. Settings changed elsewhere (Ajustes saves one key at a time) are re-read once
     they settle (0.5 s), never half-saved; `set_autopilot` saves every key first and re-reads once. Turning it on or
     off emits an info event and a log entry; paused, its open positions keep their stop and targets (1m feed) but no
-    decision is taken. Decision log (`autopilot_status().log`, ≤ 30, in memory): opened (price, SL, gate), discarded
-    and why (filter, cap, risk rule), closed (NEXUS's exit or by hand with `close_autopilot`), missing data and errors
-    (at most one note per symbol every 6 h / 5 min). Each watched symbol also carries NEXUS's read of its last decided
-    bar (`last`: action and label, e.g. ESPERAR — most bars give no entry and are not logged), at the current tf only.
-    Its events (opened, closed, warnings) are prefixed 'NEXUS automática · ' in the event log and never become
-    alerts (app.alerts.classify forwards account 1 only). WS: `paper`
-    topic, `{type: 'paper_autopilot', ...AutopilotSnapshot}` after each change and every 5 s while it holds
-    positions. Simulated only: nothing is sent to a broker, and the status `note` repeats that the published
-    validation found no edge (docs/VALIDATION.md).
+    decision is taken. Decision log (`autopilot_status().log`, ≤ 30, saved with the reads in meta `autopilot.state` by
+    one background writer and restored at start; a damaged value is skipped): opened (price, SL, gate), discarded and
+    why (filter, cap, risk rule), closed (NEXUS's exit or by hand with `close_autopilot`), missing data and errors (at
+    most one note per symbol every 6 h / 5 min). Each watched symbol also carries NEXUS's read of its last decided bar
+    (`last`: action and label, e.g. ESPERAR — most bars give no entry and are not logged), at the current tf only. Its
+    events (opened, closed, warnings) are prefixed 'NEXUS automática · ' in the event log and never become alerts
+    (app.alerts.classify forwards account 1 only). WS: `paper` topic, `{type: 'paper_autopilot',
+    ...AutopilotSnapshot}` after each change and every 5 s while it holds positions. Simulated only: nothing is sent
+    to a broker, and the status `note` repeats that the published validation found no edge (docs/VALIDATION.md).
   - **gate_log rows from paper**: `time` = the decision bar (`gate.time`, else the fill time), `target_at` by the
     common convention (§7 Watcher), `source` = `sim` for simulated markets (simulator replay and synthetic trades,
     any `SIM:*` symbol), otherwise `paper`.
@@ -2005,12 +2011,10 @@ Demo account (simulated, never a broker):
   `sell` commands still read their numeric flags with `ctx.flag_float`, so an unparsable value such as `--sl
   95.000,5` falls back to the NEXUS level (the printed SL shows the level used).
 - **NEXUS automática (account 3)**: it decides only while the server runs; bars that closed while it was stopped are
-  not replayed (after a start each candidate is decided once on its last closed bar). Its decision log and the
-  per-symbol reads live in memory (a restart empties them; positions and history are in the database). Scanner
-  candidates come from the scan's own timeframe, while entries are decided on `autopilot.tf`. Positions opened at
-  another `autopilot.tf` are no longer followed by NEXUS's exits after a change of timeframe (their stop and targets
-  still manage them). In a multi-instance deployment it trades on the active (leader) instance only, like every
-  background service.
+  not replayed (after a start each candidate is decided once on its last closed bar). Its decision log keeps the last
+  30 entries only. Scanner candidates come from the scan's own timeframe, while entries are decided on
+  `autopilot.tf`. Paused, NEXUS's exits are not followed either (stop and targets only). In a multi-instance
+  deployment it trades on the active (leader) instance only, like every background service.
 
 Calendar and alerts:
 - **Curated dates need yearly upkeep**: agencies can move a release (as in the 2025 shutdown). The live BLS / BEA

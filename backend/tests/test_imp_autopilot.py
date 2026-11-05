@@ -390,6 +390,83 @@ def test_settings_saved_one_by_one_are_read_once_settled(runtime_factory, no_bac
     asyncio.run(scenario())
 
 
+def test_decision_log_and_reads_survive_a_restart(runtime_factory, no_background):
+    async def scenario():
+        async with runtime_factory() as rt:
+            engine = await _engine(rt, {SYM: 100.0}, BarNexus(default=make_current("BUY")))
+            await engine.set_autopilot(enabled=True, source="list", symbols=[SYM])
+            await _settle(engine)
+            log, reads = engine.autopilot_status()["log"], dict(engine._autopilot_last)
+            assert [e["kind"] for e in log] == ["open", "info"] and reads[SYM]["label"] == "COMPRAR"
+            await engine.stop()
+            again = pp.PaperEngine(rt)  # the server restarts on the same database
+            await again.start()
+            assert again.autopilot_status()["log"] == log and again._autopilot_last == reads
+            await again._refresh_autopilot(force=True)  # the monitor rebuilds its candidates, each with its read
+            await _settle(again)
+            assert again.autopilot_status()["watching"][0]["last"]["label"] == "COMPRAR"
+            await again.reset(None, account_id=3)  # a reset empties them, and that is saved too
+            await _settle(again)
+            await again.stop()
+            third = pp.PaperEngine(rt)
+            await third.start()
+            assert third.autopilot_status()["log"] == [] and third._autopilot_last == {}
+            await third.stop()
+            # a damaged saved state never breaks the start: bad rows are skipped
+            await rt.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("autopilot.state", (
+                '{"log": [{"ts": "x"}, {"ts": 1, "symbol": "A:B", "kind": "weird", "text": "t"}, '
+                '{"ts": 2, "symbol": "C:D", "kind": "skip", "text": "ok"}], "reads": {"C:D": {"bar_time": 5, '
+                '"tf": "7x", "label": "L"}, "e:f": {"bar_time": 6, "tf": "1h", "action": "", "label": "ESPERAR"}}}')))
+            fourth = pp.PaperEngine(rt)
+            await fourth.start()
+            assert fourth.autopilot_status()["log"] == [{"ts": 2, "symbol": "C:D", "kind": "skip", "text": "ok"}]
+            assert fourth._autopilot_last == {"E:F": {"bar_time": 6, "tf": "1h", "action": None, "label": "ESPERAR"}}
+            await rt.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("autopilot.state", "{no"))
+            fifth = pp.PaperEngine(rt)
+            await fifth.start()
+            assert fifth.autopilot_status()["log"] == []
+            await fourth.stop()
+            await fifth.stop()
+
+    asyncio.run(scenario())
+
+
+def test_positions_from_before_a_timeframe_change_keep_nexus_exits(runtime_factory, no_background):
+    """After autopilot.tf changes, a position opened on the old timeframe keeps NEXUS's exits on its own bars (an
+    exits-only trader); the new timeframe never adds a second position on that symbol."""
+
+    async def scenario():
+        async with runtime_factory() as rt:
+            nexus = BarNexus(default=make_current("BUY"))
+            engine = await _engine(rt, {SYM: 100.0}, nexus)
+            await engine.set_autopilot(enabled=True, source="list", symbols=[SYM])
+            await _settle(engine)
+            pos = engine.open_positions(3)[0]
+            assert pos["tf"] == "1h"
+            t1 = engine._auto_bar[(3, SYM, "1h")]
+            await engine.set_autopilot(tf="4h")
+            await _settle(engine)
+            assert [(p.tf, p.entries, sorted(p.symbols)) for p in engine._auto_profiles()] == [
+                ("4h", True, [SYM]), ("1h", False, [SYM])]
+            assert engine._auto_follows(engine._open[pos["id"]])
+            # a 4h close never touches the 1h position, nor opens a second one (BUY again)
+            t4 = engine._auto_bar[(3, SYM, "4h")]
+            await engine._on_candle(SYM, "4h", _candle(t4 + 4 * H), True)
+            await _settle(engine)
+            assert [p["id"] for p in engine.open_positions(3)] == [pos["id"]]
+            # its own 1h close: NEXUS's confirmed opposite signal closes it, and nothing opens on 1h any more
+            nexus.closed[t1 + H] = make_current("SELL", time=t1 + H, prob_up=0.3, score=-0.5, long_verdict="AVOID",
+                                                short_verdict="TAKE")
+            await engine._on_candle(SYM, "1h", _candle(t1 + H), True)
+            await _settle(engine)
+            assert engine.open_positions(3) == []
+            assert [h["exit_reason"] for h in await engine.history(3)] == ["REVERSE"]
+            assert [p.tf for p in engine._auto_profiles()] == ["4h"]  # no exits-only trader left
+            await engine.stop()
+
+    asyncio.run(scenario())
+
+
 def test_set_autopilot_rejects_bad_values_in_spanish(runtime_factory, no_background):
     async def scenario():
         async with runtime_factory() as rt:

@@ -234,8 +234,9 @@ actives en «Cómo opera»:
 - **Límites**: máximo de posiciones abiertas (5), riesgo por operación (1 % de su capital, hasta el stop) y las mismas
   reglas de riesgo de cartera que tu cuenta (*Ajustes → Riesgo de cartera*), contadas aparte.
 - **Registro de decisiones**: qué abrió, qué descartó y por qué (filtro, límite de posiciones, riesgo) y qué cerró.
-  Se guarda en memoria: al reiniciar el servidor empieza vacío (las posiciones y el historial sí quedan en la base de
-  datos).
+  Se guardan las 30 últimas en la base de datos, así que siguen ahí después de reiniciar el servidor.
+- Si **cambias la temporalidad** con posiciones abiertas, NEXUS sigue cerrándolas con sus reglas en la temporalidad
+  en la que las abrió, y no abre una segunda posición en esos símbolos.
 - Puedes **pausarla** (no abre nada nuevo; sus posiciones siguen con su stop y sus objetivos), cerrar sus posiciones
   a mano o **reiniciarla** con otro saldo.
 - **Desde la terminal** (alias `piloto`): `autopilot` muestra su estado; `autopilot on btc eth --tf 4h --max 3 --risk

@@ -154,6 +154,10 @@ def test_realtime_loop_and_replay_end(runtime_factory, offline):
                                           "warmup": 100})
             assert st["mode"] == "replay" and st["bars_total"] == 30 and st["regime"] is None
             assert await _wait_until(lambda: not sim.state()["running"], timeout=60.0)
+            # the end event follows the stop: the simulated positions are closed (database writes) first, which can
+            # take a while on a loaded machine or a remote PostgreSQL
+            assert await _wait_until(lambda: any(e["message"].startswith("Replay terminado:")
+                                                 for e in rt.bus.recent(level="success")), timeout=30.0)
             final = sim.state()
             assert final["running"] is False and final["bars_done"] == 30
             ends = [e for e in rt.bus.recent(level="success") if e["message"].startswith("Replay terminado:")]
