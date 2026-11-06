@@ -665,6 +665,7 @@ POST /api/paper/close {position_id? | symbol? | all?} -> {closed: Position[]}
 POST /api/paper/reset {initial_balance?} -> PaperSnapshot
 POST /api/paper/auto {enabled, symbols?, tf?} -> {auto: {enabled, symbols, tf}}
 GET  /api/paper/autopilot                   -> AutopilotSnapshot (account 3, "NEXUS automática")
+GET  /api/paper/autopilot/compare?fresh=     -> AutopilotComparison (vs random entries; cached, fresh = recompute)
 POST /api/paper/autopilot {enabled?, source?: scanner|list, symbols?, tf?, max_positions?, risk_pct?, scanner_top?,
                            alerts?}
      -> AutopilotSnapshot (only the given fields change; 400 {detail} in Spanish on a bad value)
@@ -734,7 +735,8 @@ Python API: `await rt.scanner.quick_signal(symbol, tf) -> dict | None` (QuickSig
 `cancel_orders(order_id, symbol, all, account_id=1)`, `list_orders(account_id, status, limit)`, `pending_orders`,
 `risk_state(1)` (PaperRisk); `autopilot_snapshot()`, `set_autopilot(enabled=, source=, symbols=, tf=, max_positions=,
 risk_pct=, scanner_top=)`, `close_autopilot(position_id, all, symbol=)`, `reset(..., account_id=3)`;
-`rt.sim.state()`; `from app.sim.evaluator import skill_report, replay_report, ReplayBusy`.
+`autopilot_comparison(fresh=)`; `rt.sim.state()`; `from app.sim.evaluator import skill_report, replay_report,
+ReplayBusy`.
 
 ### 6.5 PyChart scripts [BE-SCRIPT]
 ```
@@ -1165,6 +1167,20 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     WS: `paper` topic, `{type: 'paper_autopilot', ...AutopilotSnapshot}` after each change and every 5 s while it
     holds positions. Simulated only: nothing is sent to a broker, and the status `note` repeats that the published
     validation found no edge (docs/VALIDATION.md).
+  - **NEXUS automática against random entries** (`app.sim.autopilot_compare`, `autopilot_comparison()`, `GET
+    /api/paper/autopilot/compare`, terminal `autopilot azar`): the newest 200 closed trades of account 3 (origin
+    `autopilot`). Each trade's decision bar = the last bar closed at its entry; its reference = the mean R of the
+    random entries decided at each of the 48 bars up to it, long and short, on the same symbol and tf
+    (`app.validation.mechanics.random_entry_table`: NEXUS's default levels, the mechanical exits, the asset class's
+    commission and the demo account's slippage; closed bars from `rt.hub.get_candles`, ≤ 5000; computed in a worker
+    thread), with at least 10 known outcomes. Paired: d = R(NEXUS) − R(reference); `ci95` = block bootstrap by UTC
+    day of the decisions (`stats.block_bootstrap_mean_ci`: no interval below 10 trades or 8 days). Verdict
+    (`AutopilotComparison.verdict`): none (nothing to compare) · insufficient (< 30 compared trades, or no interval)
+    · no_edge (the interval includes 0) · better / worse (the whole interval above / below 0, worded «en este
+    periodo», with the validation's caveat). Cached until a trade of account 3 closes or 5 min pass
+    (`COMPARE_TTL_S`), one computation at a time. `AutopilotComparison {generated_at, window_bars, trades, compared,
+    missing, days, nexus {n, wins, mean_r}, random {entries, wins, mean_r}, diff_r, ci95, verdict, verdict_label,
+    text, note}` (types-autopilot.ts).
   - **gate_log rows from paper**: `time` = the decision bar (`gate.time`, else the fill time), `target_at` by the
     common convention (§7 Watcher), `source` = `sim` for simulated markets (simulator replay and synthetic trades,
     any `SIM:*` symbol), otherwise `paper`.
@@ -2025,7 +2041,10 @@ Demo account (simulated, never a broker):
   not replayed (after a start each candidate is decided once on its last closed bar). Its decision log keeps the last
   30 entries only. Scanner candidates come from the scan's own timeframe, while entries are decided on
   `autopilot.tf`. Paused, NEXUS's exits are not followed either (stop and targets only). In a multi-instance
-  deployment it trades on the active (leader) instance only, like every background service.
+  deployment it trades on the active (leader) instance only, like every background service. Its comparison with
+  random entries keeps NEXUS's model exits on its own trades but mechanical exits on the random ones (as the
+  validation does), so the difference includes the value of those exits; markets without candles (an equity without
+  a data key, a delisted symbol) leave their trades without a reference (`missing`).
 
 Calendar and alerts:
 - **Curated dates need yearly upkeep**: agencies can move a release (as in the 2025 shutdown). The live BLS / BEA

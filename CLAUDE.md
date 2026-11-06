@@ -73,13 +73,14 @@ uv pip install --python backend/.tmp/pgenv/Scripts/python.exe pgserver
 backend/.tmp/pgenv/Scripts/python.exe tools/pg_start.py backend/.tmp/pgdata   # imprime la URI
 ```
 
-Estado tras «NEXUS automática» (su comando `autopilot`, su registro persistente y sus avisos opcionales; 06/11/2026,
-en Windows): backend 1954 passed / 27 skipped sobre SQLite y 1965 passed / 16 skipped sobre PostgreSQL (las
-omisiones son las de PostgreSQL, red, solo Linux / POSIX y el lock exacto); UI 245 pruebas en 9 suites; `tsc` sin errores; contrato 127
-comprobaciones · 0 fallos · 6 avisos (sin red, `--symbol SIM:NEXUS` y base nueva, como en CI: los avisos son listas
-vacías y ningún informe de validación guardado). La prueba más lenta es `tests/test_imp_engine_repaint_history.py`
-(regresión de repintado: 300 cierres, ~2,5 min). Si la suite sobre PostgreSQL local se vuelve muy lenta (miles de
-esquemas creados y borrados por las pruebas), arranca `tools/pg_start.py` con una carpeta nueva.
+Estado tras «NEXUS automática» (comando `autopilot`, registro persistente, avisos opcionales y comparación con entrar
+al azar; 06/11/2026, en Windows): backend 1959 passed / 27 skipped sobre SQLite y 1970 passed / 16 skipped sobre
+PostgreSQL (las omisiones son las de PostgreSQL, red, solo Linux / POSIX y el lock exacto); UI 246 pruebas en 9
+suites; `tsc` sin errores; contrato 130 comprobaciones · 0 fallos · 6 avisos (sin red, `--symbol SIM:NEXUS` y base
+nueva, como en CI: los avisos son listas vacías y ningún informe de validación guardado). La prueba más lenta es
+`tests/test_imp_engine_repaint_history.py` (regresión de repintado: 300 cierres, ~2,5 min). Si la suite sobre
+PostgreSQL local se vuelve muy lenta (miles de esquemas creados y borrados por las pruebas), arranca
+`tools/pg_start.py` con una carpeta nueva.
 
 ## Mapa del código
 
@@ -99,7 +100,8 @@ esquemas creados y borrados por las pruebas), arranca `tools/pg_start.py` con un
     dentro de los límites del plan), `stamping.py` (sellado de las instantáneas de TradingView), TradingView
     (escáner público), grabador de velas.
   - `sim/`: cuenta demo (`paper.py`: órdenes límite / stop pendientes, riesgo de cartera; cuentas 1 «Principal»,
-    2 «Simulación» y 3 «NEXUS automática», que opera sola con un `AutoProfile` como el auto-trading), escáner,
+    2 «Simulación» y 3 «NEXUS automática», que opera sola con un `AutoProfile` como el auto-trading;
+    `autopilot_compare.py` la compara con entrar al azar con el método de la validación), escáner,
     evaluador de predicciones (habilidad frente a la referencia, repetición offline), backtest, simulador, Monte Carlo.
   - `scripting/`: PyChart (validador AST, `worker.py` en subproceso aislado, `sandbox.py`).
   - `macro/`: semáforo (calendario económico, FOMC, VIX, futuros, DXY, tipos, funding); `official.py` (ICS en vivo

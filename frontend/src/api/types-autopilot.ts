@@ -70,6 +70,41 @@ export interface AutopilotSnapshot {
   autopilot: AutopilotStatus
 }
 
+/** Honest verdict of the comparison with random entries (app.sim.autopilot_compare, rules of app.validation). */
+export type AutopilotVerdict = 'none' | 'insufficient' | 'no_edge' | 'better' | 'worse'
+
+/** NEXUS automática's side of the comparison (its compared closed trades). */
+export interface AutopilotCompareNexus {
+  n: number // compared trades
+  wins: number // with R > 0
+  mean_r: number | null // mean R per trade, net of commissions
+}
+
+/** The random entries behind the references (long and short, in the bars before each decision). */
+export interface AutopilotCompareRandom {
+  entries: number // random entries with a known outcome
+  wins: number // of them with R > 0
+  mean_r: number | null // mean of the per-trade references (R)
+}
+
+/** GET /api/paper/autopilot/compare[?fresh=true]: NEXUS automática against random entries in the same markets. */
+export interface AutopilotComparison {
+  generated_at: number // ms
+  window_bars: number // random entries at each of these bars up to a decision
+  trades: number // closed trades of NEXUS automática considered (the newest 200)
+  compared: number // with a reference
+  missing: number // without one: no candles of their market, or outcomes not known yet
+  days: number // distinct UTC days of the compared decisions (the interval resamples whole days)
+  nexus: AutopilotCompareNexus
+  random: AutopilotCompareRandom
+  diff_r: number | null // mean of R(NEXUS) − R(reference) per trade
+  ci95: [number, number] | null // 95 % block bootstrap by day; null below 10 trades or 8 days
+  verdict: AutopilotVerdict
+  verdict_label: string // Spanish
+  text: string // Spanish, shown verbatim
+  note: string // the method, Spanish, shown verbatim
+}
+
 /** POST /api/paper/autopilot: only the fields being changed (400 {detail: '<Spanish>'} on a bad value). */
 export interface AutopilotUpdate {
   enabled?: boolean

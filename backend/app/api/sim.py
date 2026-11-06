@@ -472,6 +472,13 @@ async def paper_autopilot_update(req: AutopilotRequest) -> dict:
     return clean_json(snap)
 
 
+@router.get("/api/paper/autopilot/compare")
+async def paper_autopilot_compare(fresh: bool = False) -> dict:
+    """AutopilotComparison: NEXUS's own account against random entries in the same markets and moments."""
+    paper = _service("paper", "La cuenta demo")
+    return clean_json(await paper.autopilot_comparison(fresh=fresh))
+
+
 @router.post("/api/paper/autopilot/reset")
 async def paper_autopilot_reset(req: ResetRequest | None = None) -> dict:
     paper = _service("paper", "La cuenta demo")

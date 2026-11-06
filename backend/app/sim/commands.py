@@ -571,10 +571,11 @@ _AP_LOG = ("log", "decisiones", "registro")
 _AP_CLOSE = ("close", "cerrar")
 _AP_RESET = ("reset", "reiniciar")
 _AP_ALERTS = ("avisos", "alertas", "alerts")
+_AP_COMPARE = ("azar", "comparar", "referencia")
 _AP_KIND = {"open": ("Abre", "success"), "close": ("Cierra", "info"), "skip": ("Descarta", "muted"),
             "info": ("Nota", "info")}
 AUTOPILOT_USAGE = ("autopilot [on|off] [lista <símbolos…> | escaner [N]] [--tf 1h] [--max 5] [--risk 1] [--top 10] · "
-                   "autopilot pos | log | avisos on|off | close <id|símbolo|all> | reset [saldo] --yes")
+                   "autopilot pos | log | azar | avisos on|off | close <id|símbolo|all> | reset [saldo] --yes")
 
 
 def _ap_when(ctx: CommandContext, ms: Any) -> str:
@@ -702,6 +703,27 @@ async def _autopilot(ctx: CommandContext) -> None:
                       f"{fmt_r(p.get('r_multiple'))} ({fmt_pct(p.get('pnl_pct'), 2)} · {fmt_num(p.get('pnl'), 2, True)})",
                       "success" if (p.get("pnl") or 0) > 0 else "warn")
         ctx.data = {"closed": closed}
+        return
+
+    if sub in _AP_COMPARE:
+        c = await paper.autopilot_comparison(fresh=bool(ctx.flag("fresh", False)))
+        tone = {"better": "success", "worse": "warn"}.get(c["verdict"], "info")
+        ctx.print(f"NEXUS automática frente a entrar al azar · {c['verdict_label']}", "system")
+        ctx.print(c["text"], tone)
+        if c["compared"]:
+            nx, rnd = c["nexus"], c["random"]
+            ctx.table(["", "R medio por operación", "Ganadoras"], [
+                ["NEXUS automática", fmt_r(nx["mean_r"], 2), f"{nx['wins']} de {nx['n']}"],
+                ["Entrar al azar", fmt_r(rnd["mean_r"], 2), f"{fmt_num(rnd['wins'], 0)} de {fmt_num(rnd['entries'], 0)} "
+                                                             "entradas"],
+            ])
+            ci = c.get("ci95")
+            ctx.print(f"Diferencia: {fmt_r(c['diff_r'], 2)} por operación · IC 95 %: "
+                      + (f"{fmt_r(ci[0], 2)} a {fmt_r(ci[1], 2)}" if ci else "sin intervalo")
+                      + f" · {c['compared']} de {c['trades']} operaciones con referencia, en {c['days']} "
+                      + ("día" if c["days"] == 1 else "días"), "info")
+        ctx.print(c["note"], "muted")
+        ctx.data = c
         return
 
     if sub in _AP_ALERTS:

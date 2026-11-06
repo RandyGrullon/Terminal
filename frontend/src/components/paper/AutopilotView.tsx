@@ -5,9 +5,10 @@
 // {type: 'paper_autopilot'} (the user's {type: 'paper'} messages are account 1 and never feed this view); a GET every
 // 30 s while the page is visible is the fallback.
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { Bot, Info, Radar, RefreshCw, RotateCcw, ScrollText, SlidersHorizontal, TriangleAlert, Wallet, X } from 'lucide-react'
+import { Bot, Info, Radar, RefreshCw, RotateCcw, Scale, ScrollText, SlidersHorizontal, TriangleAlert, Wallet, X } from 'lucide-react'
 import { api, errorMessage } from '../../api/client'
 import type {
+  AutopilotComparison,
   AutopilotLast,
   AutopilotLogEntry,
   AutopilotScan,
@@ -150,6 +151,116 @@ export function normalizeAutopilot(raw: unknown): AutopilotSnapshot | null {
     risk: normalizeRisk(o.risk),
     autopilot,
   }
+}
+
+/** Defensive parse of an AutopilotComparison: null without its verdict and texts. */
+export function normalizeComparison(raw: unknown): AutopilotComparison | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  const verdicts = ['none', 'insufficient', 'no_edge', 'better', 'worse'] as const
+  const verdict = verdicts.find((v) => v === o.verdict)
+  if (!verdict || !isStr(o.text) || !isStr(o.verdict_label)) return null
+  const side = (v: unknown) => (v && typeof v === 'object' ? (v as Record<string, unknown>) : {})
+  const nx = side(o.nexus)
+  const rnd = side(o.random)
+  const ci = Array.isArray(o.ci95) && o.ci95.length === 2 && isNum(o.ci95[0]) && isNum(o.ci95[1]) ? ([o.ci95[0], o.ci95[1]] as [number, number]) : null
+  const int = (v: unknown) => Math.max(0, Math.round(numOr(v, 0)))
+  return {
+    generated_at: numOr(o.generated_at, 0),
+    window_bars: int(o.window_bars),
+    trades: int(o.trades),
+    compared: int(o.compared),
+    missing: int(o.missing),
+    days: int(o.days),
+    nexus: { n: int(nx.n), wins: int(nx.wins), mean_r: isNum(nx.mean_r) ? nx.mean_r : null },
+    random: { entries: int(rnd.entries), wins: int(rnd.wins), mean_r: isNum(rnd.mean_r) ? rnd.mean_r : null },
+    diff_r: isNum(o.diff_r) ? o.diff_r : null,
+    ci95: ci,
+    verdict,
+    verdict_label: o.verdict_label,
+    text: o.text,
+    note: isStr(o.note) ? o.note : '',
+  }
+}
+
+const VERDICT_TONE: Record<AutopilotComparison['verdict'], Tone> = {
+  none: 'muted',
+  insufficient: 'muted',
+  no_edge: 'warn',
+  better: 'accent',
+  worse: 'neg',
+}
+
+/** The 95 % interval as shown (the backend's rule: none below 10 trades, «muy incierto» below 30). */
+export function compareInterval(c: AutopilotComparison): string {
+  if (c.compared < 10) return 'sin intervalo: menos de 10 operaciones'
+  if (!c.ci95) return 'sin intervalo'
+  const text = `${fmtR(c.ci95[0])} a ${fmtR(c.ci95[1])}`
+  return c.compared < 30 ? `${text} · muy incierto` : text
+}
+
+/** "Frente a entrar al azar": NEXUS automática against random entries in the same markets and moments. */
+export function CompareCard({ cmp, loading, error, onRefresh }: { cmp: AutopilotComparison | null; loading: boolean; error: string | null; onRefresh: () => void }) {
+  return (
+    <Card
+      title={
+        <>
+          <Scale size={14} /> Frente a entrar al azar {cmp && <Badge tone={VERDICT_TONE[cmp.verdict]}>{cmp.verdict_label}</Badge>}
+        </>
+      }
+      sub="¿Opera mejor que entrar al azar en los mismos mercados y momentos?"
+      actions={
+        <Button size="sm" variant="ghost" icon={<RefreshCw size={13} />} onClick={onRefresh} loading={loading} title="Volver a calcular con los datos de ahora">
+          Recalcular
+        </Button>
+      }
+    >
+      {error && <ErrorBox error={error} onRetry={onRefresh} />}
+      {!cmp ? (
+        !error && <Loading label="Comparando con entradas al azar…" />
+      ) : (
+        <div className="col gap-2">
+          <p className="small ap-compare-text">{cmp.text}</p>
+          {cmp.compared > 0 && (
+            <>
+              <div className="table-wrap">
+                <table className="table ap-table">
+                  <thead>
+                    <tr>
+                      <th />
+                      <th>R medio por operación</th>
+                      <th>Ganadoras</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>NEXUS automática</td>
+                      <td className="mono">{fmtR(cmp.nexus.mean_r)}</td>
+                      <td>
+                        {fmtInt(cmp.nexus.wins)} de {fmtInt(cmp.nexus.n)}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>Entrar al azar</td>
+                      <td className="mono">{fmtR(cmp.random.mean_r)}</td>
+                      <td>
+                        {fmtInt(cmp.random.wins)} de {fmtInt(cmp.random.entries)} entradas
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div className="tiny">
+                Diferencia: <span className="mono">{fmtR(cmp.diff_r)}</span> por operación · IC 95 %: {compareInterval(cmp)} ·{' '}
+                {fmtInt(cmp.compared)} de {fmtInt(cmp.trades)} operaciones con referencia, en {plural(cmp.days, 'día', 'días')}
+              </div>
+            </>
+          )}
+          {cmp.note && <div className="tiny muted">{cmp.note}</div>}
+        </div>
+      )}
+    </Card>
+  )
 }
 
 /** The snapshot a socket message carries for this view: only {type: 'paper_autopilot'} of NEXUS's account. The user's
@@ -732,6 +843,10 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
   const seq = useRef(0)
   const snapRef = useRef<AutopilotSnapshot | null>(initial)
   const freshAt = useRef(0) // when the last live / POST snapshot arrived: a GET sent before it answers older data
+  const [cmp, setCmp] = useState<AutopilotComparison | null>(null)
+  const [cmpLoading, setCmpLoading] = useState(false)
+  const [cmpError, setCmpError] = useState<string | null>(null)
+  const cmpSeq = useRef(0)
 
   useEffect(() => {
     alive.current = true
@@ -882,6 +997,27 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
   const status = snap?.autopilot ?? null
   const positions = snap?.positions ?? []
   const history = snap?.history ?? []
+
+  // Its comparison with random entries: on open, whenever a trade closes, and on demand ("Recalcular")
+  const loadCmp = useCallback(async (fresh: boolean) => {
+    const id = ++cmpSeq.current
+    setCmpLoading(true)
+    try {
+      const c = normalizeComparison(await api.paper.autopilot.compare(fresh))
+      if (!alive.current || id !== cmpSeq.current) return
+      if (!c) throw new Error('Respuesta de la comparación no válida')
+      setCmp(c)
+      setCmpError(null)
+    } catch (err) {
+      if (alive.current && id === cmpSeq.current) setCmpError(errorMessage(err))
+    } finally {
+      if (alive.current && id === cmpSeq.current) setCmpLoading(false)
+    }
+  }, [])
+  const closedCount = snap ? snap.account.trades : null
+  useEffect(() => {
+    if (closedCount !== null) void loadCmp(false)
+  }, [closedCount, loadCmp])
   const wide = useMediaQuery('(min-width: 1700px)')
 
   // ------------------------------------------------------------------ blocks
@@ -932,6 +1068,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
     </Card>
   )
 
+  const compareCard = <CompareCard cmp={cmp} loading={cmpLoading} error={cmpError} onRefresh={() => void loadCmp(true)} />
   const controls = status ? <AutopilotControls status={status} saving={saving} error={saveError} onSave={save} /> : null
   const watchCard = status ? <WatchCard status={status} onOpenChart={openSymbol} /> : null
   const logCard = status ? <DecisionLog log={status.log} onOpenChart={openSymbol} /> : null
@@ -986,6 +1123,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
             <div className="pp-layout">
               <div className="pp-main">
                 {positionsCard}
+                {compareCard}
                 {logCard}
                 {historyCard}
               </div>
@@ -998,6 +1136,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
           ) : (
             <>
               {positionsCard}
+              {compareCard}
               <div className="ap-cols">
                 <div className="ap-col">{controls}</div>
                 <div className="ap-col">

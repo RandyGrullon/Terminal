@@ -97,6 +97,7 @@ AUTOPILOT_REFRESH_S = 60.0  # how often the autopilot looks for a newer scan (it
 AUTOPILOT_SETTLE_S = 0.5  # quiet time after autopilot.* settings change (saved one key at a time) before re-reading
 AUTOPILOT_STATE_KEY = "autopilot.state"  # meta: its decision log and last read per symbol (kept across restarts)
 AUTOPILOT_KINDS = ("open", "close", "skip", "info")
+COMPARE_TTL_S = 300.0  # its comparison with random entries is recomputed at most every 5 min (new outcomes come in)
 AUTOPILOT_NOTE = (
     "Cuenta 100 % simulada que opera sola con las señales de NEXUS y el filtro; nunca se envía nada a un bróker. "
     "La validación publicada (docs/VALIDATION.md) no encontró ventaja: lo esperable son resultados parecidos a "
@@ -516,6 +517,8 @@ class PaperEngine:
         self._autopilot_reads = 0  # reads recorded so far (a check that recorded one publishes the account)
         self._autopilot_dirty = False  # its log / reads changed since they were last saved (meta autopilot.state)
         self._autopilot_saving = False
+        self._compare_cache: tuple[tuple[int, int], float, dict[str, Any]] | None = None
+        self._compare_lock = asyncio.Lock()
         self._stale_warned: set[str] = set()  # symbols whose "sin precio en vivo" warning was already emitted
         # pending orders (account 1): id -> order dict; ids whose fill is being decided (gate at the fill price)
         self._orders: dict[int, dict] = {}
@@ -2643,6 +2646,33 @@ class PaperEngine:
         await self._refresh_autopilot(force=True)
         await self.publish(AUTOPILOT_ACCOUNT)
         return await self.autopilot_snapshot()
+
+    async def autopilot_comparison(self, *, fresh: bool = False) -> dict[str, Any]:
+        """AutopilotComparison: NEXUS's own account against random entries in the same markets and moments
+        (app.sim.autopilot_compare). Cached until a trade closes or COMPARE_TTL_S passes; one computation at a time."""
+        from app.sim import autopilot_compare
+
+        row = await self.rt.db.fetchone(
+            "SELECT COUNT(*) AS n, MAX(id) AS last FROM paper_positions WHERE account_id=? AND status='closed'",
+            (AUTOPILOT_ACCOUNT,)) or {}
+        key = (int(row.get("n") or 0), int(row.get("last") or 0))
+
+        def cached() -> dict[str, Any] | None:
+            c = self._compare_cache
+            if c is not None and c[0] == key and time.monotonic() - c[1] < COMPARE_TTL_S:
+                return c[2]
+            return None
+
+        if not fresh and (hit := cached()) is not None:
+            return hit
+        async with self._compare_lock:
+            if not fresh and (hit := cached()) is not None:
+                return hit
+            settings = self.rt.settings.all() if self.rt.settings is not None else {}
+            result = await autopilot_compare.compare(self.rt, AUTOPILOT_ACCOUNT, settings=settings,
+                                                     slippage_pct=self._slip_pct())
+            self._compare_cache = (key, time.monotonic(), result)
+            return result
 
     async def close_autopilot(self, position_id: int | None = None, all: bool = False, *,
                               symbol: str | None = None) -> list[dict]:

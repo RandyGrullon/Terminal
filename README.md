@@ -239,12 +239,18 @@ que la actives en «Cómo opera»:
   en la que las abrió, y no abre una segunda posición en esos símbolos.
 - Puedes **pausarla** (no abre nada nuevo; sus posiciones siguen con su stop y sus objetivos), cerrar sus posiciones
   a mano o **reiniciarla** con otro saldo.
+- **Frente a entrar al azar**: su tarjeta compara cada operación cerrada con entradas al azar, en largo y en corto,
+  en las 48 velas anteriores a su decisión y en el mismo mercado, con los niveles por defecto y las salidas mecánicas
+  de NEXUS, comisiones y deslizamiento (el método de la validación publicada). Muestra las ganadoras como «x de n», la
+  R media de cada lado y la diferencia con su intervalo del 95 % (por días); no concluye nada por debajo de 30
+  operaciones. En la terminal: `autopilot azar`.
 - **Avisos fuera de la app** (opcional, desactivado por defecto): con «Avisarme por Telegram o correo cuando opere»
   recibes sus aperturas, cierres y stops por los canales de *Ajustes → Alertas*; si no hay ningún canal activo, la
   vista te lo dice.
 - **Desde la terminal** (alias `piloto`): `autopilot` muestra su estado; `autopilot on btc eth --tf 4h --max 3 --risk
   0,5` la activa con una lista fija; `autopilot escaner 10` usa el escáner; `autopilot off` la pausa; `autopilot pos`
-  y `autopilot log` muestran sus posiciones y sus decisiones; `autopilot avisos on|off` activa sus avisos por
+  y `autopilot log` muestran sus posiciones y sus decisiones; `autopilot azar` la compara con entrar al azar;
+  `autopilot avisos on|off` activa sus avisos por
   Telegram o correo; `autopilot close <id|símbolo|all>` cierra a mano y `autopilot reset [saldo] --yes` la reinicia
   (sin `--yes` solo avisa).
 

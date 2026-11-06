@@ -399,6 +399,11 @@ def main() -> int:
                 check_list(rep, ifaces, "AutopilotWatch", st["watching"], "paper.autopilot.watching", 3)
             if st.get("log"):
                 check_list(rep, ifaces, "AutopilotLogEntry", st["log"], "paper.autopilot.log", 3)
+    d = call("GET", "/api/paper/autopilot/compare")  # against random entries (a computation, read-only)
+    if d:
+        check_obj(rep, ifaces, "AutopilotComparison", d, "paper.autopilot.compare")
+        check_obj(rep, ifaces, "AutopilotCompareNexus", d.get("nexus"), "paper.autopilot.compare.nexus")
+        check_obj(rep, ifaces, "AutopilotCompareRandom", d.get("random"), "paper.autopilot.compare.random")
     d = call("GET", "/api/scanner/runs")
     if d:
         check_list(rep, ifaces, "ScanRun", d.get("runs"), "scanner.runs", 1)

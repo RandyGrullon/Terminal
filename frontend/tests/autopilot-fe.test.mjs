@@ -43,7 +43,10 @@ export {
   draftDirty,
   draftFrom,
   emptyWatchText,
+  CompareCard,
+  compareInterval,
   normalizeAutopilot,
+  normalizeComparison,
   normalizeLast,
   subscribeAutopilot,
   validateDraft,
@@ -166,6 +169,13 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
   assert.deepEqual(t.AutopilotSnapshot, ['account', 'positions', 'history', 'risk', 'autopilot'])
   assert.deepEqual(t.AutopilotWatch, ['symbol', 'why', 'direction?', 'last?'])
   assert.deepEqual(t.AutopilotLast, ['bar_time', 'tf', 'action', 'label'])
+  assert.deepEqual(t.AutopilotComparison, [
+    'generated_at', 'window_bars', 'trades', 'compared', 'missing', 'days', 'nexus', 'random', 'diff_r', 'ci95', 'verdict',
+    'verdict_label', 'text', 'note',
+  ])
+  assert.deepEqual(t.AutopilotCompareNexus, ['n', 'wins', 'mean_r'])
+  assert.deepEqual(t.AutopilotCompareRandom, ['entries', 'wins', 'mean_r'])
+  assert.match(src, /export type AutopilotVerdict = 'none' \| 'insufficient' \| 'no_edge' \| 'better' \| 'worse'/)
   assert.deepEqual(t.AutopilotLogEntry, ['ts', 'symbol', 'kind', 'text'])
   assert.deepEqual(t.AutopilotScan, ['id', 'finished_at', 'opportunities'])
   assert.deepEqual(t.AutopilotUpdate, ['enabled?', 'source?', 'symbols?', 'tf?', 'max_positions?', 'risk_pct?', 'scanner_top?', 'alerts?'])
@@ -193,6 +203,8 @@ test('client: api.paper.autopilot calls its four routes with only the given fiel
     await M.api.paper.autopilot.reset()
     await M.api.paper.autopilot.close({ position_id: 41 })
     await M.api.paper.autopilot.close({ all: true })
+    await M.api.paper.autopilot.compare()
+    await M.api.paper.autopilot.compare(true)
   } finally {
     globalThis.fetch = realFetch
   }
@@ -204,6 +216,45 @@ test('client: api.paper.autopilot calls its four routes with only the given fiel
   assert.deepEqual(at(4), ['POST', '/api/paper/autopilot/reset', {}], 'no balance: the server keeps its own')
   assert.deepEqual(at(5), ['POST', '/api/paper/autopilot/close', { position_id: 41 }])
   assert.deepEqual(at(6), ['POST', '/api/paper/autopilot/close', { all: true }])
+  assert.deepEqual(at(7), ['GET', '/api/paper/autopilot/compare', undefined])
+  assert.equal(new URL(seen[7].url, 'http://localhost').search, '')
+  assert.deepEqual(at(8), ['GET', '/api/paper/autopilot/compare', undefined])
+  assert.equal(new URL(seen[8].url, 'http://localhost').searchParams.get('fresh'), 'true')
+})
+
+function comparison(over = {}) {
+  return {
+    generated_at: NOW, window_bars: 48, trades: 12, compared: 11, missing: 1, days: 6,
+    nexus: { n: 11, wins: 5, mean_r: 0.08 }, random: { entries: 812, wins: 331, mean_r: -0.06 },
+    diff_r: 0.14, ci95: [-0.31, 0.52], verdict: 'insufficient', verdict_label: 'Aún sin evidencia',
+    text: 'Aún sin evidencia: con 11 operaciones comparadas no se puede concluir nada (hacen falta 30).',
+    note: 'Referencia de cada operación: entradas al azar… la validación publicada (docs/VALIDATION.md) no encontró ventaja.',
+    ...over,
+  }
+}
+
+test('vs random entries: the backend verdict and note verbatim, "x de n", the interval only when it means something', () => {
+  const card = (over, extra = {}) =>
+    render(M.CompareCard, { cmp: M.normalizeComparison(comparison(over)), loading: false, error: null, onRefresh: noop, ...extra })
+  const early = card()
+  assert.ok(early.includes('Frente a entrar al azar') && early.includes('>Aún sin evidencia<'), early)
+  assert.ok(early.includes('Aún sin evidencia: con 11 operaciones comparadas no se puede concluir nada (hacen falta 30).'))
+  assert.ok(early.includes('5 de 11') && early.includes('331 de 812 entradas'), early)
+  assert.ok(early.includes('· muy incierto'), 'between 10 and 29 trades the interval is flagged')
+  assert.ok(early.includes('11 de 12 operaciones con referencia, en 6 días'), early)
+  assert.ok(early.includes('no encontró ventaja'), 'the method note is shown')
+  assert.ok(!/% acierto|% de acierto/.test(early), 'never a bare hit rate')
+  assert.equal(M.compareInterval(M.normalizeComparison(comparison({ compared: 7 }))), 'sin intervalo: menos de 10 operaciones')
+  const settled = M.normalizeComparison(comparison({ compared: 42, trades: 42, missing: 0, verdict: 'no_edge', verdict_label: 'Sin evidencia de ventaja' }))
+  assert.ok(!M.compareInterval(settled).includes('muy incierto'))
+  const none = card({ compared: 0, trades: 0, verdict: 'none', verdict_label: 'Sin datos', text: 'Aún no hay operaciones cerradas de NEXUS automática que comparar.' })
+  assert.ok(none.includes('Aún no hay operaciones cerradas') && !none.includes('<table'), none)
+  const waiting = render(M.CompareCard, { cmp: null, loading: true, error: null, onRefresh: noop })
+  assert.ok(waiting.includes('Comparando con entradas al azar'))
+  const failed = render(M.CompareCard, { cmp: null, loading: false, error: 'Sin conexión', onRefresh: noop })
+  assert.ok(failed.includes('Sin conexión') && !failed.includes('Comparando'))
+  assert.equal(M.normalizeComparison({ verdict: 'great', text: 'x', verdict_label: 'y' }), null)
+  assert.equal(M.normalizeComparison(comparison({ ci95: [1, 'x'] })).ci95, null)
 })
 
 test('client: a refused change (400) rejects with the Spanish detail', async () => {

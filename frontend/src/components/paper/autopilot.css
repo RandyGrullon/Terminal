@@ -169,6 +169,12 @@
   outline-offset: 2px;
 }
 
+/* "Frente a entrar al azar": the verdict text reads as a paragraph */
+.ap-compare-text {
+  margin: 0;
+  line-height: 1.45;
+}
+
 /* "Última vela": NEXUS's read of the last decided bar of a watched symbol */
 .ap-last {
   display: inline-flex;
