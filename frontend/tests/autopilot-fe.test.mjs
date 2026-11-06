@@ -118,6 +118,7 @@ function status(over = {}) {
   return {
     enabled: true, account_id: 3, source: 'scanner', tf: '1h', symbols: [], max_positions: 5, risk_pct: 1, scanner_top: 10,
     alerts: false, alert_channels: 0, initial_balance: 1000, max_exposure_pct: 100, max_drawdown_pct: 20, futures_margin_pct: 50,
+    stock_instrument: 'auto', options_premium_pct: 10,
     brake: { limit_pct: 20, drawdown_pct: 1.2, active: false },
     watching: [
       { symbol: 'BINANCE:SOLUSDT', why: 'escáner', direction: 'short' },
@@ -168,8 +169,8 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
   const t = interfaces(src)
   assert.deepEqual(t.AutopilotStatus, [
     'enabled', 'account_id', 'source', 'tf', 'symbols', 'max_positions', 'risk_pct', 'scanner_top', 'watching', 'scan', 'log',
-    'alerts', 'alert_channels', 'initial_balance', 'max_exposure_pct', 'max_drawdown_pct', 'futures_margin_pct', 'brake',
-    'note',
+    'alerts', 'alert_channels', 'initial_balance', 'max_exposure_pct', 'max_drawdown_pct', 'futures_margin_pct',
+    'stock_instrument', 'options_premium_pct', 'brake', 'note',
   ])
   assert.deepEqual(t.AutopilotSnapshot, ['account', 'positions', 'history', 'risk', 'autopilot'])
   assert.deepEqual(t.AutopilotWatch, ['symbol', 'why', 'direction?', 'last?'])
@@ -185,8 +186,9 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
   assert.deepEqual(t.AutopilotScan, ['id', 'finished_at', 'opportunities'])
   assert.deepEqual(t.AutopilotUpdate, [
     'enabled?', 'source?', 'symbols?', 'tf?', 'max_positions?', 'risk_pct?', 'scanner_top?', 'alerts?', 'max_exposure_pct?',
-    'max_drawdown_pct?', 'futures_margin_pct?',
+    'max_drawdown_pct?', 'futures_margin_pct?', 'stock_instrument?', 'options_premium_pct?',
   ])
+  assert.match(src, /export type AutopilotStockInstrument = 'auto' \| 'shares' \| 'options'/)
   assert.deepEqual(t.AutopilotBrake, ['limit_pct', 'drawdown_pct', 'active'])
   assert.match(src, /export type AutopilotSource = 'scanner' \| 'list' \| 'both'/)
   assert.match(src, /export type AutopilotWhy = 'escáner' \| 'lista' \| 'posición abierta'/)
@@ -270,6 +272,14 @@ test('money management: its own rules and numbers, never a promise; the brake no
   const off = render(M.MoneyCard, { status: { ...st, max_drawdown_pct: 0, max_exposure_pct: 0, futures_margin_pct: 0 }, dailyLossPct: null })
   assert.ok(off.includes('Sin freno de pérdidas acumuladas') && off.includes('Sin tope de exposición propio'), off)
   assert.ok(off.includes('No opera futuros'), off)
+  assert.ok(html.includes('Acciones: compra acciones para apostar al alza y un put para apostar a la baja (una cuenta de efectivo no vende en corto)'), html)
+  assert.ok(html.includes('precio teórico (Black-Scholes') && html.includes('como mucho el 10 % de su capital en primas'), html)
+  assert.ok(html.includes('las cierra 7 días antes de su vencimiento'), html)
+  const shares = render(M.MoneyCard, { status: { ...st, stock_instrument: 'shares' }, dailyLossPct: null })
+  assert.ok(shares.includes('Acciones: compra acciones y también vende en corto (simulado).') && !shares.includes('Black-Scholes'), shares)
+  const only = render(M.MoneyCard, { status: { ...st, stock_instrument: 'options', options_premium_pct: 0 }, dailyLossPct: null })
+  assert.ok(only.includes('Acciones: no las opera (solo opciones, y su prima máxima es 0 %).'), only)
+  assert.equal(M.normalizeAutopilot(snapshot({ stock_instrument: 'futures' })).autopilot.stock_instrument, 'auto')
   assert.equal(render(M.BrakeNotice, { brake: { limit_pct: 20, drawdown_pct: 5, active: false } }), '')
   const on = render(M.BrakeNotice, { brake: { limit_pct: 20, drawdown_pct: 24.5, active: true } })
   assert.ok(on.includes('Freno de pérdidas activo') && on.includes('24,5 %') && on.includes('Reiníciala o cambia el freno'), on)
@@ -500,6 +510,25 @@ test('futures show whole contracts (open of total), never the units of the index
   assert.ok(html.includes('3 contratos M2K'), 'history: the contracts traded')
   const plain = render(M.AutopilotView, { initial: snapshot() })
   assert.ok(plain.includes('2 de 2') && !/contratos? M2K|\d contratos?</.test(plain), 'shares and crypto keep their units')
+})
+
+test('options show their contract, a call or a put on the stock, and open the stock chart', () => {
+  const inst = { kind: 'option', name: 'F 12 P 18/12/2026', multiplier: 100, contracts: 2, underlying: 'NYSE:F', right: 'put',
+    strike: 12, expiry: '2026-12-18', sigma: 0.33, delta: 0.47, spot: 12 }
+  const put = position({ id: 61, symbol: 'OPT:NYSE:F:20261218:P:12', qty: 200, qty_open: 200, entry_price: 0.5, price: 0.62,
+    sl: 0.25, tp1: 0.75, tp2: 1, tp3: 1.25, instrument: inst })
+  const html = render(M.AutopilotView, { initial: snapshot({}, { positions: [put], history: [{ ...put, id: 62, status: 'closed', qty_open: 0 }] }) })
+  assert.ok(html.includes('F 12 P 18/12/2026') && html.includes('Put sobre F · teórica'), html)
+  assert.ok(html.includes('2 de 2 contratos') && html.includes('Abrir NYSE:F en el gráfico'), 'the chart of its stock')
+  assert.ok(!html.includes('OPT:NYSE'), 'the internal symbol is never shown')
+  assert.ok(html.includes('>Put<'), 'its side is the right it bought')
+  assert.ok(html.includes('Acciones y fondos') && html.includes('NEXUS elige: acciones, y un put para bajar'), html)
+  assert.ok(html.includes('Prima máxima por operación (%)'), html)
+  const st = M.normalizeAutopilot(snapshot()).autopilot
+  const d = M.draftFrom(st)
+  assert.deepEqual(M.draftChanges({ ...d, stock_instrument: 'options', options_premium_pct: 5 }, d), {
+    stock_instrument: 'options', options_premium_pct: 5 })
+  assert.equal(M.validateDraft({ ...d, options_premium_pct: 60 }), 'La prima máxima por operación (%) debe ser un número entre 0,0 y 50,0.')
 })
 
 test('positions and history reuse the paper tables; NEXUS is the origin, never "autopilot"', () => {

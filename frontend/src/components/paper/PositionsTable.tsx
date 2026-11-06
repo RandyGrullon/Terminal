@@ -3,10 +3,10 @@
 import { memo } from 'react'
 import { ChartCandlestick, Check, Info, OctagonAlert, ShieldCheck, TriangleAlert } from 'lucide-react'
 import type { NexusWarning, Position } from '../../api/types'
-import { DIRECTION_LABEL, fmtBarTime, fmtDuration, fmtPct, fmtPrice, fmtR, signTone, splitSymbol, toneColor } from '../../lib/format'
+import { fmtBarTime, fmtDuration, fmtPct, fmtPrice, fmtR, signTone, toneColor } from '../../lib/format'
 import { Badge, Button, IconButton, VerdictBadge } from '../ui'
 import { ORIGIN_LABEL, fmtMoney, fmtQty, isNum } from '../markets/opsUtils'
-import { adviceLevel, contractsOf, contractsText, distPct, stopProtects, tpHits } from './paperUtils'
+import { adviceLevel, contractsOf, contractsText, distPct, marketOf, stopProtects, tpHits } from './paperUtils'
 import { useMediaQuery } from './useMediaQuery'
 
 interface Props {
@@ -91,7 +91,7 @@ const Row = memo(function Row(props: {
   originLabels?: Record<string, string>
 }) {
   const { p, closing, busy, inlineAdvice, cols, onClose, onOpenChart, originLabels } = props
-  const { exchange, ticker } = splitSymbol(p.symbol)
+  const market = marketOf(p)
   const level = adviceLevel(p)
   const pnlTone = signTone(p.pnl)
   const slDist = distPct(p.sl, p.price)
@@ -103,17 +103,17 @@ const Row = memo(function Row(props: {
     <tr className={rowCls}>
       <td>
         <div className="pp-sym">
-          <button type="button" onClick={() => onOpenChart(p)} title={`Abrir ${p.symbol} en el gráfico`}>
-            {ticker}
+          <button type="button" onClick={() => onOpenChart(p)} title={`Abrir ${market.chart} en el gráfico`}>
+            {market.ticker}
           </button>
           <span className="pp-sub">
-            {exchange || '—'} · {p.tf}
+            {market.sub} · {p.tf}
           </span>
         </div>
       </td>
       <td title="Cantidad abierta / cantidad inicial">
         <div className="pp-stack" style={{ alignItems: 'flex-start', gap: 2 }}>
-          <Badge tone={p.side === 'long' ? 'pos' : 'neg'}>{DIRECTION_LABEL[p.side]}</Badge>
+          <Badge tone={market.sideTone}>{market.side}</Badge>
           <span className="pp-sub">
             {contractsText(p, p.qty) !== null ? `${contractsOf(p, p.qty_open)} de ${contractsText(p, p.qty)}` : `${fmtQty(p.qty_open)} de ${fmtQty(p.qty)}`}
           </span>

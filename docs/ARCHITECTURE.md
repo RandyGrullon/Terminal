@@ -352,6 +352,7 @@ autopilot.max_positions 5 (1..20) · autopilot.risk_pct 1.0 (0.1..5) · autopilo
 autopilot.initial_balance 1000 · autopilot.max_exposure_pct 100 (0..500; 0 = off) · autopilot.max_drawdown_pct 20
 (0..90; 0 = off) · autopilot.source also "both" (the list plus the scanner's opportunities)
 autopilot.futures_margin_pct 50 (0..100; 0 = it trades no futures)
+autopilot.stock_instrument "auto" (auto|shares|options) · autopilot.options_premium_pct 10 (0..50; 0 = no options)
 realtime.enabled true · realtime.twelvedata_credits_min 8 · realtime.twelvedata_credits_day 800 (0 = no daily cap)
 realtime.polygon_calls_min 5 · realtime.reserve_pct 25 · realtime.max_symbols 4 · realtime.min_interval_s 15
 scanner.replay_days 7                     (int days, clamped 0..30 by the evaluator; 0 = vectors dropped at resolution)
@@ -670,7 +671,8 @@ POST /api/paper/auto {enabled, symbols?, tf?} -> {auto: {enabled, symbols, tf}}
 GET  /api/paper/autopilot                   -> AutopilotSnapshot (account 3, "NEXUS automática")
 GET  /api/paper/autopilot/compare?fresh=     -> AutopilotComparison (vs random entries; cached, fresh = recompute)
 POST /api/paper/autopilot {enabled?, source?: scanner|list|both, symbols?, tf?, max_positions?, risk_pct?,
-                           scanner_top?, alerts?, max_exposure_pct?, max_drawdown_pct?, futures_margin_pct?}
+                           scanner_top?, alerts?, max_exposure_pct?, max_drawdown_pct?, futures_margin_pct?,
+                           stock_instrument?: auto|shares|options, options_premium_pct?}
      -> AutopilotSnapshot (only the given fields change; 400 {detail} in Spanish on a bad value)
 POST /api/paper/autopilot/reset {initial_balance?}     -> AutopilotSnapshot (account 3 only)
 POST /api/paper/autopilot/close {position_id? | all?}  -> AutopilotSnapshot (400 when neither; 404 unknown id)
@@ -698,12 +700,15 @@ GET  /api/learning/replay?days=&model_key=                       -> scanner repl
   running; a failed scan is no source), opportunities} | null, log: AutopilotLogEntry[] {ts (ms), symbol ('—' = not
   about one symbol), kind: open|close|skip|info, text} (newest first, ≤ 30, kept across restarts in meta
   `autopilot.state`), alerts (setting `alerts.autopilot`: its trades as alerts, opt-in), alert_channels (alert
-  channels on and complete now, `AlertService.active_channels()`; 0 = they would reach nobody), note}`. 400 texts:
-  'Fuente no válida: usa «scanner» (escáner) o «list» (lista fija)', 'El máximo de posiciones debe ser un número
-  entero entre 1 y 20', 'El riesgo por operación (%) debe ser un número entre 0,1 y 5,0', 'El número de candidatos del
-  escáner debe ser un número entero entre 1 y 30', 'Como máximo 30 símbolos en la lista', an invalid tf.
-  `Position.origin` gains 'autopilot'. The user can only switch it on/off, configure it, close its positions and reset
-  it: no orders are placed by hand in account 3.
+  channels on and complete now, `AlertService.active_channels()`; 0 = they would reach nobody), initial_balance,
+  max_exposure_pct, max_drawdown_pct, futures_margin_pct, stock_instrument: auto|shares|options, options_premium_pct,
+  brake: AutopilotBrake {limit_pct, drawdown_pct, active} | null, note}`. 400 texts: 'Fuente no válida: usa «scanner»
+  (escáner), «list» (lista fija) o «both» (las dos)', 'El máximo de posiciones debe ser un número entero entre 1 y
+  20', 'El riesgo por operación (%) debe ser un número entre 0,1 y 5,0', 'El número de candidatos del escáner debe ser
+  un número entero entre 1 y 30', 'Como máximo 30 símbolos en la lista', 'Instrumento no válido para acciones: usa
+  «auto» (NEXUS elige), «shares» (acciones) u «options» (opciones)', 'La prima máxima por operación (%) debe ser un
+  número entre 0,0 y 50,0', an invalid tf. `Position.origin` gains 'autopilot'. The user can only switch it on/off,
+  configure it, close its positions and reset it: no orders are placed by hand in account 3.
 - **Skill report** (`app.sim.evaluator.skill_report`, §10): `days` ≤ 0 = every stored row (the UI's 'Todo lo
   guardado' sends 0); a `source` other than empty / scanner / nexus → 400 'Fuente no válida: usa scanner o nexus', a
   non-finite `days` → 400, an unparsable one → 422; `model_key` is trimmed. Cached 60 s (600 s for longer windows or
@@ -1160,9 +1165,10 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     equity `autopilot.max_drawdown_pct` % under the initial balance; `autopilot_snapshot` fills `status.brake`) nor in
     a market that is not live (`_market_live`: every class but crypto needs a quote with `market_open` ≠ false and a
     live price, so stocks only trade in their session), are capped as a cash account
-    (`open_position(max_exposure_pct=)`, atomic with the insert: shares / funds / crypto / other non-derivatives held
-    ≤ that % of equity; a smaller position when it does not fit whole, rule `exposure` when under a tenth fits;
-    futures and options have their own limits), are sized at `autopilot.risk_pct` of the account's equity, and respect
+    (`open_position(max_exposure_pct=)`, atomic with the insert: everything but futures held, an option at its
+    premium, ≤ that % of equity; a smaller position when it does not fit whole, in whole contracts for an option,
+    rule `exposure` when under a tenth fits; futures have their own margin budget), are sized at
+    `autopilot.risk_pct` of the account's equity (an option by its premium budget), and respect
     `autopilot.max_positions` (checked atomically with the insert in `open_position(max_positions=…)`, rule
     `max_positions`: every candidate's bar closes at the same second and their decisions run concurrently) and the
     portfolio risk rules of account 3. Settings changed elsewhere (Ajustes saves one key at a time) are re-read once
@@ -1188,6 +1194,29 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     multiplier, contracts, margin}` (Position.instrument; null for shares, crypto and the rest). The user's own orders
     on a future keep plain units. Data: an API key that serves futures, or the recorder (it records the symbols NEXUS
     watches; 1h is rebuilt from 15m), so a new future needs about a week of recorded history before NEXUS analyses it.
+  - **Theoretical stock options of NEXUS automática** (`app.engine.options`): real option quotes need a paid feed,
+    so every option price is THEORETICAL: Black-Scholes (European, no dividends, rate 4 %) with the underlying's live
+    price and the annualized volatility of its last 20 daily returns (21 daily closes from `rt.hub.get_candles(…,
+    '1d')`, clamped 5 %..300 %), fixed at the entry. `autopilot.stock_instrument` decides how a signal on a stock or
+    fund is traded: `auto` (default) = shares to bet on a rise and a put to bet on a fall (a cash account cannot sell
+    short), `options` = a call or a put, `shares` = shares both ways (a simulated short sale). `_option_plan`: the
+    first monthly expiry (third Friday) at least 30 days away, the at-the-money strike of a simplified grid (0.5 / 1 /
+    2.5 / 5 by price) or the first one further out whose contract (100 shares) fits the premium budget
+    (`autopilot.options_premium_pct` of equity per trade), never past |delta| 0.30 nor under 0.05 $ a share; rule
+    `option` with the reason when none fits (also without daily history, or with a budget of 0 %). The position:
+    symbol `OPT:<EXCHANGE>:<TICKER>:<YYYYMMDD>:<C|P>:<STRIKE>`, side long (it only buys), qty = contracts × 100,
+    levels on the premium (stop −50 %, targets +50 / +100 / +150 %; thirds only with a multiple of 3 contracts), fees
+    `options.FEE_PCT` (2 % of the premium per side: commission plus half the spread, approximate), `instrument {kind
+    'option', name, multiplier 100, contracts, underlying, right, strike, expiry, sigma, delta, spot}`; it counts in
+    the cash exposure at its premium (whole contracts) and in its underlying's correlated group (`risk_group`). It is
+    never asked to the hub: `cached_price` / `last_price` / `_position_price` price it from its underlying, whose 1m
+    bars (subscribed instead, `traded_symbol`) and polled quotes become premium bars (`option_bar`: a put is worth the
+    most at the stock's low). Its trader follows it through the underlying (one position per underlying); its exits
+    are NEXUS's signals on the stock (`assess_option`: a call closes once NEXUS stops being long, a put once it stops
+    being short; no EV rule, the levels are on different prices), and `_expire_options` (monitor loop) closes it 7
+    days before its expiry with a live price of the stock, or settles it at its intrinsic value with the last known
+    price once the expiry passed (reason `EXPIRY`). Its gate decision goes to gate_log on the underlying with the
+    gate's own levels. The comparison with random entries leaves options out (their R is on a theoretical premium).
   - **NEXUS automática against random entries** (`app.sim.autopilot_compare`, `autopilot_comparison()`, `GET
     /api/paper/autopilot/compare`, terminal `autopilot azar`): the newest 200 closed trades of account 3 (origin
     `autopilot`). Each trade's decision bar = the last bar closed at its entry; its reference = the mean R of the
@@ -1246,8 +1275,10 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     `autopilot` (aliases `piloto`, `automatica`, `automática`) drives NEXUS's own account: no argument / `estado` =
     status (what it watches, NEXUS's read of each symbol's last bar, account, winners as "x de n" with a percentage
     only from 30 closed trades, the honest note); `on` / `off` (the same words as `auto`), `lista <símbolos…>` (also
-    `on btc eth`), `escaner [N]`, and the flags `--tf`, `--max`, `--risk` (Spanish decimals accepted), `--top`, in any
-    combination, saved through `set_autopilot` (its Spanish errors); `pos`, `log` (oldest first), `close
+    `on btc eth`), `escaner [N]`, `ambos [N]`, and the flags `--tf`, `--max`, `--risk` (Spanish decimals accepted),
+    `--top`, `--expo`, `--freno`, `--margen`, `--prima` (0 turns these four limits off) and `--instrumento
+    auto|acciones|opciones`, in any combination, saved through `set_autopilot` (its Spanish errors); `pos` (an option
+    by its contract), `log` (oldest first), `close
     <id|símbolo|all>` (`close_autopilot`, noted in its log) and `reset [saldo] --yes` (without `--yes` it only warns).
     An unknown word is refused with the usage, never read as a symbol.
 
@@ -2067,7 +2098,10 @@ Demo account (simulated, never a broker):
   validation does), so the difference includes the value of those exits; markets without candles (an equity without
   a data key, a delisted symbol) leave their trades without a reference (`missing`). Its futures margins are fixed
   approximations (exchanges and brokers change them) and continuous contracts (`1!`) are traded without modelling the
-  roll: a position held across a roll sees the continuous series' jump.
+  roll: a position held across a roll sees the continuous series' jump. Its options are theoretical: real premiums
+  differ (implied volatility, dividends, the bid/ask spread, early exercise of American options, liquidity), its
+  strikes and expiries are simplified, and an option is never exercised or assigned (it is closed before its expiry,
+  or settled at its intrinsic value).
 
 Calendar and alerts:
 - **Curated dates need yearly upkeep**: agencies can move a release (as in the 2025 shutdown). The live BLS / BEA

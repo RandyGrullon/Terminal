@@ -513,6 +513,8 @@ export interface PositionInstrument {
   strike?: number // option
   expiry?: string // option: YYYY-MM-DD
   sigma?: number // option: annual historical volatility of its theoretical price
+  delta?: number // option: |delta| at the entry (Black-Scholes)
+  spot?: number // option: the stock's price at the entry
 }
 
 export interface PaperAccount {

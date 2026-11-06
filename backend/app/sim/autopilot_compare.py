@@ -49,7 +49,8 @@ NOTE = (f"Referencia de cada operación: entradas al azar, en largo y en corto, 
         "a su decisión, en el mismo mercado y temporalidad, con los niveles por defecto de NEXUS, sus salidas mecánicas "
         "(stop, objetivos parciales, stop dinámico y por tiempo), comisiones y deslizamiento; las operaciones de NEXUS "
         "conservan sus salidas del modelo. Intervalo del 95 % por bootstrap por días. Es una medición sobre operaciones "
-        "simuladas, no una garantía; la validación publicada (docs/VALIDATION.md) no encontró ventaja.")
+        "simuladas, no una garantía; la validación publicada (docs/VALIDATION.md) no encontró ventaja. Las "
+        "operaciones con opciones no entran: su R se mide sobre una prima teórica, no sobre el mercado.")
 
 
 def decision_bar(entry_time: int, tf: str) -> int:
@@ -152,7 +153,8 @@ async def compare(rt: Any, account_id: int, *, settings: dict | None = None, sli
     'autopilot'). Markets whose candles do not cover a trade leave it without a reference (counted in `missing`)."""
     rows = await rt.db.fetchall(
         "SELECT id, symbol, tf, entry_time, r_multiple FROM paper_positions WHERE account_id=? AND status='closed' "
-        "AND origin='autopilot' AND r_multiple IS NOT NULL ORDER BY id DESC LIMIT ?", (int(account_id), int(limit)))
+        "AND origin='autopilot' AND r_multiple IS NOT NULL AND symbol NOT LIKE 'OPT:%' ORDER BY id DESC LIMIT ?",
+        (int(account_id), int(limit)))
     trades = [dict(row) for row in rows if safe_float(row["r_multiple"]) is not None]
     base = dict(settings or {})
     groups: dict[tuple[str, str], list[dict]] = defaultdict(list)

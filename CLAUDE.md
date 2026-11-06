@@ -6,16 +6,16 @@ módulo) está en `docs/ARCHITECTURE.md`, que es la fuente de verdad. Guía de u
 
 ## Qué es
 
-Terminal local de investigación de trading, **solo simulación / papel**: FastAPI (Python) + React/TypeScript.
-Gráficos de cualquier activo de TradingView, motor autoadaptativo NEXUS (comprar / vender / mantener, niveles
-«hasta aquí», salidas anticipadas), filtro «¿Tomo esta operación?» (TOMAR / ESPERAR / NO TOMAR), semáforo de
-mercado (FED, calendario de esta semana y la próxima, futuros, volatilidad), escáner, simulador y backtests, cuenta
-demo (a mercado, órdenes límite / stop, riesgo de cartera, auto-trading), la cuenta propia de NEXUS («NEXUS
-automática», cuenta 3: opera sola con sus señales y el filtro TOMAR; apagada por defecto), alertas por Telegram y
-correo, validación walk-forward, PyChart (scripts Python estilo Pine en un sandbox) y una terminal de comandos. Base
-de datos local SQLite (`data/nexus.db`) o PostgreSQL/Supabase en modo nube. La validación publicada concluye «sin
-evidencia de ventaja» (`docs/VALIDATION.md`): ningún texto de la app ni de la documentación puede sugerir lo
-contrario.
+Terminal local de investigación de trading, **solo simulación / papel**: FastAPI (Python) + React/TypeScript. Gráficos
+de cualquier activo de TradingView, motor autoadaptativo NEXUS (comprar / vender / mantener, niveles «hasta aquí»,
+salidas anticipadas), filtro «¿Tomo esta operación?» (TOMAR / ESPERAR / NO TOMAR), semáforo de mercado (FED,
+calendario de esta semana y la próxima, futuros, volatilidad), escáner, simulador y backtests, cuenta demo (a mercado,
+órdenes límite / stop, riesgo de cartera, auto-trading), la cuenta propia de NEXUS («NEXUS automática», cuenta 3,
+1.000 $ simulados: opera sola con sus señales y el filtro TOMAR en cripto, acciones, futuros de índices y opciones con
+precio teórico; apagada por defecto), alertas por Telegram y correo, validación walk-forward, PyChart (scripts Python
+estilo Pine en un sandbox) y una terminal de comandos. Base de datos local SQLite (`data/nexus.db`) o
+PostgreSQL/Supabase en modo nube. La validación publicada concluye «sin evidencia de ventaja» (`docs/VALIDATION.md`):
+ningún texto de la app ni de la documentación puede sugerir lo contrario.
 
 ## Puesta en marcha en una máquina nueva
 
@@ -73,9 +73,9 @@ uv pip install --python backend/.tmp/pgenv/Scripts/python.exe pgserver
 backend/.tmp/pgenv/Scripts/python.exe tools/pg_start.py backend/.tmp/pgdata   # imprime la URI
 ```
 
-Estado tras «NEXUS automática» (comando `autopilot`, registro persistente, avisos opcionales y comparación con entrar
-al azar; 06/11/2026, en Windows): backend 1959 passed / 27 skipped sobre SQLite y 1970 passed / 16 skipped sobre
-PostgreSQL (las omisiones son las de PostgreSQL, red, solo Linux / POSIX y el lock exacto); UI 246 pruebas en 9
+Estado tras «NEXUS automática» con acciones (cuenta de efectivo de 1.000 $ y freno de pérdidas), futuros de índices y
+opciones teóricas (06/11/2026, en Windows): backend 1974 passed / 27 skipped sobre SQLite y 1985 passed / 16 skipped
+sobre PostgreSQL (las omisiones son las de PostgreSQL, red, solo Linux / POSIX y el lock exacto); UI 250 pruebas en 9
 suites; `tsc` sin errores; contrato 130 comprobaciones · 0 fallos · 6 avisos (sin red, `--symbol SIM:NEXUS` y base
 nueva, como en CI: los avisos son listas vacías y ningún informe de validación guardado). La prueba más lenta es
 `tests/test_imp_engine_repaint_history.py` (regresión de repintado: 300 cierres, ~2,5 min). Si la suite sobre
@@ -94,7 +94,8 @@ PostgreSQL local se vuelve muy lenta (miles de esquemas creados y borrados por l
   (retención).
   - `engine/`: NEXUS (`nexus*.py`; `nexus_resume.py` = reanudación exacta desde las anclas guardadas; `service.py`,
     `service_watch.py`), filtro (`gate*.py`), semáforo dentro del filtro (`macro_merge.py`), niveles, aprendizaje,
-    +100 indicadores (`indicators*.py`, `ta.py`), comisiones por clase de activo (`costs.py`).
+    +100 indicadores (`indicators*.py`, `ta.py`), comisiones por clase de activo (`costs.py`), futuros de índices
+    (`contracts.py`) y opciones teóricas de NEXUS automática (`options.py`: Black-Scholes, vencimientos, strikes).
   - `data/`: `hub.py` (velas, cotizaciones, feed en vivo), proveedores (Binance, OKX, Coinbase, Kraken, KuCoin;
     claves opcionales Twelve Data / Alpha Vantage / Polygon), `realtime.py` (cotizaciones en tiempo real con clave,
     dentro de los límites del plan), `stamping.py` (sellado de las instantáneas de TradingView), TradingView

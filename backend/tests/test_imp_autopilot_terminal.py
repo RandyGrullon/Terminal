@@ -133,6 +133,24 @@ def test_cash_account_and_brake_from_the_terminal(client):
     assert _term(client, "autopilot --expo")["ok"] is False
 
 
+def test_stocks_with_options_from_the_terminal(client):
+    text = _text(_term(client, "autopilot"))
+    assert ("Acciones: NEXUS elige, acciones para apostar al alza y un put a la baja (una cuenta de efectivo no vende "
+            "en corto); opciones teóricas con hasta el 10 % del capital en primas por operación") in text
+    res = _term(client, "autopilot --instrumento opciones --prima 5")
+    assert res["ok"], res["lines"]
+    st = res["data"]["autopilot"]
+    assert (st["stock_instrument"], st["options_premium_pct"]) == ("options", 5.0)
+    assert "Acciones: solo opciones, un call para apostar al alza y un put a la baja; opciones teóricas con hasta el " \
+           "5 % del capital" in _text(res)
+    res = _term(client, "piloto --instrumento acciones --prima 0")
+    assert res["ok"] and res["data"]["autopilot"]["stock_instrument"] == "shares"
+    assert "compra acciones y también vende en corto (simulado)" in _text(res)
+    bad = _term(client, "autopilot --instrumento futuros")
+    assert bad["ok"] is False and "Indica --instrumento auto (NEXUS elige), acciones u opciones" in _text(bad)
+    assert _term(client, "autopilot --prima 70")["ok"] is False
+
+
 def test_alerts_switch_from_the_terminal(client):
     res = _term(client, "autopilot avisos on")
     assert res["ok"] and res["data"]["autopilot"]["alerts"] is True

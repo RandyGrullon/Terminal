@@ -30,6 +30,10 @@ newest finished scan (a new candidate is decided at once on its last closed bar)
 positions, autopilot.risk_pct per trade and the portfolio risk rules of its own account. It keeps a short decision
 log (opened / discarded and why / closed); paused, its open positions keep their stop and targets. WS message
 {type 'paper_autopilot'} on topic 'paper'. Simulation only: nothing is ever sent to a broker.
+It may trade stocks and funds with THEORETICAL options (app.engine.options, autopilot.stock_instrument): an option
+position (symbol OPT:…, side long: it only buys calls and puts, qty = contracts × 100, levels on the premium) is
+priced with Black-Scholes from its underlying's live price, follows the underlying's bars and NEXUS's exit signals on
+it, and leaves options.EXIT_DAYS days before its expiry (`_expire_options`).
 
 Pending orders (account 1, table paper_orders, migration 0002): limit / stop entries with an expiry (GTC, N bars of
 the order's tf, or a date). They trigger on live prices only (live 1m bars or polled live quotes): a limit when
@@ -56,6 +60,7 @@ import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from typing import Any
 
 import numpy as np
@@ -83,6 +88,7 @@ from app.sim.common import (
     json_loads,
     side_sign,
 )
+from app.engine import options as opt
 from app.engine.contracts import futures_spec
 from app.util import RateLimitedLog, clamp, floor_time, normalize_tf, now_ms, now_s, safe_float, tf_seconds
 
@@ -93,8 +99,13 @@ RISK_ACCOUNTS = frozenset({1, AUTOPILOT_ACCOUNT})
 # position origins: the user (manual / terminal script), auto-trading, the simulator, NEXUS's own account
 ORIGINS = ("manual", "auto", "sim", "script", "autopilot")
 AUTOPILOT_SOURCES = ("scanner", "list", "both")
-# asset classes outside the cash exposure of NEXUS's account (their own rules: futures margin, option premium)
-DERIVATIVE_CLASSES = frozenset({"futures", "option"})
+# asset classes outside the cash exposure of NEXUS's account (futures: their own approximate-margin rule); an
+# option's premium is cash paid, so an option counts in it at its premium value
+MARGIN_CLASSES = frozenset({"futures"})
+OPTION_CLASSES = frozenset({"stock", "fund"})  # what NEXUS's own account may trade with options
+# autopilot.stock_instrument: auto = shares to bet on a rise, a put on a fall (a cash account cannot sell short) ·
+# shares = shares both ways (a simulated short sale) · options = a call or a put
+STOCK_INSTRUMENTS = ("auto", "shares", "options")
 ALWAYS_OPEN_CLASSES = frozenset({"crypto"})  # 24/7 markets: no market-hours check before an entry
 AUTOPILOT_LOG_MAX = 30
 AUTOPILOT_REFRESH_S = 60.0  # how often the autopilot looks for a newer scan (its candidates)
@@ -159,7 +170,7 @@ ORDERS_LIMIT = 50  # non-pending orders returned by list_orders(status="all")
 DAY_S = 86400
 RISK_GROUP_LABEL = {"crypto": "Cripto", "stock": "Acciones", "fund": "Fondos y ETF", "forex": "Forex",
                     "commodity": "Materias primas", "index": "Índices", "futures": "Futuros", "cfd": "CFD",
-                    "bond": "Bonos", "other": "Otros", "sim": "Mercado simulado"}
+                    "bond": "Bonos", "option": "Opciones", "other": "Otros", "sim": "Mercado simulado"}
 DEMO_NOTE = "Cuenta demo: órdenes simuladas, nunca se envían a un bróker"
 
 
@@ -203,6 +214,9 @@ def risk_group(symbol: str, crypto_one_group: bool = True) -> str:
     sym = str(symbol or "").strip().upper()
     if sym.startswith("SIM:"):
         return "sim"
+    parsed = opt.parse_option_symbol(sym)
+    if parsed is not None:  # an option counts with its underlying: they move together
+        sym = parsed["underlying"]
     cls = asset_class(sym)
     if cls == "crypto" and not crypto_one_group:
         ticker = sym.partition(":")[2] or sym
@@ -429,6 +443,61 @@ def assess_position(side: str, price: float, stop: float, next_tp: float | None,
         advice = (f"Mantener: EV {fmt_r(ev, 2)} · probabilidad estimada {fmt_prob(p_hit)} de llegar {target} "
                   "antes del stop")
     return {"early_exit": False, "exit_by": None, "ev_r": ev, "p_hit": p_hit, "advice": advice, "warnings": warnings}
+
+
+def option_inst(pos: dict) -> dict | None:
+    """The option contract of a position (NEXUS's own account: meta.instrument, or a Position's instrument, of kind
+    'option'), or None."""
+    inst = (pos.get("meta") or {}).get("instrument") or pos.get("instrument")
+    return inst if isinstance(inst, dict) and inst.get("kind") == "option" else None
+
+
+def traded_symbol(pos: dict) -> str:
+    """The market a position follows: an option's underlying stock, any other position's own symbol."""
+    inst = option_inst(pos)
+    return str(inst["underlying"]).upper() if inst is not None and inst.get("underlying") else pos["symbol"]
+
+
+def option_premium(inst: dict, spot: float, at_s: int) -> float:
+    """Theoretical premium per share of an option position's contract with its underlying at `spot`, at unix s
+    `at_s` (Black-Scholes with the volatility fixed at the entry; the intrinsic value from its expiry on)."""
+    expiry = date.fromisoformat(str(inst["expiry"]))
+    return opt.bs_price(str(inst["right"]), float(spot), float(inst["strike"]), opt.years_to(expiry, int(at_s)),
+                        float(inst["sigma"]))
+
+
+def option_bar(inst: dict, open_: float | None, high: float, low: float, close: float,
+               at_s: int) -> tuple[float | None, float, float, float]:
+    """(open, high, low, close) of a bar of the underlying as the option's premium: a put is worth the most when the
+    stock is at its low."""
+    def premium(x: float) -> float:
+        return option_premium(inst, x, at_s)
+
+    hi, lo = (premium(high), premium(low)) if inst.get("right") == "call" else (premium(low), premium(high))
+    return (premium(open_) if open_ is not None else None), hi, lo, premium(close)
+
+
+def assess_option(inst: dict, current: dict | None) -> dict:
+    """Live NEXUS advice for a bought option: NEXUS's exit rule on its underlying (`early_exit` when the action leaves
+    the option's bet: a call once NEXUS stops being long the stock, a put once it stops being short). No EV in R:
+    NEXUS's levels are on the stock, the option's on its theoretical premium."""
+    out = {"early_exit": False, "exit_by": None, "ev_r": None, "p_hit": None, "advice": None, "warnings": []}
+    if not current:
+        return out
+    side = "long" if inst.get("right") == "call" else "short"
+    action = str(current.get("action") or "")
+    label = current.get("action_label") or action or "—"
+    underlying = str(inst.get("underlying") or "")
+    ticker = underlying.partition(":")[2] or underlying
+    warnings = _market_warnings(current, side)
+    if action in (("EXIT_LONG", "SELL") if side == "long" else ("EXIT_SHORT", "BUY")):
+        advice = f"Cerrar ya: NEXUS deja su apuesta {'al alza' if side == 'long' else 'a la baja'} en {ticker} ({label})"
+        warnings = [{"code": "EARLY_EXIT", "severity": "critical", "message": advice}] + warnings
+        return {**out, "early_exit": True, "exit_by": "signal", "advice": advice, "warnings": warnings}
+    critical = next((w for w in warnings if w.get("severity") == "critical"), None)
+    advice = (str(critical.get("message") or "") if critical else
+              f"Mantener: NEXUS no da señal de salida en {ticker} ({label}); la prima es un precio teórico")
+    return {**out, "advice": advice, "warnings": warnings}
 
 
 def atr_from_candles(cs: Any, n: int = 14) -> float | None:
@@ -666,7 +735,10 @@ class PaperEngine:
         task.add_done_callback(self._tasks.discard)
 
     def _fee_pct(self, symbol: str) -> float:
-        """Commission + spread in % per side for the symbol's asset class (risk.fee_pct_by_class, else risk.fee_pct)."""
+        """Commission + spread in % per side for the symbol's asset class (risk.fee_pct_by_class, else risk.fee_pct);
+        an option pays a fixed approximation of its premium (app.engine.options.FEE_PCT)."""
+        if opt.is_option(symbol):
+            return opt.FEE_PCT
         return fee_pct_for(symbol, {"risk.fee_pct": self._setting("risk.fee_pct", 0.1),
                                     "risk.fee_pct_by_class": self._setting("risk.fee_pct_by_class", None)})
 
@@ -678,9 +750,10 @@ class PaperEngine:
 
     @staticmethod
     def _follows(prof: AutoProfile, pos: dict) -> bool:
-        """This trader manages the position: same account and origin, a symbol it trades and the position's tf."""
-        return (pos["origin"] == prof.origin and pos["account_id"] == prof.account_id and pos["symbol"] in prof.symbols
-                and (pos.get("tf") or "1h") == prof.tf)
+        """This trader manages the position: same account and origin, a symbol it trades (an option: its underlying)
+        and the position's tf."""
+        return (pos["origin"] == prof.origin and pos["account_id"] == prof.account_id
+                and traded_symbol(pos) in prof.symbols and (pos.get("tf") or "1h") == prof.tf)
 
     def _auto_follows(self, pos: dict) -> bool:
         """True while an automatic trader manages this position (it decides its exits at the bar close)."""
@@ -706,6 +779,7 @@ class PaperEngine:
             tf = normalize_tf(self._setting("autopilot.tf", "1h") or "1h")
         except ValueError:
             tf = "1h"
+        instr = str(self._setting("autopilot.stock_instrument", "auto") or "auto").strip().lower()
         return {
             "enabled": bool(self._setting("autopilot.enabled", False)),
             "source": source if source in AUTOPILOT_SOURCES else "scanner",
@@ -718,14 +792,16 @@ class PaperEngine:
             "max_exposure_pct": float(num("autopilot.max_exposure_pct", 100.0, 0.0, 500.0)),
             "max_drawdown_pct": float(num("autopilot.max_drawdown_pct", 20.0, 0.0, 90.0)),
             "futures_margin_pct": float(num("autopilot.futures_margin_pct", 50.0, 0.0, 100.0)),
+            "stock_instrument": instr if instr in STOCK_INSTRUMENTS else "auto",
+            "options_premium_pct": float(num("autopilot.options_premium_pct", 10.0, 0.0, 50.0)),
         }
 
     def _autopilot_held(self) -> dict[str, set[str]]:
-        """tf -> symbols of the positions NEXUS's own trader holds."""
+        """tf -> symbols (an option: its underlying) of the positions NEXUS's own trader holds."""
         held: dict[str, set[str]] = {}
         for pos in self._open.values():
             if pos["account_id"] == AUTOPILOT_ACCOUNT and pos["origin"] == "autopilot":
-                held.setdefault(pos.get("tf") or "1h", set()).add(pos["symbol"])
+                held.setdefault(pos.get("tf") or "1h", set()).add(traded_symbol(pos))
         return held
 
     def _autopilot_profile(self) -> AutoProfile | None:
@@ -824,6 +900,10 @@ class PaperEngine:
         return float(self._setting("risk.slippage_pct", 0.02) or 0.0)
 
     def cached_price(self, symbol: str, max_age_s: float | None = None) -> float | None:
+        if opt.is_option(symbol):  # an option: its theoretical premium from its underlying's cached price
+            inst = self._option_of(symbol)
+            spot = self.cached_price(str(inst["underlying"]), max_age_s) if inst is not None else None
+            return option_premium(inst, spot, now_s()) if inst is not None and spot is not None else None
         item = self._prices.get(symbol.upper())
         if item is None:
             return None
@@ -834,6 +914,10 @@ class PaperEngine:
 
     async def last_price(self, symbol: str) -> float | None:
         symbol = symbol.upper()
+        if opt.is_option(symbol):  # never asked to the hub: priced from its underlying
+            inst = self._option_of(symbol)
+            spot = await self.last_price(str(inst["underlying"])) if inst is not None else None
+            return option_premium(inst, spot, now_s()) if inst is not None and spot is not None else None
         cached = self.cached_price(symbol, 10.0)
         if cached is not None:
             return cached
@@ -852,7 +936,29 @@ class PaperEngine:
     def _position_price(self, pos: dict) -> float | None:
         if pos["origin"] == "sim":
             return safe_float(pos["meta"].get("last_price"))
+        inst = option_inst(pos)
+        if inst is not None:  # its theoretical premium now (time decay included) with the underlying's last price
+            spot = self.cached_price(str(inst["underlying"])) or safe_float(pos["meta"].get("spot"))
+            return option_premium(inst, spot, now_s()) if spot else safe_float(pos["meta"].get("last_price"))
         return self.cached_price(pos["symbol"]) or safe_float(pos["meta"].get("last_price"))
+
+    def _option_of(self, symbol: str) -> dict | None:
+        """The contract of an open option position with this symbol (its volatility prices it), or None."""
+        sym = symbol.upper()
+        for p in self._open.values():
+            if p["symbol"] == sym:
+                inst = option_inst(p)
+                if inst is not None:
+                    return inst
+        return None
+
+    @staticmethod
+    def _pos_label(pos: dict) -> str:
+        """How events name a position: "BINANCE:BTCUSDT Largo"; an option by its contract ("AAPL 230 C … (call)")."""
+        inst = option_inst(pos)
+        if inst is not None:
+            return f"{inst.get('name') or pos['symbol']} ({inst.get('right')})"
+        return f"{pos['symbol']} {SIDE_LABEL[pos['side']]}"
 
     # ------------------------------------------------------------------ views
 
@@ -1185,8 +1291,8 @@ class PaperEngine:
                                          "risk": 0.0})
             item["positions"] += 1
             item["risk"] += self._position_risk(pos)
-            if pos["symbol"] not in item["symbols"]:
-                item["symbols"].append(pos["symbol"])
+            if traded_symbol(pos) not in item["symbols"]:
+                item["symbols"].append(traded_symbol(pos))
         max_group = limits["max_positions_per_group"] or None
         cap = limits["max_open_risk_pct"] or None
         for item in groups.values():
@@ -1306,6 +1412,7 @@ class PaperEngine:
         max_exposure_pct: float | None = None,
         contracts: bool = False,
         margin_pct: float | None = None,
+        instrument: dict | None = None,
     ) -> dict:
         """Open a paper position. Returns {"position": Position, "gate": GateResult | None}.
 
@@ -1313,7 +1420,10 @@ class PaperEngine:
         the fill is exactly `price` (a limit order). `order`: the pending order being filled, marked filled in the
         same transaction (PaperError when it stopped being pending meanwhile, e.g. cancelled by the user).
         `max_positions`: cap on the account's open positions, checked atomically with the insert (PaperRiskBlocked
-        rule 'max_positions'): bars of several symbols close at once and their decisions run concurrently."""
+        rule 'max_positions'): bars of several symbols close at once and their decisions run concurrently.
+        `instrument`: an option's contract (NEXUS's own account, kind 'option', see _option_plan): `qty` = contracts
+        × 100 and `price` = its theoretical premium; levels on the premium, whole contracts under the exposure cap,
+        and its gate decision logged on the underlying."""
         side = _norm_side(side)
         symbol = str(symbol or "").strip().upper()
         if not symbol:
@@ -1361,8 +1471,11 @@ class PaperEngine:
         targets = self._choose_targets(s, fill, risk_unit, sl, tp, tps, gate)
 
         # an index future (contracts=True): whole contracts, the money at the stop = points × multiplier per contract
-        spec = futures_spec(symbol) if contracts and qty is None else None
-        instrument: dict[str, Any] | None = None
+        spec = futures_spec(symbol) if contracts and qty is None and instrument is None else None
+        instrument = dict(instrument) if isinstance(instrument, dict) else None  # an option: sized by the caller
+        option = instrument is not None and instrument.get("kind") == "option"
+        if option and qty is None:
+            raise PaperError("Faltan los contratos de la opción")
         if spec is not None:
             per_contract = risk_unit * float(spec["multiplier"])
             budget = await self.equity(account_id) * risk / 100.0
@@ -1415,7 +1528,8 @@ class PaperEngine:
                 raise PaperError(f"La orden #{order['id']} ya no está pendiente")
             if max_positions:
                 self._check_max_positions(account_id, int(max_positions))
-            if instrument is not None and margin_pct is not None:  # atomic with the insert, like the risk rules
+            if margin_pct is not None and instrument is not None and instrument.get("kind") == "future":
+                # the margin budget, atomic with the insert like the risk rules
                 fit = self._margin_room(account_id, instrument, float(margin_pct), await self.equity(account_id))
                 if fit < int(instrument["contracts"]):
                     instrument["contracts"] = fit
@@ -1423,10 +1537,20 @@ class PaperEngine:
                     fee = qty * fill * self._fee_pct(symbol) / 100.0
                     meta["fees"] = fee
                     meta["partial"] = bool(meta["partial"]) and fit % 3 == 0
-            if max_exposure_pct is not None and asset_class(symbol) not in DERIVATIVE_CLASSES:
+            if max_exposure_pct is not None and asset_class(symbol) not in MARGIN_CLASSES:
                 capped = self._cap_exposure(account_id, symbol, qty, fill, float(max_exposure_pct),
                                             await self.equity(account_id))
                 if capped < qty:  # a smaller position that fits the cash account
+                    if option:  # whole contracts only
+                        mult = float(instrument["multiplier"])
+                        fit = int(math.floor(capped / mult + 1e-9))
+                        if fit < 1:
+                            raise PaperRiskBlocked(
+                                f"Exposición máxima: la prima de 1 contrato ({fmt_num(fill * mult, 2)}) no cabe en el "
+                                f"efectivo libre ({fmt_num(capped * fill, 2)}).", "exposure")
+                        instrument["contracts"] = fit
+                        meta["partial"] = bool(meta["partial"]) and fit % 3 == 0
+                        capped = fit * mult
                     qty = capped
                     fee = qty * fill * self._fee_pct(symbol) / 100.0
                     meta["fees"] = fee
@@ -1453,14 +1577,20 @@ class PaperEngine:
                     (fee, now_ms(), account_id),
                 )
                 if gate is not None:
+                    g_sym, g_side, g_levels = symbol, side, (fill, stop, targets[0], targets[1])
+                    if option:  # decided on the underlying: logged there with the gate's levels (these are premiums)
+                        g_sym = str(instrument["underlying"]).upper()
+                        g_side = "long" if instrument.get("right") == "call" else "short"
+                        g_levels = (safe_float(gate.get("entry")) or safe_float(instrument.get("spot")),
+                                    safe_float(gate.get("sl")), safe_float(gate.get("tp1")), safe_float(gate.get("tp2")))
                     await tx.execute(
                         "INSERT OR IGNORE INTO gate_log(symbol, tf, time, direction, verdict, score, win_prob, entry, sl, "
                         "tp1, tp2, checks, taken, source, created_at, target_at) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
                         (
-                            symbol, tf_n, decision_time, side, verdict or "WAIT", gate_score or 0.0,
-                            safe_float(gate.get("win_prob")), fill, stop, targets[0], targets[1],
-                            json_dumps(gate_checks_vector(gate)), self._gate_source(symbol, origin), now_ms(), target_at,
+                            g_sym, tf_n, decision_time, g_side, verdict or "WAIT", gate_score or 0.0,
+                            safe_float(gate.get("win_prob")), *g_levels,
+                            json_dumps(gate_checks_vector(gate)), self._gate_source(g_sym, origin), now_ms(), target_at,
                         ),
                     )
                 if order is not None:
@@ -1486,8 +1616,10 @@ class PaperEngine:
                 self._orders.pop(order["id"], None)
                 self._watch_from.pop(order["id"], None)
         if origin != "sim":
-            self._prices.setdefault(symbol, (ref, time.monotonic()))
-            self._stale_warned.discard(symbol)  # a new position gets its own "sin precio en vivo" notice
+            traded = str(instrument["underlying"]).upper() if option else symbol
+            if not option:  # an option is priced from its underlying, never from a cached price of its own
+                self._prices.setdefault(symbol, (ref, time.monotonic()))
+            self._stale_warned.discard(traded)  # a new position gets its own "sin precio en vivo" notice
         forced = " · FORZADA contra el filtro" if meta["forced"] else ""
         tps_txt = " · ".join(f"TP{i + 1} {fmt_price(t)}" for i, t in enumerate(targets) if t is not None)
         via = ""
@@ -1497,10 +1629,16 @@ class PaperEngine:
         data: dict[str, Any] = {"position_id": pid, "account_id": account_id, "symbol": symbol, "side": side}
         if order is not None:
             data["order_id"] = order["id"]
+        if option:
+            n = int(instrument["contracts"])
+            head = (f"Abierto {instrument.get('name') or symbol} ({instrument.get('right')}) · {n} "
+                    f"{'contrato' if n == 1 else 'contratos'} @ {fmt_price(fill)} por acción (prima teórica)")
+        else:
+            head = f"Abierto {symbol} {SIDE_LABEL[side]} {fmt_qty(qty)} @ {fmt_price(fill)}"
         self._emit(
             "trade",
             self._source(origin),
-            f"Abierto {symbol} {SIDE_LABEL[side]} {fmt_qty(qty)} @ {fmt_price(fill)} · SL {fmt_price(stop)}"
+            head + f" · SL {fmt_price(stop)}"
             + (f" · {tps_txt}" if tps_txt else "") + (f" · Filtro {gate_line(gate)}" if gate else "") + forced + via,
             data,
         )
@@ -1584,7 +1722,7 @@ class PaperEngine:
     async def _atr_estimate(self, symbol: str, tf: str, risk_unit: float, origin: str) -> float:
         sl_atr = float(self._setting("nexus.sl_atr", 2.0) or 2.0)
         fallback = risk_unit / max(sl_atr, 0.1)
-        if origin == "sim" or self.rt.hub is None:
+        if origin == "sim" or self.rt.hub is None or opt.is_option(symbol):  # an option has no candles of its own
             return fallback
         try:
             cs = await asyncio.wait_for(self.rt.hub.get_candles(symbol, tf, 60), timeout=15)
@@ -1994,7 +2132,7 @@ class PaperEngine:
             else:
                 r_part = s * (px - pos["entry_price"]) / max(float(meta.get("risk_unit") or 0.0), 1e-12)
                 extra = " · stop a punto de equilibrio" if f.reason == "TP1" else " · stop dinámico activado" if f.reason == "TP2" else ""
-                events.append(f"{pos['symbol']} {SIDE_LABEL[pos['side']]}: {f.reason} alcanzado ({fmt_r(r_part)}) · "
+                events.append(f"{self._pos_label(pos)}: {f.reason} alcanzado ({fmt_r(r_part)}) · "
                               f"1/3 cerrado a {fmt_price(px)}{extra}")
         if st is not None:
             pos["sl"] = st.sl
@@ -2038,7 +2176,7 @@ class PaperEngine:
             self._emit(
                 "trade",
                 source,
-                f"Cerrado {pos['symbol']} {SIDE_LABEL[pos['side']]} {fmt_r(pos.get('r_multiple'))} "
+                f"Cerrado {self._pos_label(pos)} {fmt_r(pos.get('r_multiple'))} "
                 f"({fmt_pct(pos.get('pnl_pct'), 2)} · {fmt_num(pos['pnl'], 2, True)}) · {meta.get('exit_label')}",
                 {"position_id": pos["id"], "account_id": pos["account_id"], "pnl": pos["pnl"],
                  "r_multiple": pos.get("r_multiple"), "reason": pos["exit_reason"]},
@@ -2079,8 +2217,9 @@ class PaperEngine:
         elif all:
             targets = [p for p in self._open.values() if p["account_id"] == account_id]
         else:
-            sym = str(symbol).upper()
-            targets = [p for p in self._open.values() if p["account_id"] == account_id and p["symbol"] == sym]
+            sym = str(symbol).upper()  # an option also closes by its underlying's symbol
+            targets = [p for p in self._open.values()
+                       if p["account_id"] == account_id and sym in (p["symbol"], traded_symbol(p))]
             if not targets:
                 raise PaperError(f"No hay posiciones abiertas en {sym}")
         closed: list[dict] = []
@@ -2223,7 +2362,8 @@ class PaperEngine:
                 self._prices[sym] = (close, time.monotonic())
                 self._stale_warned.discard(sym)
             if (live or catch_up) and (is_sim_symbol or tf == "1m"):
-                positions = [p for p in self._open.values() if p["symbol"] == sym and p["origin"] != "sim"
+                # the positions on this market: an option follows the bars of its underlying
+                positions = [p for p in self._open.values() if traded_symbol(p) == sym and p["origin"] != "sim"
                              and (live or candle_time + bar_s > int(p["entry_time"]))]
                 if positions:
                     changed_accounts: set[int] = set()
@@ -2237,8 +2377,13 @@ class PaperEngine:
                                 continue
                             use_hl = bar_time >= int(pos["entry_time"])
                             n_before = (pos["qty_open"], pos["tp_hits"])
-                            await self._process_price(pos, high, low, close, open_=safe_float(candle.get("open")),
-                                                      use_hl=use_hl, time_s=fill_time, bar_time=bar_time, bar_s=bar_s)
+                            bar = (safe_float(candle.get("open")), high, low, close)
+                            inst = option_inst(pos)
+                            if inst is not None:  # the stock's bar as a bar of the option's theoretical premium
+                                pos["meta"]["spot"] = close
+                                bar = option_bar(inst, *bar, fill_time)
+                            await self._process_price(pos, bar[1], bar[2], bar[3], open_=bar[0], use_hl=use_hl,
+                                                      time_s=fill_time, bar_time=bar_time, bar_s=bar_s)
                             if (pos["qty_open"], pos["tp_hits"]) != n_before:
                                 changed_accounts.add(pos["account_id"])
                     for aid in changed_accounts:
@@ -2290,14 +2435,18 @@ class PaperEngine:
         pos = self._open.get(position_id)
         if pos is None or not isinstance(current, dict):
             return None
-        st = self._level_state(pos)
         meta = pos["meta"]
-        px = price if price is not None else (self._position_price(pos) or safe_float(current.get("price")))
-        info = assess_position(
-            pos["side"], px, st.effective_stop(), st.next_target(), float(meta.get("risk_unit") or 0.0),
-            current, float(self._setting("nexus.exit_threshold", 0.0) or 0.0),
-            sigma=SIGMA_ATR * float(meta.get("atr") or 0.0), horizon=int(self._setting("nexus.horizon", 5) or 5),
-        )
+        inst = option_inst(pos)
+        if inst is not None:  # NEXUS's exit rules on the underlying (its levels are on the stock, not the premium)
+            info = assess_option(inst, current)
+        else:
+            st = self._level_state(pos)
+            px = price if price is not None else (self._position_price(pos) or safe_float(current.get("price")))
+            info = assess_position(
+                pos["side"], px, st.effective_stop(), st.next_target(), float(meta.get("risk_unit") or 0.0),
+                current, float(self._setting("nexus.exit_threshold", 0.0) or 0.0),
+                sigma=SIGMA_ATR * float(meta.get("atr") or 0.0), horizon=int(self._setting("nexus.horizon", 5) or 5),
+            )
         meta["advice"] = info["advice"]
         meta["warnings"] = info["warnings"]
         return info
@@ -2318,7 +2467,8 @@ class PaperEngine:
         for pos in self._open.values():
             if pos["origin"] == "sim":
                 continue
-            by_key.setdefault((pos["symbol"], pos.get("tf") or "1h"), []).append(pos)
+            # an option: the analysis of its underlying
+            by_key.setdefault((traded_symbol(pos), pos.get("tf") or "1h"), []).append(pos)
         exits = 0
         mono = time.monotonic()
         for (symbol, tf), positions in by_key.items():
@@ -2355,10 +2505,13 @@ class PaperEngine:
                     self._warned[pos["id"]] = mono
                     why = (current.get("action_label") or current.get("action") if info.get("exit_by") == "signal"
                            else f"valor esperado de mantener {fmt_r(info['ev_r'], 2)} con el score en contra")
+                    inst = option_inst(pos)
+                    what = (f"{inst.get('name')}: NEXUS recomienda CERRAR el {inst.get('right')}" if inst is not None
+                            else f"{pos['symbol']}: NEXUS recomienda CERRAR el {SIDE_LABEL[pos['side']]}")
                     self._emit(
                         "warn",
                         "paper",
-                        f"⚠ {pos['symbol']}: NEXUS recomienda CERRAR el {SIDE_LABEL[pos['side']]} ({why})",
+                        f"⚠ {what} ({why})",
                         {"position_id": pos["id"], "account_id": pos["account_id"], "action": current.get("action"),
                          "ev_r": info["ev_r"]},
                     )
@@ -2384,7 +2537,7 @@ class PaperEngine:
         seq, reads = self._autopilot_seq, self._autopilot_reads
         try:
             async with self._auto_locks.setdefault((acct, symbol), asyncio.Lock()):
-                mine = [p for p in self._open.values() if p["account_id"] == acct and p["symbol"] == symbol]
+                mine = [p for p in self._open.values() if p["account_id"] == acct and traded_symbol(p) == symbol]
                 followed = [p for p in mine if self._follows(prof, p)]
                 if mine and not followed:
                     return  # the user's own position: no pyramiding and nothing for the auto-trader to manage
@@ -2404,8 +2557,8 @@ class PaperEngine:
                     return  # an exits-only trader (a position from before a change of timeframe)
                 if not self._newest_bar(symbol, tf, upto, acct):
                     return  # a newer bar has closed meanwhile: entries are decided on that one
-                if any(p["account_id"] == acct and p["symbol"] == symbol for p in self._open.values()):
-                    return
+                if any(p["account_id"] == acct and traded_symbol(p) == symbol for p in self._open.values()):
+                    return  # one position per market (an option counts on its underlying)
                 action = current.get("action")
                 if action == "BUY":
                     side = "long"
@@ -2452,23 +2605,47 @@ class PaperEngine:
                     if own:
                         self._autopilot_note(symbol, "skip", text)
                     return
+                # a stock or fund may be traded with an option (autopilot.stock_instrument): a call or a put
+                plan: dict[str, Any] | None = None
+                what = SIDE_LABEL[side]
+                if cfg is not None and self._uses_options(cfg, symbol, side):
+                    what = "Call" if side == "long" else "Put"
                 try:
-                    res = await self.open_position(
-                        acct, symbol, side, tf, origin=prof.origin, gate=gate, check_gate=False, risk_pct=prof.risk_pct,
-                        max_positions=prof.max_positions or None,
-                        max_exposure_pct=(cfg["max_exposure_pct"] or None) if cfg is not None else None,
-                        contracts=cfg is not None, margin_pct=cfg["futures_margin_pct"] if cfg is not None else None)
-                except PaperRiskBlocked as blk:  # lost the race for the last free slot / risk room
+                    if cfg is not None and what in ("Call", "Put"):
+                        plan = await self._option_plan(symbol, side, cfg)
+                        res = await self.open_position(
+                            acct, plan["symbol"], "long", tf, qty=plan["qty"], sl=plan["sl"], tps=plan["tps"],
+                            price=plan["premium"], origin=prof.origin, gate=gate, check_gate=False,
+                            risk_pct=prof.risk_pct, max_positions=prof.max_positions or None,
+                            max_exposure_pct=cfg["max_exposure_pct"] or None, instrument=plan["instrument"])
+                    else:
+                        res = await self.open_position(
+                            acct, symbol, side, tf, origin=prof.origin, gate=gate, check_gate=False,
+                            risk_pct=prof.risk_pct, max_positions=prof.max_positions or None,
+                            max_exposure_pct=(cfg["max_exposure_pct"] or None) if cfg is not None else None,
+                            contracts=cfg is not None, margin_pct=cfg["futures_margin_pct"] if cfg is not None else None)
+                except PaperRiskBlocked as blk:  # no option fits / lost the race for the last free slot / risk room
                     if self._log.should_log(f"auto-risk:{acct}:{symbol}:{blk.rule}", 3600):
-                        self._emit("info", "paper", f"{prof.label}: {symbol} {SIDE_LABEL[side]} descartado: {blk.message}")
+                        self._emit("info", "paper", f"{prof.label}: {symbol} {what} descartado: {blk.message}")
                     if own:
-                        self._autopilot_note(symbol, "skip", f"{SIDE_LABEL[side]} descartado: {blk.message}")
+                        self._autopilot_note(symbol, "skip", f"{what} descartado: {blk.message}")
                     return
                 if own:
                     pos = (res or {}).get("position") or {}
-                    self._autopilot_note(symbol, "open",
-                                         f"Abre {SIDE_LABEL[side].lower()} a {fmt_price(pos.get('entry_price'))} · "
-                                         f"SL {fmt_price(pos.get('sl'))} · filtro {gate_line(gate)}")
+                    inst = pos.get("instrument") or {}
+                    if plan is not None:
+                        n = int(inst.get("contracts") or 0)
+                        self._autopilot_note(
+                            symbol, "open",
+                            f"Compra {n} {'contrato' if n == 1 else 'contratos'} {what.lower()} {inst.get('name')} a "
+                            f"{fmt_price(pos.get('entry_price'))} por acción (prima teórica; delta "
+                            f"{fmt_num(inst.get('delta'), 2)}, volatilidad histórica "
+                            f"{fmt_pct((safe_float(inst.get('sigma')) or 0.0) * 100.0, 0, False)}) · stop de la prima "
+                            f"{fmt_price(pos.get('sl'))} · filtro {gate_line(gate)}")
+                    else:
+                        self._autopilot_note(symbol, "open",
+                                             f"Abre {SIDE_LABEL[side].lower()} a {fmt_price(pos.get('entry_price'))} · "
+                                             f"SL {fmt_price(pos.get('sl'))} · filtro {gate_line(gate)}")
         except PaperRiskBlocked as blk:
             if self._log.should_log(f"auto-risk:{acct}:{symbol}:{blk.rule}", 3600):
                 self._emit("info", "paper", f"{prof.label}: {symbol} descartado: {blk.message}")
@@ -2528,9 +2705,11 @@ class PaperEngine:
                 return False
             await self._close(pos, price, "REVERSE" if reverse else "EARLY", label, now_s())
         if pos["account_id"] == AUTOPILOT_ACCOUNT:
-            self._autopilot_note(pos["symbol"], "close",
-                                 f"Cierra {SIDE_LABEL[pos['side']].lower()} a {fmt_price(price)} "
-                                 f"({label.lower()}, {fmt_r(pos.get('r_multiple'))})")
+            inst = option_inst(pos)
+            what = (f"el {inst.get('right')} {inst.get('name')}" if inst is not None
+                    else SIDE_LABEL[pos["side"]].lower())
+            self._autopilot_note(traded_symbol(pos), "close",
+                                 f"Cierra {what} a {fmt_price(price)} ({label.lower()}, {fmt_r(pos.get('r_multiple'))})")
         await self.publish(pos["account_id"])
         if config.BACKGROUND:
             await self._sync_subscriptions()
@@ -2609,7 +2788,7 @@ class PaperEngine:
         new = [sym for sym in watch if fresh_tf or sym not in self._autopilot_watch]
         changed = watch != self._autopilot_watch
         self._autopilot_watch = watch
-        held = {p["symbol"] for p in self._open.values() if p["account_id"] == AUTOPILOT_ACCOUNT}
+        held = {traded_symbol(p) for p in self._open.values() if p["account_id"] == AUTOPILOT_ACCOUNT}
         gone = [s for s in self._autopilot_last if s not in watch and s not in held]
         for sym in gone:
             self._autopilot_last.pop(sym, None)
@@ -2639,10 +2818,12 @@ class PaperEngine:
         watching = [{"symbol": sym, **info, "last": last(sym)} for sym, info in sorted(self._autopilot_watch.items())]
         listed = set(self._autopilot_watch)
         for pos in sorted(self._open.values(), key=lambda p: p["id"]):
-            if pos["account_id"] == AUTOPILOT_ACCOUNT and pos["symbol"] not in listed:
-                watching.append({"symbol": pos["symbol"], "why": "posición abierta", "direction": pos["side"],
-                                 "last": last(pos["symbol"])})
-                listed.add(pos["symbol"])
+            sym = traded_symbol(pos)  # an option: the stock NEXUS follows for it
+            if pos["account_id"] == AUTOPILOT_ACCOUNT and sym not in listed:
+                inst = option_inst(pos)
+                direction = ("long" if inst.get("right") == "call" else "short") if inst is not None else pos["side"]
+                watching.append({"symbol": sym, "why": "posición abierta", "direction": direction, "last": last(sym)})
+                listed.add(sym)
         return {
             "enabled": cfg["enabled"],
             "account_id": AUTOPILOT_ACCOUNT,
@@ -2661,6 +2842,8 @@ class PaperEngine:
             "max_exposure_pct": cfg["max_exposure_pct"],
             "max_drawdown_pct": cfg["max_drawdown_pct"],
             "futures_margin_pct": cfg["futures_margin_pct"],
+            "stock_instrument": cfg["stock_instrument"],
+            "options_premium_pct": cfg["options_premium_pct"],
             "brake": None,  # filled by autopilot_snapshot (it needs the account's equity)
             "note": AUTOPILOT_NOTE,
         }
@@ -2736,12 +2919,13 @@ class PaperEngine:
 
     def _cap_exposure(self, account_id: int, symbol: str, qty: float, fill: float, pct: float,
                       equity: float) -> float:
-        """Units within a cash account's exposure (non-derivatives held ≤ pct % of equity): the same qty, a smaller one
-        that fits, or PaperRiskBlocked 'exposure' when what is left is under a tenth of the order."""
+        """Units within a cash account's exposure (all but futures, an option at its premium, ≤ pct % of equity):
+        the same qty, a smaller one that fits, or PaperRiskBlocked 'exposure' when what is left is under a tenth of
+        the order."""
         cap = max(float(equity), 0.0) * float(pct) / 100.0
         used = sum(float(p["qty_open"]) * float(self._position_price(p) or p["entry_price"])
                    for p in self._open.values()
-                   if p["account_id"] == account_id and asset_class(p["symbol"]) not in DERIVATIVE_CLASSES)
+                   if p["account_id"] == account_id and asset_class(p["symbol"]) not in MARGIN_CLASSES)
         room = cap - used
         want = float(qty) * float(fill)
         if want <= room:
@@ -2752,10 +2936,119 @@ class PaperEngine:
                 f"({fmt_pct(pct, 0, False)} del capital), así que no cabe otra posición.", "exposure")
         return room / float(fill)
 
+    @staticmethod
+    def _uses_options(cfg: dict[str, Any], symbol: str, side: str) -> bool:
+        """NEXUS's own account trades this signal with an option: a stock or fund in mode «options» (a call to bet on
+        a rise, a put on a fall), or in mode «auto» to bet on a fall (a cash account cannot sell shares short)."""
+        if asset_class(symbol) not in OPTION_CLASSES:
+            return False
+        mode = cfg.get("stock_instrument") or "auto"
+        return mode == "options" or (mode == "auto" and side == "short")
+
+    async def _hist_vol(self, symbol: str) -> float | None:
+        """Annualized volatility of the last 20 daily closes of `symbol` (an option's theoretical price), or None."""
+        hub = self.rt.hub
+        if hub is None:
+            return None
+        try:
+            cs = await asyncio.wait_for(hub.get_candles(symbol, "1d", 60), timeout=20)
+        except Exception:
+            return None
+        if cs is None or len(cs) == 0:
+            return None
+        return opt.historical_vol(list(cs.close))
+
+    async def _option_plan(self, symbol: str, side: str, cfg: dict[str, Any]) -> dict[str, Any]:
+        """The option NEXUS's own account buys for a signal on a stock (`side` = its bet on the stock): a call or a
+        put of the first monthly expiry at least 30 days away, the at-the-money strike or the first one further out
+        whose contract fits its premium budget (autopilot.options_premium_pct of its equity, |delta| ≥ 0.30), priced
+        with Black-Scholes and the stock's 20-day historical volatility. Levels on the premium: stop −50 %, targets
+        +50 / +100 / +150 %. PaperRiskBlocked 'option' with the reason when none fits."""
+        right = "call" if side == "long" else "put"
+        ticker = symbol.partition(":")[2] or symbol
+        pct = float(cfg.get("options_premium_pct") or 0.0)
+        if pct <= 0:
+            why = (" y en una cuenta de efectivo no vende acciones en corto"
+                   if cfg.get("stock_instrument") == "auto" else "")
+            raise PaperRiskBlocked(f"no compra opciones (su prima máxima por operación es 0 %){why}.", "option")
+        spot = await self.last_price(symbol)
+        if spot is None or spot <= 0:
+            raise PaperRiskBlocked(f"no hay precio de {ticker} para valorar la opción.", "option")
+        sigma = await self._hist_vol(symbol)
+        if sigma is None:
+            raise PaperRiskBlocked(f"faltan {opt.VOL_WINDOW + 1} cierres diarios de {ticker} para estimar su "
+                                   "volatilidad (el precio teórico de la opción).", "option")
+        now = now_s()
+        expiry = opt.monthly_expiry(datetime.fromtimestamp(now, timezone.utc).date())
+        budget = await self.equity(AUTOPILOT_ACCOUNT) * pct / 100.0
+        pick = opt.choose_option(spot, right, opt.years_to(expiry, now), sigma, budget) or {"none": True}
+        if pick.get("none"):
+            cheapest = pick.get("cheapest")
+            raise PaperRiskBlocked(
+                (f"ningún {right} de {ticker} cabe en su presupuesto de primas ({fmt_num(budget, 2)}, "
+                 f"{fmt_pct(pct, 0, False)} del capital): el más barato con delta de al menos "
+                 f"{fmt_num(opt.MIN_DELTA, 2)} cuesta {fmt_num(cheapest, 2)} por contrato (precio teórico)."
+                 if cheapest is not None else
+                 f"ningún {right} de {ticker} con delta de al menos {fmt_num(opt.MIN_DELTA, 2)} y una prima de al "
+                 f"menos {fmt_num(opt.MIN_PREMIUM, 2)} por acción."), "option")
+        premium, n, strike = float(pick["premium"]), int(pick["contracts"]), float(pick["strike"])
+        instrument = {"kind": "option", "name": opt.option_name(symbol, expiry, right, strike),
+                      "multiplier": float(opt.MULTIPLIER), "contracts": n, "underlying": symbol, "right": right,
+                      "strike": strike, "expiry": expiry.isoformat(), "sigma": round(float(sigma), 6),
+                      "delta": round(float(pick["delta"]), 4), "spot": float(spot)}
+        return {"symbol": opt.option_symbol(symbol, expiry, right, strike), "premium": premium,
+                "qty": float(n * opt.MULTIPLIER), "sl": premium * (1.0 - opt.STOP_FRACTION),
+                "tps": [premium * m for m in opt.TARGETS], "instrument": instrument}
+
+    async def _expire_options(self, now: int | None = None) -> int:
+        """Option positions leave options.EXIT_DAYS days before their expiry (time decay speeds up near the end) at
+        their theoretical premium with a live price of the underlying; one that reaches its expiry anyway (no live
+        price meanwhile) settles at its intrinsic value with the last known price. Returns how many closed."""
+        now = int(now if now is not None else now_s())
+        closed = 0
+        changed: set[int] = set()
+        for pos in sorted(self._open.values(), key=lambda p: p["id"]):
+            inst = option_inst(pos)
+            if inst is None or pos["origin"] == "sim":
+                continue
+            try:
+                expiry = date.fromisoformat(str(inst.get("expiry")))
+            except ValueError:
+                continue
+            left = opt.days_to(expiry, now)
+            if left > opt.EXIT_DAYS:
+                continue
+            expired = left <= 0
+            spot = self.cached_price(str(inst["underlying"]), PRICE_STALE_S)
+            if spot is None and not expired:
+                continue  # it waits for a live price of the stock (an open market) to leave at a fair premium
+            if spot is None:
+                spot = safe_float(pos["meta"].get("spot")) or safe_float(inst.get("spot")) or 0.0
+            price = option_premium(inst, spot, now)
+            label = ("Vencimiento: liquidada a su valor intrínseco" if expired
+                     else f"Cierre a {opt.EXIT_DAYS} días del vencimiento")
+            async with self._lock:
+                if pos["id"] not in self._open:
+                    continue
+                await self._close(pos, price, "EXPIRY", label, now, market=not expired)
+            closed += 1
+            changed.add(pos["account_id"])
+            if pos["account_id"] == AUTOPILOT_ACCOUNT:
+                self._autopilot_note(traded_symbol(pos), "close",
+                                     f"Cierra el {inst.get('right')} {inst.get('name')} a "
+                                     f"{fmt_price(pos.get('exit_price'))} por acción: {label[0].lower()}{label[1:]} "
+                                     f"({fmt_r(pos.get('r_multiple'))})")
+        for aid in changed:
+            await self.publish(aid)
+        if changed and config.BACKGROUND:
+            await self._sync_subscriptions()
+        return closed
+
     async def set_autopilot(self, *, enabled: Any = None, source: Any = None, symbols: Any = None, tf: Any = None,
                             max_positions: Any = None, risk_pct: Any = None, scanner_top: Any = None,
                             alerts: Any = None, max_exposure_pct: Any = None,
-                            max_drawdown_pct: Any = None, futures_margin_pct: Any = None) -> dict[str, Any]:
+                            max_drawdown_pct: Any = None, futures_margin_pct: Any = None,
+                            stock_instrument: Any = None, options_premium_pct: Any = None) -> dict[str, Any]:
         """Change the settings of NEXUS's own account (only the given fields); Spanish PaperError on a bad value.
         `alerts`: its trades as alerts through the user's channels (setting alerts.autopilot, opt-in)."""
         values: dict[str, Any] = {}
@@ -2780,6 +3073,12 @@ class PaperEngine:
                 values["autopilot.tf"] = normalize_tf(tf)
             except ValueError as exc:
                 raise PaperError(str(exc)) from None
+        if stock_instrument is not None:
+            mode = str(stock_instrument).strip().lower()
+            if mode not in STOCK_INSTRUMENTS:
+                raise PaperError("Instrumento no válido para acciones: usa «auto» (NEXUS elige), «shares» (acciones) u "
+                                 "«options» (opciones)")
+            values["autopilot.stock_instrument"] = mode
         for key, value, lo, hi, what, cast in (
             ("max_positions", max_positions, 1, 20, "El máximo de posiciones", int),
             ("risk_pct", risk_pct, 0.1, 5.0, "El riesgo por operación (%)", float),
@@ -2787,6 +3086,7 @@ class PaperEngine:
             ("max_exposure_pct", max_exposure_pct, 0, 500, "La exposición máxima (%)", float),
             ("max_drawdown_pct", max_drawdown_pct, 0, 90, "El freno de pérdidas (%)", float),
             ("futures_margin_pct", futures_margin_pct, 0, 100, "El margen máximo en futuros (%)", float),
+            ("options_premium_pct", options_premium_pct, 0, 50, "La prima máxima por operación (%)", float),
         ):
             if value is None:
                 continue
@@ -2841,8 +3141,10 @@ class PaperEngine:
             raise PaperError("Indica la posición a cerrar o «all» para cerrarlas todas")
         closed = await self.close_position(position_id, symbol, all, account_id=AUTOPILOT_ACCOUNT)
         for pos in closed:
-            self._autopilot_note(pos["symbol"], "close", f"Cerrada a mano a {fmt_price(pos.get('exit_price'))} "
-                                                         f"({fmt_r(pos.get('r_multiple'))})")
+            inst = option_inst(pos)
+            what = f"El {inst.get('right')} {inst.get('name')}, cerrado" if inst is not None else "Cerrada"
+            self._autopilot_note(traded_symbol(pos), "close", f"{what} a mano a {fmt_price(pos.get('exit_price'))} "
+                                                              f"({fmt_r(pos.get('r_multiple'))})")
         return closed
 
     async def set_auto(self, enabled: bool, symbols: list[str] | None = None, tf: str | None = None) -> dict:
@@ -2896,8 +3198,9 @@ class PaperEngine:
         for pos in self._open.values():
             if pos["origin"] == "sim":
                 continue
-            tf = (pos.get("tf") or "1h") if pos["symbol"].startswith("SIM:") else "1m"
-            wanted.add((pos["symbol"], tf, "paper"))
+            sym = traded_symbol(pos)  # an option: the live bars of its underlying price it
+            tf = (pos.get("tf") or "1h") if sym.startswith("SIM:") else "1m"
+            wanted.add((sym, tf, "paper"))
         for order in self._orders.values():
             tf = (order.get("tf") or "1h") if order["symbol"].startswith("SIM:") else "1m"
             wanted.add((order["symbol"], tf, "paper"))
@@ -2927,6 +3230,7 @@ class PaperEngine:
                 await asyncio.sleep(PUBLISH_EVERY_S)
                 await self._expire_orders()
                 await self._poll_stale_prices()
+                await self._expire_options()
                 await self.refresh_advice()
                 await self._refresh_autopilot()
                 if any(p["account_id"] == 1 for p in self._open.values()):
@@ -2945,8 +3249,8 @@ class PaperEngine:
         A stale quote (flagged by the hub or older than QUOTE_STALE_S: venue closed, feed down, only the local cache
         left) never moves a stop or fills a target; the user is told once and the levels wait for a live price.
         """
-        symbols = sorted({p["symbol"] for p in self._open.values()
-                          if p["origin"] != "sim" and self.cached_price(p["symbol"], PRICE_STALE_S) is None}
+        symbols = sorted({traded_symbol(p) for p in self._open.values()
+                          if p["origin"] != "sim" and self.cached_price(traded_symbol(p), PRICE_STALE_S) is None}
                          | {o["symbol"] for o in self._orders.values()
                             if self.cached_price(o["symbol"], PRICE_STALE_S) is None})
         hub = self.rt.hub
@@ -2970,7 +3274,7 @@ class PaperEngine:
                     self._stale_warned.add(sym)
                     ts = safe_float(q.get("ts"))
                     age = f"el último es de hace {_age_text((now - ts) / 1000.0)}" if ts else "solo hay uno antiguo"
-                    has_position = any(p["symbol"] == sym and p["origin"] != "sim" for p in self._open.values())
+                    has_position = any(traded_symbol(p) == sym and p["origin"] != "sim" for p in self._open.values())
                     what = ("el stop y los objetivos se vigilarán" if has_position
                             else "las órdenes pendientes solo se ejecutan con precios en vivo: se vigilarán")
                     self._emit("warn", "paper", f"{sym}: sin precio en vivo ({age}); {what} cuando vuelva a cotizar",
@@ -2979,9 +3283,14 @@ class PaperEngine:
             self._stale_warned.discard(sym)
             self._prices[sym] = (price, time.monotonic())
             async with self._lock:
-                for pos in [p for p in self._open.values() if p["symbol"] == sym and p["origin"] != "sim"]:
+                for pos in [p for p in self._open.values() if traded_symbol(p) == sym and p["origin"] != "sim"]:
                     before = (pos["qty_open"], pos["tp_hits"])
-                    await self._process_price(pos, price, price, price, open_=None, use_hl=False, time_s=now_s())
+                    px = price
+                    inst = option_inst(pos)
+                    if inst is not None:  # the stock's live price as the option's theoretical premium
+                        pos["meta"]["spot"] = price
+                        px = option_premium(inst, price, now_s())
+                    await self._process_price(pos, px, px, px, open_=None, use_hl=False, time_s=now_s())
                     changed = changed or (pos["qty_open"], pos["tp_hits"]) != before
             if self._orders:
                 self._check_orders(sym, price, price, price, open_=None, bar_time=None, bar_s=60, live=True,

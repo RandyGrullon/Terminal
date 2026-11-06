@@ -13,10 +13,13 @@ from app.data.symbols import asset_class_of, is_sim
 
 
 def asset_class(symbol: str) -> str:
-    """crypto | stock | fund | forex | commodity | index | futures | cfd | bond | other (SIM:* counts as crypto)."""
+    """crypto | stock | fund | forex | commodity | index | futures | cfd | bond | option | other (SIM:* counts as
+    crypto; option = a theoretical stock option of NEXUS's own account, OPT:*, see app.engine.options)."""
     sym = (symbol or "").strip().upper()
     if not sym or is_sim(sym):
         return "crypto"
+    if sym.startswith("OPT:"):
+        return "option"
     exchange, _, ticker = sym.partition(":")
     if not ticker:
         exchange, ticker = "", exchange

@@ -50,6 +50,7 @@ EXIT_LABEL = {
     "SIGNAL": "Señal de salida",
     "MANUAL": "Manual",
     "OPEN": "Abierta",
+    "EXPIRY": "Vencimiento de la opción",
 }
 # Engine exit marker kinds -> paper exit reason codes.
 MARKER_EXIT_REASON = {

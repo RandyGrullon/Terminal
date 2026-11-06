@@ -2,11 +2,11 @@
 // was opened, so the user can see what ignoring the filter costs.
 import { memo, useMemo, useState } from 'react'
 import type { Position } from '../../api/types'
-import { DIRECTION_LABEL, fmtBarTime, fmtDuration, fmtPct, fmtPrice, fmtProb, fmtR, signTone, splitSymbol, toneColor } from '../../lib/format'
+import { fmtBarTime, fmtDuration, fmtPct, fmtPrice, fmtProb, fmtR, signTone, toneColor } from '../../lib/format'
 import { plural } from '../../lib/plural'
 import { Badge, Button, VerdictBadge } from '../ui'
 import { ORIGIN_LABEL, fmtMoney, fmtQty, isNum } from '../markets/opsUtils'
-import { contractsText, exitInfo, verdictBreakdown } from './paperUtils'
+import { contractsText, exitInfo, marketOf, verdictBreakdown } from './paperUtils'
 
 const PAGE = 50
 
@@ -70,23 +70,23 @@ function HistoryTable({
           </thead>
           <tbody>
             {shown.map((p) => {
-              const { exchange, ticker } = splitSymbol(p.symbol)
+              const market = marketOf(p)
               const ex = exitInfo(p)
               const dur = isNum(p.exit_time) && isNum(p.entry_time) ? Math.max(0, p.exit_time - p.entry_time) : null
               return (
                 <tr key={p.id}>
                   <td>
                     <div className="pp-sym">
-                      <button type="button" onClick={() => onOpenChart(p)} title={`Abrir ${p.symbol} en el gráfico`}>
-                        {ticker}
+                      <button type="button" onClick={() => onOpenChart(p)} title={`Abrir ${market.chart} en el gráfico`}>
+                        {market.ticker}
                       </button>
                       <span className="pp-sub">
-                        {exchange || '—'} · {p.tf}
+                        {market.sub} · {p.tf}
                       </span>
                     </div>
                   </td>
                   <td>
-                    <Badge tone={p.side === 'long' ? 'pos' : 'neg'}>{DIRECTION_LABEL[p.side]}</Badge>
+                    <Badge tone={market.sideTone}>{market.side}</Badge>
                   </td>
                   <td className="num mono">{contractsText(p, p.qty) ?? fmtQty(p.qty)}</td>
                   <td className="num mono">

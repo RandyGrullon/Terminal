@@ -16,6 +16,7 @@ import type {
   AutopilotSnapshot,
   AutopilotSource,
   AutopilotStatus,
+  AutopilotStockInstrument,
   AutopilotUpdate,
   AutopilotWatch,
   AutopilotWhy,
@@ -36,7 +37,7 @@ import PositionsTable from './PositionsTable'
 import HistoryTable from './HistoryTable'
 import RiskPanel from './RiskPanel'
 import { normalizeRisk } from './ordersUtils'
-import { isAccount, normalizePositions } from './paperUtils'
+import { isAccount, marketOf, normalizePositions } from './paperUtils'
 import { useMediaQuery } from './useMediaQuery'
 import './autopilot.css'
 
@@ -56,6 +57,12 @@ const SOURCE_OPTIONS: { value: AutopilotSource; label: string; title: string }[]
   { value: 'scanner', label: 'Escáner', title: 'Las mejores oportunidades TOMAR del último escaneo' },
   { value: 'list', label: 'Lista fija', title: 'Solo los símbolos de tu lista' },
   { value: 'both', label: 'Ambos', title: 'Tu lista y las mejores oportunidades TOMAR del escáner' },
+]
+/** How it trades stocks and funds (autopilot.stock_instrument). */
+const INSTRUMENT_OPTIONS: { value: AutopilotStockInstrument; label: string }[] = [
+  { value: 'auto', label: 'NEXUS elige: acciones, y un put para bajar' },
+  { value: 'shares', label: 'Solo acciones (también en corto)' },
+  { value: 'options', label: 'Opciones: calls y puts' },
 ]
 const WHY_INFO: Record<string, { label: string; tone: Tone }> = {
   escáner: { label: 'Escáner', tone: 'accent' },
@@ -139,6 +146,8 @@ export function normalizeStatus(raw: unknown): AutopilotStatus | null {
     max_exposure_pct: numOr(o.max_exposure_pct, 100),
     max_drawdown_pct: numOr(o.max_drawdown_pct, 20),
     futures_margin_pct: numOr(o.futures_margin_pct, 50),
+    stock_instrument: o.stock_instrument === 'shares' || o.stock_instrument === 'options' ? o.stock_instrument : 'auto',
+    options_premium_pct: numOr(o.options_premium_pct, 10),
     brake: normalizeBrake(o.brake),
     note: isStr(o.note) ? o.note : '',
   }
@@ -212,13 +221,14 @@ export function MoneyCard({ status, dailyLossPct }: { status: AutopilotStatus; d
     `Arriesga el ${pct(status.risk_pct)} de su capital en cada operación: lo que perdería si salta el stop.`,
     `Como mucho ${plural(status.max_positions, 'posición', 'posiciones')} a la vez, una por símbolo, y con el límite de posiciones por grupo correlacionado de tu riesgo de cartera.`,
     status.max_exposure_pct > 0
-      ? `Cuenta de efectivo: no tiene invertido más del ${pct(status.max_exposure_pct, 0)} de su capital en acciones, fondos y cripto (si no cabe entera, compra menos).`
+      ? `Cuenta de efectivo: no tiene invertido más del ${pct(status.max_exposure_pct, 0)} de su capital en acciones, fondos, cripto y primas de opciones (si no cabe entera, compra menos).`
       : 'Sin tope de exposición propio: solo el límite general de 5 veces el capital por posición.',
     'Cierra 1/3 en el primer objetivo y sube el stop a la entrada; otro 1/3 en el segundo, y deja correr el resto con un stop dinámico.',
     'Sale antes si NEXUS cambia de opinión al cierre de una vela, y nunca abre en un mercado cerrado.',
     status.futures_margin_pct > 0
       ? `Futuros de índices (micro o mini): contratos enteros, solo si uno cabe en su riesgo por operación y su margen aproximado en el ${pct(status.futures_margin_pct, 0)} del capital; con una cuenta pequeña casi nunca caben.`
       : 'No opera futuros (margen máximo en futuros: 0 %).',
+    stocksRule(status, pct),
     status.max_drawdown_pct > 0
       ? `Se frena si pierde un ${pct(status.max_drawdown_pct, 0)} desde su saldo inicial${dailyLossPct ? ` o un ${pct(dailyLossPct)} en el día` : ''}.`
       : `Sin freno de pérdidas acumuladas${dailyLossPct ? `; sí se frena si pierde un ${pct(dailyLossPct)} en el día` : ''}.`,
@@ -242,6 +252,21 @@ export function MoneyCard({ status, dailyLossPct }: { status: AutopilotStatus; d
       </div>
     </Card>
   )
+}
+
+/** Its rule for stocks and funds: shares, options (theoretical prices) or its own choice. */
+function stocksRule(s: AutopilotStatus, pct: (v: number, d?: number) => string): string {
+  if (s.stock_instrument === 'shares') return 'Acciones: compra acciones y también vende en corto (simulado).'
+  const how =
+    s.stock_instrument === 'options'
+      ? 'solo opciones, un call para apostar al alza y un put a la baja'
+      : 'compra acciones para apostar al alza y un put para apostar a la baja (una cuenta de efectivo no vende en corto)'
+  if (s.options_premium_pct <= 0) {
+    return s.stock_instrument === 'options'
+      ? 'Acciones: no las opera (solo opciones, y su prima máxima es 0 %).'
+      : 'Acciones: compra acciones para apostar al alza; no apuesta a la baja (prima máxima de opciones: 0 %).'
+  }
+  return `Acciones: ${how}. Las opciones tienen precio teórico (Black-Scholes con la volatilidad de 20 días, no cotizaciones reales): paga como mucho el ${pct(s.options_premium_pct, 0)} de su capital en primas por operación, con el stop en −50 % de la prima, y las cierra 7 días antes de su vencimiento.`
 }
 
 /** The brake notice: why it opens nothing new and what to do. */
@@ -359,9 +384,18 @@ export interface AutopilotDraft {
   max_exposure_pct: number | null
   max_drawdown_pct: number | null
   futures_margin_pct: number | null
+  stock_instrument: AutopilotStockInstrument
+  options_premium_pct: number | null
 }
 
-type NumField = 'max_positions' | 'risk_pct' | 'scanner_top' | 'max_exposure_pct' | 'max_drawdown_pct' | 'futures_margin_pct'
+type NumField =
+  | 'max_positions'
+  | 'risk_pct'
+  | 'scanner_top'
+  | 'max_exposure_pct'
+  | 'max_drawdown_pct'
+  | 'futures_margin_pct'
+  | 'options_premium_pct'
 
 /** The server's limits for each number (same wording as its 400 answers). */
 const RANGES: Record<NumField, { lo: number; hi: number; int: boolean; what: string }> = {
@@ -371,6 +405,7 @@ const RANGES: Record<NumField, { lo: number; hi: number; int: boolean; what: str
   max_exposure_pct: { lo: 0, hi: 500, int: false, what: 'La exposición máxima (%)' },
   max_drawdown_pct: { lo: 0, hi: 90, int: false, what: 'El freno de pérdidas (%)' },
   futures_margin_pct: { lo: 0, hi: 100, int: false, what: 'El margen máximo en futuros (%)' },
+  options_premium_pct: { lo: 0, hi: 50, int: false, what: 'La prima máxima por operación (%)' },
 }
 
 /** The list is used by the sources list and both; the scanner candidates by scanner and both. */
@@ -385,6 +420,7 @@ const numFields = (source: AutopilotSource): NumField[] => [
   'max_exposure_pct',
   'max_drawdown_pct',
   'futures_margin_pct',
+  'options_premium_pct',
 ]
 
 export function draftFrom(s: AutopilotStatus): AutopilotDraft {
@@ -398,6 +434,8 @@ export function draftFrom(s: AutopilotStatus): AutopilotDraft {
     max_exposure_pct: s.max_exposure_pct,
     max_drawdown_pct: s.max_drawdown_pct,
     futures_margin_pct: s.futures_margin_pct,
+    stock_instrument: s.stock_instrument,
+    options_premium_pct: s.options_premium_pct,
   }
 }
 
@@ -409,6 +447,7 @@ export function draftChanges(d: AutopilotDraft, saved: AutopilotDraft): Autopilo
   const out: AutopilotUpdate = {}
   if (d.source !== saved.source) out.source = d.source
   if (d.tf !== saved.tf) out.tf = d.tf
+  if (d.stock_instrument !== saved.stock_instrument) out.stock_instrument = d.stock_instrument
   for (const k of numFields(d.source)) {
     const v = d[k]
     if (v !== null && v !== saved[k]) out[k] = v
@@ -621,7 +660,7 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
               <NumberInput value={draft.scanner_top} onChange={(v) => patch({ scanner_top: v })} min={1} max={30} step={1} />
             </Field>
           )}
-          <Field label="Exposición máxima (%)" hint="Lo invertido en acciones, fondos y cripto, del capital: 100 = sin apalancamiento">
+          <Field label="Exposición máxima (%)" hint="Lo invertido en acciones, fondos, cripto y primas, del capital: 100 = sin apalancamiento">
             <NumberInput value={draft.max_exposure_pct} onChange={(v) => patch({ max_exposure_pct: v })} min={0} max={500} step={10} />
           </Field>
           <Field label="Freno de pérdidas (%)" hint="Deja de abrir operaciones si cae este % desde su saldo inicial (0 = sin freno)">
@@ -629,6 +668,12 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
           </Field>
           <Field label="Margen máximo en futuros (%)" hint="Del capital, como garantía aproximada de los contratos (0 = no opera futuros)">
             <NumberInput value={draft.futures_margin_pct} onChange={(v) => patch({ futures_margin_pct: v })} min={0} max={100} step={10} />
+          </Field>
+          <Field label="Acciones y fondos" hint="Con qué opera sus señales: las opciones tienen precio teórico">
+            <Select value={draft.stock_instrument} onChange={(v) => patch({ stock_instrument: v })} options={INSTRUMENT_OPTIONS} />
+          </Field>
+          <Field label="Prima máxima por operación (%)" hint="Del capital, lo más que paga por opciones (0 = no compra opciones)">
+            <NumberInput value={draft.options_premium_pct} onChange={(v) => patch({ options_premium_pct: v })} min={0} max={50} step={1} />
           </Field>
         </div>
 
@@ -1020,7 +1065,8 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
 
   // ------------------------------------------------------------------ actions
   const openSymbol = useCallback((symbol: string) => useApp.getState().openChart(symbol, snapRef.current?.autopilot.tf), [])
-  const openPosition = useCallback((p: Position) => useApp.getState().openChart(p.symbol, asTimeframe(p.tf)), [])
+  // an option opens the chart of its stock
+  const openPosition = useCallback((p: Position) => useApp.getState().openChart(marketOf(p).chart, asTimeframe(p.tf)), [])
 
   const save = useCallback(
     async (update: AutopilotUpdate): Promise<AutopilotStatus | null> => {
@@ -1055,7 +1101,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
         const c = s?.history.find((h) => h.id === p.id)
         notify(
           c
-            ? `Cerrada ${splitSymbol(c.symbol).ticker} ${c.side === 'long' ? 'largo' : 'corto'} de NEXUS · ${fmtR(c.r_multiple)} · ${fmtMoney(c.pnl, true)}`
+            ? `Cerrada ${marketOf(c).ticker} ${c.instrument?.kind === 'option' ? marketOf(c).side.toLowerCase() : c.side === 'long' ? 'largo' : 'corto'} de NEXUS · ${fmtR(c.r_multiple)} · ${fmtMoney(c.pnl, true)}`
             : `Posición #${p.id} de NEXUS cerrada`,
           'trade',
         )

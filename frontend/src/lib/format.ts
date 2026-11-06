@@ -37,6 +37,7 @@ export const EXIT_REASON_LABEL: Record<string, string> = {
   SIGNAL: 'Señal de salida',
   MANUAL: 'Manual',
   OPEN: 'Abierta',
+  EXPIRY: 'Vencimiento de la opción',
 }
 
 export function actionTone(action: string | null | undefined): Tone {

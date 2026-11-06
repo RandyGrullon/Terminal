@@ -9,6 +9,9 @@ import type { PaperRisk } from './types-paper-orders'
 
 /** scanner = the best TOMAR opportunities of the latest scan · list = fixed symbols (`symbols`) · both = the two. */
 export type AutopilotSource = 'scanner' | 'list' | 'both'
+/** How it trades stocks and funds: auto = shares to bet on a rise and a put on a fall (a cash account cannot sell
+ *  short) · shares = shares both ways (a simulated short sale) · options = a call or a put (theoretical prices). */
+export type AutopilotStockInstrument = 'auto' | 'shares' | 'options'
 
 /** Why a symbol is watched (Spanish, shown as is). */
 export type AutopilotWhy = 'escáner' | 'lista' | 'posición abierta'
@@ -62,6 +65,8 @@ export interface AutopilotStatus {
   max_exposure_pct: number // cash account: shares / funds / crypto held ≤ this % of equity (0 = only the 5× cap)
   max_drawdown_pct: number // loss brake: no new entries this % below the initial balance (0 = off)
   futures_margin_pct: number // index futures: equity tied up as approximate margin at most (0 = no futures)
+  stock_instrument: AutopilotStockInstrument // stocks and funds: shares, options or NEXUS's choice
+  options_premium_pct: number // options: the most premium paid per trade, % of equity (0 = no options)
   brake: AutopilotBrake | null // null outside a snapshot
   note: string // honest Spanish note from the backend: shown verbatim
 }
@@ -130,4 +135,6 @@ export interface AutopilotUpdate {
   max_exposure_pct?: number
   max_drawdown_pct?: number
   futures_margin_pct?: number
+  stock_instrument?: AutopilotStockInstrument
+  options_premium_pct?: number
 }

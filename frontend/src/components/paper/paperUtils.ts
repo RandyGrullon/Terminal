@@ -1,7 +1,7 @@
 // Paper-trading ("Cuenta demo") helpers: defensive snapshot parsing, TP hits, NEXUS advice severity, exit labels,
 // order validation, 409 gate-conflict parsing and the "gate verdict vs. outcome" breakdown.
 import type { Direction, GateResult, PaperAccount, PaperSnapshot, Position, Verdict } from '../../api/types'
-import { EXIT_REASON_LABEL, signTone, type Tone } from '../../lib/format'
+import { DIRECTION_LABEL, EXIT_REASON_LABEL, signTone, splitSymbol, type Tone } from '../../lib/format'
 import { isNum } from '../markets/opsUtils'
 
 // ----------------------------------------------------------------------------- snapshot parsing
@@ -31,6 +31,24 @@ export function contractsText(p: Position, units: number): string | null {
   const word = n === 1 ? 'contrato' : 'contratos'
   const count = Number.isInteger(n) ? String(n) : n.toLocaleString('es-ES', { maximumFractionDigits: 3 })
   return p.instrument.kind === 'future' && p.instrument.root ? `${count} ${word} ${p.instrument.root}` : `${count} ${word}`
+}
+
+/** How the tables show a position's market: an option by its contract ("F 12 P 18/12/2026", a put on F, its
+ *  chart is the stock's), any other position by its ticker and exchange. */
+export function marketOf(p: Position): { ticker: string; sub: string; chart: string; side: string; sideTone: Tone } {
+  const inst = p.instrument
+  if (inst && inst.kind === 'option' && inst.underlying) {
+    const put = inst.right === 'put'
+    return {
+      ticker: inst.name,
+      sub: `${put ? 'Put' : 'Call'} sobre ${splitSymbol(inst.underlying).ticker} · teórica`,
+      chart: inst.underlying,
+      side: put ? 'Put' : 'Call',
+      sideTone: put ? 'neg' : 'pos',
+    }
+  }
+  const { exchange, ticker } = splitSymbol(p.symbol)
+  return { ticker, sub: exchange || '—', chart: p.symbol, side: DIRECTION_LABEL[p.side], sideTone: p.side === 'long' ? 'pos' : 'neg' }
 }
 
 export function isAccount(v: unknown): v is PaperAccount {

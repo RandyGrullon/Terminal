@@ -23,4 +23,9 @@ DEFAULTS: dict = {
     "autopilot.max_drawdown_pct": 20.0,
     # index futures: the most of its equity tied up as (approximate) initial margin (0 = it trades no futures)
     "autopilot.futures_margin_pct": 50.0,
+    # stocks and funds: auto = shares when NEXUS says BUY and a put when it says SELL (a cash account cannot sell
+    # short) · shares = shares both ways (a simulated short sale) · options = a call or a put (theoretical prices)
+    "autopilot.stock_instrument": "auto",
+    # options: the most premium it pays per trade, % of its equity (0 = it buys no options)
+    "autopilot.options_premium_pct": 10.0,
 }

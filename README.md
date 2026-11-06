@@ -232,7 +232,8 @@ que la actives en «Cómo opera»:
   en el acto con su última vela cerrada. Solo entra si NEXUS da COMPRAR o VENDER **y** el filtro dice TOMAR, y sale
   con las reglas de salida de NEXUS además del SL, los TP parciales y el stop dinámico de siempre.
 - **Su dinero**: empieza con **1.000 $** simulados (otra cantidad al reiniciarla). Es una cuenta de efectivo: no
-  invierte más del 100 % de su capital en acciones, fondos y cripto (si una operación no cabe entera, compra menos).
+  invierte más del 100 % de su capital en acciones, fondos, cripto y primas de opciones (si una operación no cabe
+  entera, compra menos).
 - **Límites**: máximo de posiciones abiertas (5), riesgo por operación (1 % de su capital, hasta el stop), las mismas
   reglas de riesgo de cartera que tu cuenta (*Ajustes → Riesgo de cartera*), contadas aparte, y un **freno de
   pérdidas**: si cae un 20 % desde su saldo inicial deja de abrir operaciones hasta que la reinicies o cambies el
@@ -246,6 +247,16 @@ que la actives en «Cómo opera»:
   en su riesgo por operación y su margen aproximado no pasa del «Margen máximo en futuros» (50 % del capital). Con
   1.000 $ casi nunca caben y el registro te dirá por qué. Sin una clave que sirva futuros, NEXUS los graba mientras
   está encendido y necesita alrededor de una semana de historial para analizarlos en velas de 1 h.
+- **Opciones sobre acciones** (simuladas, con **precio teórico**): con «Acciones y fondos» en «NEXUS elige» (por
+  defecto) compra acciones cuando NEXUS dice COMPRAR y un **put** cuando dice VENDER, porque en una cuenta de efectivo
+  no se venden acciones en corto; con «Opciones» compra un **call** para apostar al alza y un put a la baja, y con
+  «Solo acciones» también vende en corto (simulado). Elige el vencimiento mensual a 30 días o más y el strike más
+  cercano al precio cuyo contrato (100 acciones) quepa en su «Prima máxima por operación» (10 % del capital). Su stop
+  está en −50 % de la prima y sus objetivos en +50, +100 y +150 %; sale si NEXUS deja de apostar en esa dirección y
+  la cierra 7 días antes del vencimiento. La prima se calcula con Black-Scholes y la volatilidad de 20 días de la
+  acción (no hay cotizaciones reales de opciones sin un servicio de pago): los precios reales difieren, sobre todo en
+  opciones poco líquidas. Con 1.000 $ solo caben opciones de acciones baratas; el registro te dice cuándo no cabe
+  ninguna. Estas operaciones no entran en la comparación con entrar al azar.
 - **Registro de decisiones**: qué abrió, qué descartó y por qué (filtro, límite de posiciones, riesgo) y qué cerró.
   Se guardan las 30 últimas en la base de datos, así que siguen ahí después de reiniciar el servidor.
 - Si **cambias la temporalidad** con posiciones abiertas, NEXUS sigue cerrándolas con sus reglas en la temporalidad
@@ -263,9 +274,9 @@ que la actives en «Cómo opera»:
 - **Desde la terminal** (alias `piloto`): `autopilot` muestra su estado; `autopilot on btc eth --tf 4h --max 3 --risk
   0,5` la activa con una lista fija; `autopilot escaner 10` usa el escáner; `autopilot off` la pausa; `autopilot pos`
   y `autopilot log` muestran sus posiciones y sus decisiones; `autopilot azar` la compara con entrar al azar;
-  `autopilot avisos on|off` activa sus avisos por
-  Telegram o correo; `autopilot close <id|símbolo|all>` cierra a mano y `autopilot reset [saldo] --yes` la reinicia
-  (sin `--yes` solo avisa).
+  `autopilot --instrumento opciones --prima 5` cambia cómo opera las acciones (`auto`, `acciones` u `opciones`);
+  `autopilot avisos on|off` activa sus avisos por Telegram o correo; `autopilot close <id|símbolo|all>` cierra a mano
+  y `autopilot reset [saldo] --yes` la reinicia (sin `--yes` solo avisa).
 
 Es un experimento honesto, no una promesa: la validación publicada (`docs/VALIDATION.md`) **no encontró ventaja**, así
 que lo esperable es un resultado parecido a entrar al azar, menos las comisiones. Sirve para ver en tiempo real cómo se

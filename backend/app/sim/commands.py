@@ -575,8 +575,12 @@ _AP_ALERTS = ("avisos", "alertas", "alerts")
 _AP_COMPARE = ("azar", "comparar", "referencia")
 _AP_KIND = {"open": ("Abre", "success"), "close": ("Cierra", "info"), "skip": ("Descarta", "muted"),
             "info": ("Nota", "info")}
+# --instrumento: how it trades stocks and funds (autopilot.stock_instrument)
+_AP_INSTRUMENTS = {"auto": "auto", "nexus": "auto", "acciones": "shares", "shares": "shares", "opciones": "options",
+                   "options": "options"}
 AUTOPILOT_USAGE = ("autopilot [on|off] [lista <símbolos…> | escaner [N] | ambos [N]] [--tf 1h] [--max 5] [--risk 1] "
-                   "[--top 10] [--expo 100] [--freno 20] [--margen 50] · "
+                   "[--top 10] [--expo 100] [--freno 20] [--margen 50] [--instrumento auto|acciones|opciones] "
+                   "[--prima 10] · "
                    "autopilot pos | log | azar | avisos on|off | close <id|símbolo|all> | reset [saldo] --yes")
 
 
@@ -601,6 +605,34 @@ def _ap_wins(account: dict) -> str:
         return "sin operaciones cerradas todavía"
     text = f"{wins} de {n}"
     return text + (f" ({fmt_prob(account.get('win_rate'))})" if n >= AUTOPILOT_MIN_N else " · aún sin evidencia suficiente")
+
+
+def _ap_stocks_line(st: dict) -> str:
+    """How it trades stocks and funds: autopilot.stock_instrument and the premium budget of its options."""
+    mode, prem = st.get("stock_instrument") or "auto", float(st.get("options_premium_pct") or 0.0)
+    opts = (f"opciones teóricas con hasta el {fmt_pct(prem, 0, False)} del capital en primas por operación" if prem
+            else "sin opciones (--prima 0)")
+    if mode == "shares":
+        return "Acciones: compra acciones y también vende en corto (simulado) · --instrumento acciones"
+    if mode == "options":
+        return f"Acciones: solo opciones, un call para apostar al alza y un put a la baja; {opts}"
+    return (f"Acciones: NEXUS elige, acciones para apostar al alza y un put a la baja (una cuenta de efectivo no vende "
+            f"en corto); {opts}")
+
+
+def _ap_cells(p: dict) -> tuple[str, str, str]:
+    """(market, side, open quantity) of one of its positions: an option by its contract, a future in contracts."""
+    inst = p.get("instrument") or {}
+    mult = float(inst.get("multiplier") or 0.0)
+    if inst.get("kind") == "option" and mult > 0:
+        n = p["qty_open"] / mult
+        return (str(inst.get("name") or p["symbol"]), "Call" if inst.get("right") == "call" else "Put",
+                f"{n:g} {'contrato' if n == 1 else 'contratos'}")
+    if inst.get("kind") == "future" and mult > 0:
+        n = p["qty_open"] / mult
+        return (p["symbol"], SIDE_LABEL.get(p["side"], p["side"]),
+                f"{n:g} {'contrato' if n == 1 else 'contratos'} {inst.get('root') or ''}".strip())
+    return p["symbol"], SIDE_LABEL.get(p["side"], p["side"]), fmt_qty(p["qty_open"])
 
 
 def _print_autopilot(ctx: CommandContext, snap: dict) -> None:
@@ -637,6 +669,7 @@ def _print_autopilot(ctx: CommandContext, snap: dict) -> None:
     fm = st.get("futures_margin_pct") or 0
     ctx.print(("Futuros: contratos enteros, con hasta el " + fmt_pct(fm, 0, False) + " del capital como margen aproximado"
                if fm else "No opera futuros (--margen 0)"), "muted")
+    ctx.print(_ap_stocks_line(st), "muted")
     brake = st.get("brake") or {}
     if brake.get("active"):
         ctx.print(f"⛔ Freno de pérdidas activo: la cuenta está un {fmt_pct(brake.get('drawdown_pct'), 1, False)} por debajo "
@@ -682,12 +715,14 @@ async def _autopilot(ctx: CommandContext) -> None:
             ctx.print("NEXUS no tiene posiciones abiertas" + ("" if on else " (está pausada: autopilot on)"), "muted")
         else:
             ctx.table(["ID", "Símbolo", "Lado", "Cant.", "Entrada", "Precio", "Stop", "TP1", "P&L", "R"], [[
-                p["id"], p["symbol"], SIDE_LABEL.get(p["side"], p["side"]), fmt_qty(p["qty_open"]),
-                fmt_price(p["entry_price"]), fmt_price(p.get("price")),
+                p["id"], *_ap_cells(p), fmt_price(p["entry_price"]), fmt_price(p.get("price")),
                 fmt_price(p["trail"] if p.get("trail") is not None else p["sl"]), fmt_price(p.get("tp1")),
                 fmt_num(p.get("pnl"), 2, True), fmt_r(p.get("r_multiple")),
             ] for p in positions])
             ctx.print("Ciérralas a mano con: autopilot close <id|símbolo|all>", "muted")
+            if any((p.get("instrument") or {}).get("kind") == "option" for p in positions):
+                ctx.print("Opciones: precio teórico (Black-Scholes con la volatilidad histórica de 20 días), por "
+                          "acción; cada contrato son 100 acciones", "muted")
         ctx.data = positions
         return
 
@@ -719,7 +754,8 @@ async def _autopilot(ctx: CommandContext) -> None:
         if not closed:
             ctx.print("NEXUS no tenía posiciones abiertas", "muted")
         for p in closed:
-            ctx.print(f"Cerrado #{p['id']} {p['symbol']} {SIDE_LABEL.get(p['side'], p['side'])} de NEXUS "
+            market, side, _ = _ap_cells(p)
+            ctx.print(f"Cerrado #{p['id']} {market} {side} de NEXUS "
                       f"{fmt_r(p.get('r_multiple'))} ({fmt_pct(p.get('pnl_pct'), 2)} · {fmt_num(p.get('pnl'), 2, True)})",
                       "success" if (p.get("pnl") or 0) > 0 else "warn")
         ctx.data = {"closed": closed}
@@ -811,10 +847,17 @@ async def _autopilot(ctx: CommandContext) -> None:
                                   ("top", "scanner_top", "el número de candidatos del escáner", False),
                                   ("expo", "max_exposure_pct", "la exposición máxima", True),
                                   ("freno", "max_drawdown_pct", "el freno de pérdidas", True),
-                                  ("margen", "futures_margin_pct", "el margen máximo en futuros", True)):
+                                  ("margen", "futures_margin_pct", "el margen máximo en futuros", True),
+                                  ("prima", "options_premium_pct", "la prima máxima por operación", True)):
         value = _ap_number(ctx, flag, what, zero=zero)
         if value is not None:
             update[key] = value
+    instr = ctx.flag("instrumento")
+    if instr is not None:
+        mode = _AP_INSTRUMENTS.get(str(instr).strip().lower())
+        if mode is None:
+            ctx.fail("Indica --instrumento auto (NEXUS elige), acciones u opciones")
+        update["stock_instrument"] = mode
     try:
         snap = await paper.set_autopilot(**update) if update else await paper.autopilot_snapshot()
     except PaperError as exc:
