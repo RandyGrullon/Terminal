@@ -351,6 +351,7 @@ autopilot.enabled false · autopilot.source "scanner" (scanner|list) · autopilo
 autopilot.max_positions 5 (1..20) · autopilot.risk_pct 1.0 (0.1..5) · autopilot.scanner_top 10 (1..30)
 autopilot.initial_balance 1000 · autopilot.max_exposure_pct 100 (0..500; 0 = off) · autopilot.max_drawdown_pct 20
 (0..90; 0 = off) · autopilot.source also "both" (the list plus the scanner's opportunities)
+autopilot.futures_margin_pct 50 (0..100; 0 = it trades no futures)
 realtime.enabled true · realtime.twelvedata_credits_min 8 · realtime.twelvedata_credits_day 800 (0 = no daily cap)
 realtime.polygon_calls_min 5 · realtime.reserve_pct 25 · realtime.max_symbols 4 · realtime.min_interval_s 15
 scanner.replay_days 7                     (int days, clamped 0..30 by the evaluator; 0 = vectors dropped at resolution)
@@ -669,7 +670,7 @@ POST /api/paper/auto {enabled, symbols?, tf?} -> {auto: {enabled, symbols, tf}}
 GET  /api/paper/autopilot                   -> AutopilotSnapshot (account 3, "NEXUS automática")
 GET  /api/paper/autopilot/compare?fresh=     -> AutopilotComparison (vs random entries; cached, fresh = recompute)
 POST /api/paper/autopilot {enabled?, source?: scanner|list|both, symbols?, tf?, max_positions?, risk_pct?,
-                           scanner_top?, alerts?, max_exposure_pct?, max_drawdown_pct?}
+                           scanner_top?, alerts?, max_exposure_pct?, max_drawdown_pct?, futures_margin_pct?}
      -> AutopilotSnapshot (only the given fields change; 400 {detail} in Spanish on a bad value)
 POST /api/paper/autopilot/reset {initial_balance?}     -> AutopilotSnapshot (account 3 only)
 POST /api/paper/autopilot/close {position_id? | all?}  -> AutopilotSnapshot (400 when neither; 404 unknown id)
@@ -1177,6 +1178,16 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     WS: `paper` topic, `{type: 'paper_autopilot', ...AutopilotSnapshot}` after each change and every 5 s while it
     holds positions. Simulated only: nothing is sent to a broker, and the status `note` repeats that the published
     validation found no edge (docs/VALIDATION.md).
+  - **Index futures of NEXUS automática** (`app.engine.contracts`: ES / MES, NQ / MNQ, YM / MYM, RTY / M2K with
+    multiplier, tick and an APPROXIMATE initial margin; TradingView symbols such as `CME_MINI:MES1!`): its trader
+    calls `open_position(contracts=True, margin_pct=autopilot.futures_margin_pct)`. Whole contracts: n = floor(risk
+    money / (stop distance × multiplier)), rule `contracts` when not even one fits; qty = n × multiplier units, so
+    P&L, R and fees need nothing else; the margin budget (open futures' contracts × margin ≤ pct % of equity, atomic
+    with the insert) trims n or refuses with rule `margin`. Partial targets only with a multiple of 3 contracts
+    (otherwise the whole position leaves at TP2). The position carries `instrument {kind 'future', root, name,
+    multiplier, contracts, margin}` (Position.instrument; null for shares, crypto and the rest). The user's own orders
+    on a future keep plain units. Data: an API key that serves futures, or the recorder (it records the symbols NEXUS
+    watches; 1h is rebuilt from 15m), so a new future needs about a week of recorded history before NEXUS analyses it.
   - **NEXUS automática against random entries** (`app.sim.autopilot_compare`, `autopilot_comparison()`, `GET
     /api/paper/autopilot/compare`, terminal `autopilot azar`): the newest 200 closed trades of account 3 (origin
     `autopilot`). Each trade's decision bar = the last bar closed at its entry; its reference = the mean R of the
@@ -2054,7 +2065,9 @@ Demo account (simulated, never a broker):
   deployment it trades on the active (leader) instance only, like every background service. Its comparison with
   random entries keeps NEXUS's model exits on its own trades but mechanical exits on the random ones (as the
   validation does), so the difference includes the value of those exits; markets without candles (an equity without
-  a data key, a delisted symbol) leave their trades without a reference (`missing`).
+  a data key, a delisted symbol) leave their trades without a reference (`missing`). Its futures margins are fixed
+  approximations (exchanges and brokers change them) and continuous contracts (`1!`) are traded without modelling the
+  roll: a position held across a roll sees the continuous series' jump.
 
 Calendar and alerts:
 - **Curated dates need yearly upkeep**: agencies can move a release (as in the 2025 shutdown). The live BLS / BEA

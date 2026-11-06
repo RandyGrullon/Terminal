@@ -153,7 +153,7 @@ PAPER_ACCOUNT_KEYS = {"id", "name", "balance", "equity", "initial_balance", "rea
                       "auto_symbols", "auto_tf"}
 POSITION_KEYS = {"id", "account_id", "symbol", "tf", "side", "qty", "qty_open", "entry_price", "entry_time", "sl", "tp1",
                  "tp2", "tp3", "trail", "tp_hits", "status", "price", "exit_price", "exit_time", "pnl", "pnl_pct", "r_multiple",
-                 "exit_reason", "exit_label", "origin", "gate_verdict", "gate_score", "advice", "warnings"}
+                 "exit_reason", "exit_label", "origin", "gate_verdict", "gate_score", "advice", "warnings", "instrument"}
 # Optional fields of the WS 'paper' message (pending orders + portfolio risk, types-paper-orders.ts)
 PAPER_ORDER_KEYS = {"id", "account_id", "symbol", "tf", "side", "kind", "label", "price", "qty", "risk_pct", "sl", "tp",
                     "expiry", "expire_bars", "expire_time", "expiry_text", "status", "status_label", "origin",

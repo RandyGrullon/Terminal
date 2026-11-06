@@ -83,7 +83,7 @@ from app.sim.common import (
     json_loads,
     side_sign,
 )
-from app.engine.costs import asset_class
+from app.engine.contracts import futures_spec
 from app.util import RateLimitedLog, clamp, floor_time, normalize_tf, now_ms, now_s, safe_float, tf_seconds
 
 AUTOPILOT_ACCOUNT = 3  # NEXUS's own demo account: trades on its own with its signals and the gate
@@ -717,6 +717,7 @@ class PaperEngine:
             "initial_balance": self._initial_size(AUTOPILOT_ACCOUNT),
             "max_exposure_pct": float(num("autopilot.max_exposure_pct", 100.0, 0.0, 500.0)),
             "max_drawdown_pct": float(num("autopilot.max_drawdown_pct", 20.0, 0.0, 90.0)),
+            "futures_margin_pct": float(num("autopilot.futures_margin_pct", 50.0, 0.0, 100.0)),
         }
 
     def _autopilot_held(self) -> dict[str, set[str]]:
@@ -895,6 +896,7 @@ class PaperEngine:
             "pnl": round(pnl, 2),
             "pnl_pct": round(pnl / notional * 100.0, 4) if notional > 0 else 0.0,
             "r_multiple": round(r_mult, 3) if r_mult is not None else None,
+            "instrument": meta.get("instrument"),
             "exit_reason": reason,
             "exit_label": meta.get("exit_label") or (EXIT_LABEL.get(reason) if reason else None),
             "origin": pos.get("origin") or "manual",
@@ -1302,6 +1304,8 @@ class PaperEngine:
         order: dict | None = None,
         max_positions: int | None = None,
         max_exposure_pct: float | None = None,
+        contracts: bool = False,
+        margin_pct: float | None = None,
     ) -> dict:
         """Open a paper position. Returns {"position": Position, "gate": GateResult | None}.
 
@@ -1356,6 +1360,20 @@ class PaperEngine:
         risk_unit = abs(fill - stop)
         targets = self._choose_targets(s, fill, risk_unit, sl, tp, tps, gate)
 
+        # an index future (contracts=True): whole contracts, the money at the stop = points × multiplier per contract
+        spec = futures_spec(symbol) if contracts and qty is None else None
+        instrument: dict[str, Any] | None = None
+        if spec is not None:
+            per_contract = risk_unit * float(spec["multiplier"])
+            budget = await self.equity(account_id) * risk / 100.0
+            n = int(math.floor(budget / per_contract + 1e-9)) if per_contract > 0 else 0
+            if n < 1:
+                raise PaperRiskBlocked(
+                    f"1 contrato {spec['root']} ({spec['name']}) arriesga {fmt_num(per_contract, 2)} con este stop y "
+                    f"su riesgo por operación es {fmt_num(budget, 2)}: no cabe ni uno.", "contracts")
+            instrument = {"kind": "future", "root": spec["root"], "name": spec["name"],
+                          "multiplier": float(spec["multiplier"]), "contracts": n, "margin": float(spec["margin"])}
+            qty = n * float(spec["multiplier"])
         if qty is None:
             eq = await self.equity(account_id)
             qty = M.position_size(eq, risk, fill, stop, max_leverage=MAX_LEVERAGE)
@@ -1379,7 +1397,10 @@ class PaperEngine:
             "low_water": fill,
             "last_price": ref,
             "risk_pct": risk,
-            "partial": bool(self._setting("paper.partial_tp", True)),
+            # partial targets close thirds: a future needs a multiple of 3 contracts for them
+            "partial": bool(self._setting("paper.partial_tp", True)) and (
+                instrument is None or int(instrument["contracts"]) % 3 == 0),
+            "instrument": instrument,
             "advice": None,
             "warnings": [],
             "gate_summary": gate.get("summary") if gate else None,
@@ -1394,6 +1415,14 @@ class PaperEngine:
                 raise PaperError(f"La orden #{order['id']} ya no está pendiente")
             if max_positions:
                 self._check_max_positions(account_id, int(max_positions))
+            if instrument is not None and margin_pct is not None:  # atomic with the insert, like the risk rules
+                fit = self._margin_room(account_id, instrument, float(margin_pct), await self.equity(account_id))
+                if fit < int(instrument["contracts"]):
+                    instrument["contracts"] = fit
+                    qty = fit * float(instrument["multiplier"])
+                    fee = qty * fill * self._fee_pct(symbol) / 100.0
+                    meta["fees"] = fee
+                    meta["partial"] = bool(meta["partial"]) and fit % 3 == 0
             if max_exposure_pct is not None and asset_class(symbol) not in DERIVATIVE_CLASSES:
                 capped = self._cap_exposure(account_id, symbol, qty, fill, float(max_exposure_pct),
                                             await self.equity(account_id))
@@ -2427,7 +2456,8 @@ class PaperEngine:
                     res = await self.open_position(
                         acct, symbol, side, tf, origin=prof.origin, gate=gate, check_gate=False, risk_pct=prof.risk_pct,
                         max_positions=prof.max_positions or None,
-                        max_exposure_pct=(cfg["max_exposure_pct"] or None) if cfg is not None else None)
+                        max_exposure_pct=(cfg["max_exposure_pct"] or None) if cfg is not None else None,
+                        contracts=cfg is not None, margin_pct=cfg["futures_margin_pct"] if cfg is not None else None)
                 except PaperRiskBlocked as blk:  # lost the race for the last free slot / risk room
                     if self._log.should_log(f"auto-risk:{acct}:{symbol}:{blk.rule}", 3600):
                         self._emit("info", "paper", f"{prof.label}: {symbol} {SIDE_LABEL[side]} descartado: {blk.message}")
@@ -2630,6 +2660,7 @@ class PaperEngine:
             "initial_balance": cfg["initial_balance"],
             "max_exposure_pct": cfg["max_exposure_pct"],
             "max_drawdown_pct": cfg["max_drawdown_pct"],
+            "futures_margin_pct": cfg["futures_margin_pct"],
             "brake": None,  # filled by autopilot_snapshot (it needs the account's equity)
             "note": AUTOPILOT_NOTE,
         }
@@ -2682,6 +2713,27 @@ class PaperEngine:
         q = got.get(symbol) if isinstance(got, dict) else None
         return isinstance(q, dict) and q.get("market_open") is not False and quote_is_live(q, now_ms())
 
+    def _margin_room(self, account_id: int, instrument: dict, pct: float, equity: float) -> int:
+        """Whole contracts of a future that fit the account's margin budget (pct % of equity, approximate initial
+        margins of app.engine.contracts); PaperRiskBlocked 'margin' when not even one fits."""
+        cap = max(float(equity), 0.0) * float(pct) / 100.0
+        used = 0.0
+        for p in self._open.values():
+            inst = (p.get("meta") or {}).get("instrument") or {}
+            if p["account_id"] == account_id and inst.get("kind") == "future":
+                used += float(p["qty_open"]) / float(inst["multiplier"]) * float(inst["margin"])
+        room = cap - used
+        margin = float(instrument["margin"])
+        n = int(math.floor(room / margin + 1e-9)) if margin > 0 else 0
+        if n < 1:
+            if pct <= 0:
+                raise PaperRiskBlocked("No opera futuros: su margen máximo en futuros es 0 %.", "margin")
+            raise PaperRiskBlocked(
+                f"El margen de 1 contrato {instrument['root']} (~{fmt_num(margin, 0)}, aproximado) supera lo disponible "
+                f"para garantías: {fmt_num(max(room, 0.0), 0)} de {fmt_num(cap, 0)} ({fmt_pct(pct, 0, False)} del "
+                "capital).", "margin")
+        return n
+
     def _cap_exposure(self, account_id: int, symbol: str, qty: float, fill: float, pct: float,
                       equity: float) -> float:
         """Units within a cash account's exposure (non-derivatives held ≤ pct % of equity): the same qty, a smaller one
@@ -2703,7 +2755,7 @@ class PaperEngine:
     async def set_autopilot(self, *, enabled: Any = None, source: Any = None, symbols: Any = None, tf: Any = None,
                             max_positions: Any = None, risk_pct: Any = None, scanner_top: Any = None,
                             alerts: Any = None, max_exposure_pct: Any = None,
-                            max_drawdown_pct: Any = None) -> dict[str, Any]:
+                            max_drawdown_pct: Any = None, futures_margin_pct: Any = None) -> dict[str, Any]:
         """Change the settings of NEXUS's own account (only the given fields); Spanish PaperError on a bad value.
         `alerts`: its trades as alerts through the user's channels (setting alerts.autopilot, opt-in)."""
         values: dict[str, Any] = {}
@@ -2734,6 +2786,7 @@ class PaperEngine:
             ("scanner_top", scanner_top, 1, 30, "El número de candidatos del escáner", int),
             ("max_exposure_pct", max_exposure_pct, 0, 500, "La exposición máxima (%)", float),
             ("max_drawdown_pct", max_drawdown_pct, 0, 90, "El freno de pérdidas (%)", float),
+            ("futures_margin_pct", futures_margin_pct, 0, 100, "El margen máximo en futuros (%)", float),
         ):
             if value is None:
                 continue

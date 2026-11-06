@@ -450,6 +450,7 @@ class AutopilotRequest(BaseModel):
     alerts: bool | None = None  # its trades as alerts (Telegram / email), setting alerts.autopilot
     max_exposure_pct: float | None = None  # cash account: non-derivatives held ≤ this % of equity (0 = off)
     max_drawdown_pct: float | None = None  # loss brake (0 = off)
+    futures_margin_pct: float | None = None  # index futures: equity tied up as margin at most (0 = no futures)
 
 
 @router.get("/api/paper/autopilot")
@@ -469,7 +470,8 @@ async def paper_autopilot_update(req: AutopilotRequest) -> dict:
         snap = await paper.set_autopilot(enabled=req.enabled, source=req.source, symbols=symbols, tf=req.tf,
                                          max_positions=req.max_positions, risk_pct=req.risk_pct,
                                          scanner_top=req.scanner_top, alerts=req.alerts,
-                                         max_exposure_pct=req.max_exposure_pct, max_drawdown_pct=req.max_drawdown_pct)
+                                         max_exposure_pct=req.max_exposure_pct, max_drawdown_pct=req.max_drawdown_pct,
+                                         futures_margin_pct=req.futures_margin_pct)
     except (PaperError, ValueError, KeyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc).strip("'\"")) from None
     return clean_json(snap)

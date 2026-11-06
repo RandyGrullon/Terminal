@@ -61,6 +61,7 @@ export interface AutopilotStatus {
   initial_balance: number // what its account starts with (autopilot.initial_balance, 1000 by default)
   max_exposure_pct: number // cash account: shares / funds / crypto held ≤ this % of equity (0 = only the 5× cap)
   max_drawdown_pct: number // loss brake: no new entries this % below the initial balance (0 = off)
+  futures_margin_pct: number // index futures: equity tied up as approximate margin at most (0 = no futures)
   brake: AutopilotBrake | null // null outside a snapshot
   note: string // honest Spanish note from the backend: shown verbatim
 }
@@ -128,4 +129,5 @@ export interface AutopilotUpdate {
   alerts?: boolean
   max_exposure_pct?: number
   max_drawdown_pct?: number
+  futures_margin_pct?: number
 }

@@ -17,6 +17,22 @@ export function normalizePositions(raw: unknown): Position[] {
   return raw.filter(isPosition).map((p) => ({ ...p, warnings: Array.isArray(p.warnings) ? p.warnings : [] }))
 }
 
+/** Contracts of a future / option position for `units` (qty or qty_open), or null for any other position. */
+export function contractsOf(p: Position, units: number): number | null {
+  const inst = p.instrument
+  if (!inst || !isNum(inst.multiplier) || inst.multiplier <= 0 || !isNum(units)) return null
+  return Math.round((units / inst.multiplier) * 1000) / 1000
+}
+
+/** "1 contrato M2K", "3 contratos" (an option: its name tells the rest); null for any other position. */
+export function contractsText(p: Position, units: number): string | null {
+  const n = contractsOf(p, units)
+  if (n === null || !p.instrument) return null
+  const word = n === 1 ? 'contrato' : 'contratos'
+  const count = Number.isInteger(n) ? String(n) : n.toLocaleString('es-ES', { maximumFractionDigits: 3 })
+  return p.instrument.kind === 'future' && p.instrument.root ? `${count} ${word} ${p.instrument.root}` : `${count} ${word}`
+}
+
 export function isAccount(v: unknown): v is PaperAccount {
   return !!v && typeof v === 'object' && isNum((v as PaperAccount).id) && isNum((v as PaperAccount).balance)
 }

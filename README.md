@@ -241,6 +241,11 @@ que la actives en «Cómo opera»:
   acciones en su lista (por ejemplo `NASDAQ:AAPL`, `NASDAQ:MSFT`, `AMEX:SPY`) con «Lista fija» o «Ambos» (lista +
   escáner). Solo abre acciones con el mercado abierto y precio en vivo, y puede comprar fracciones. Con el plan
   gratuito, mejor pocas acciones (5–8) en velas de 1 h: cada vela cerrada de cada acción es una consulta.
+- **Futuros de índices**: pon en su lista micro o mini futuros del S&P 500, Nasdaq, Dow o Russell
+  (`CME_MINI:MES1!`, `CME_MINI:MNQ1!`, `CBOT_MINI:MYM1!`, `CME_MINI:M2K1!`). Opera contratos enteros: solo si uno cabe
+  en su riesgo por operación y su margen aproximado no pasa del «Margen máximo en futuros» (50 % del capital). Con
+  1.000 $ casi nunca caben y el registro te dirá por qué. Sin una clave que sirva futuros, NEXUS los graba mientras
+  está encendido y necesita alrededor de una semana de historial para analizarlos en velas de 1 h.
 - **Registro de decisiones**: qué abrió, qué descartó y por qué (filtro, límite de posiciones, riesgo) y qué cerró.
   Se guardan las 30 últimas en la base de datos, así que siguen ahí después de reiniciar el servidor.
 - Si **cambias la temporalidad** con posiciones abiertas, NEXUS sigue cerrándolas con sus reglas en la temporalidad

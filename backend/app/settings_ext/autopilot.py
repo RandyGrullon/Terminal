@@ -21,4 +21,6 @@ DEFAULTS: dict = {
     "autopilot.max_exposure_pct": 100.0,
     # loss brake: no new entries once its equity is this % below its initial balance (0 = off)
     "autopilot.max_drawdown_pct": 20.0,
+    # index futures: the most of its equity tied up as (approximate) initial margin (0 = it trades no futures)
+    "autopilot.futures_margin_pct": 50.0,
 }

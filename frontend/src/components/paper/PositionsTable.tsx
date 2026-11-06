@@ -6,7 +6,7 @@ import type { NexusWarning, Position } from '../../api/types'
 import { DIRECTION_LABEL, fmtBarTime, fmtDuration, fmtPct, fmtPrice, fmtR, signTone, splitSymbol, toneColor } from '../../lib/format'
 import { Badge, Button, IconButton, VerdictBadge } from '../ui'
 import { ORIGIN_LABEL, fmtMoney, fmtQty, isNum } from '../markets/opsUtils'
-import { adviceLevel, distPct, stopProtects, tpHits } from './paperUtils'
+import { adviceLevel, contractsOf, contractsText, distPct, stopProtects, tpHits } from './paperUtils'
 import { useMediaQuery } from './useMediaQuery'
 
 interface Props {
@@ -115,7 +115,7 @@ const Row = memo(function Row(props: {
         <div className="pp-stack" style={{ alignItems: 'flex-start', gap: 2 }}>
           <Badge tone={p.side === 'long' ? 'pos' : 'neg'}>{DIRECTION_LABEL[p.side]}</Badge>
           <span className="pp-sub">
-            {fmtQty(p.qty_open)} de {fmtQty(p.qty)}
+            {contractsText(p, p.qty) !== null ? `${contractsOf(p, p.qty_open)} de ${contractsText(p, p.qty)}` : `${fmtQty(p.qty_open)} de ${fmtQty(p.qty)}`}
           </span>
         </div>
       </td>

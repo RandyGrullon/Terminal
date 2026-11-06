@@ -138,6 +138,7 @@ export function normalizeStatus(raw: unknown): AutopilotStatus | null {
     initial_balance: numOr(o.initial_balance, 1000),
     max_exposure_pct: numOr(o.max_exposure_pct, 100),
     max_drawdown_pct: numOr(o.max_drawdown_pct, 20),
+    futures_margin_pct: numOr(o.futures_margin_pct, 50),
     brake: normalizeBrake(o.brake),
     note: isStr(o.note) ? o.note : '',
   }
@@ -215,6 +216,9 @@ export function MoneyCard({ status, dailyLossPct }: { status: AutopilotStatus; d
       : 'Sin tope de exposición propio: solo el límite general de 5 veces el capital por posición.',
     'Cierra 1/3 en el primer objetivo y sube el stop a la entrada; otro 1/3 en el segundo, y deja correr el resto con un stop dinámico.',
     'Sale antes si NEXUS cambia de opinión al cierre de una vela, y nunca abre en un mercado cerrado.',
+    status.futures_margin_pct > 0
+      ? `Futuros de índices (micro o mini): contratos enteros, solo si uno cabe en su riesgo por operación y su margen aproximado en el ${pct(status.futures_margin_pct, 0)} del capital; con una cuenta pequeña casi nunca caben.`
+      : 'No opera futuros (margen máximo en futuros: 0 %).',
     status.max_drawdown_pct > 0
       ? `Se frena si pierde un ${pct(status.max_drawdown_pct, 0)} desde su saldo inicial${dailyLossPct ? ` o un ${pct(dailyLossPct)} en el día` : ''}.`
       : `Sin freno de pérdidas acumuladas${dailyLossPct ? `; sí se frena si pierde un ${pct(dailyLossPct)} en el día` : ''}.`,
@@ -354,9 +358,10 @@ export interface AutopilotDraft {
   scanner_top: number | null
   max_exposure_pct: number | null
   max_drawdown_pct: number | null
+  futures_margin_pct: number | null
 }
 
-type NumField = 'max_positions' | 'risk_pct' | 'scanner_top' | 'max_exposure_pct' | 'max_drawdown_pct'
+type NumField = 'max_positions' | 'risk_pct' | 'scanner_top' | 'max_exposure_pct' | 'max_drawdown_pct' | 'futures_margin_pct'
 
 /** The server's limits for each number (same wording as its 400 answers). */
 const RANGES: Record<NumField, { lo: number; hi: number; int: boolean; what: string }> = {
@@ -365,6 +370,7 @@ const RANGES: Record<NumField, { lo: number; hi: number; int: boolean; what: str
   scanner_top: { lo: 1, hi: 30, int: true, what: 'El número de candidatos del escáner' },
   max_exposure_pct: { lo: 0, hi: 500, int: false, what: 'La exposición máxima (%)' },
   max_drawdown_pct: { lo: 0, hi: 90, int: false, what: 'El freno de pérdidas (%)' },
+  futures_margin_pct: { lo: 0, hi: 100, int: false, what: 'El margen máximo en futuros (%)' },
 }
 
 /** The list is used by the sources list and both; the scanner candidates by scanner and both. */
@@ -378,6 +384,7 @@ const numFields = (source: AutopilotSource): NumField[] => [
   ...(usesScanner(source) ? (['scanner_top'] as NumField[]) : []),
   'max_exposure_pct',
   'max_drawdown_pct',
+  'futures_margin_pct',
 ]
 
 export function draftFrom(s: AutopilotStatus): AutopilotDraft {
@@ -390,6 +397,7 @@ export function draftFrom(s: AutopilotStatus): AutopilotDraft {
     scanner_top: s.scanner_top,
     max_exposure_pct: s.max_exposure_pct,
     max_drawdown_pct: s.max_drawdown_pct,
+    futures_margin_pct: s.futures_margin_pct,
   }
 }
 
@@ -618,6 +626,9 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
           </Field>
           <Field label="Freno de pérdidas (%)" hint="Deja de abrir operaciones si cae este % desde su saldo inicial (0 = sin freno)">
             <NumberInput value={draft.max_drawdown_pct} onChange={(v) => patch({ max_drawdown_pct: v })} min={0} max={90} step={5} />
+          </Field>
+          <Field label="Margen máximo en futuros (%)" hint="Del capital, como garantía aproximada de los contratos (0 = no opera futuros)">
+            <NumberInput value={draft.futures_margin_pct} onChange={(v) => patch({ futures_margin_pct: v })} min={0} max={100} step={10} />
           </Field>
         </div>
 

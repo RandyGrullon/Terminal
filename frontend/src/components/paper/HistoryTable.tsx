@@ -6,7 +6,7 @@ import { DIRECTION_LABEL, fmtBarTime, fmtDuration, fmtPct, fmtPrice, fmtProb, fm
 import { plural } from '../../lib/plural'
 import { Badge, Button, VerdictBadge } from '../ui'
 import { ORIGIN_LABEL, fmtMoney, fmtQty, isNum } from '../markets/opsUtils'
-import { exitInfo, verdictBreakdown } from './paperUtils'
+import { contractsText, exitInfo, verdictBreakdown } from './paperUtils'
 
 const PAGE = 50
 
@@ -88,7 +88,7 @@ function HistoryTable({
                   <td>
                     <Badge tone={p.side === 'long' ? 'pos' : 'neg'}>{DIRECTION_LABEL[p.side]}</Badge>
                   </td>
-                  <td className="num mono">{fmtQty(p.qty)}</td>
+                  <td className="num mono">{contractsText(p, p.qty) ?? fmtQty(p.qty)}</td>
                   <td className="num mono">
                     <div className="pp-stack">
                       <span>{fmtPrice(p.entry_price)}</span>

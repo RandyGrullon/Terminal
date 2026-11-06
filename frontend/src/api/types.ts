@@ -500,6 +500,21 @@ export interface SimStartRequest {
   initial_balance?: number
 }
 
+/** The contract of a position in an index future or a stock option (NEXUS automática's own account). */
+export interface PositionInstrument {
+  kind: 'future' | 'option'
+  name: string // "Micro E-mini Russell 2000" · "AAPL 230 C 18/12/2026"
+  multiplier: number // units per contract: future $ per point · option 100 shares
+  contracts: number // whole contracts at the open (qty / multiplier)
+  root?: string // future: MES, M2K…
+  margin?: number // future: approximate initial margin per contract ($), never a broker's number
+  underlying?: string // option: the stock (EXCHANGE:TICKER)
+  right?: 'call' | 'put' // option
+  strike?: number // option
+  expiry?: string // option: YYYY-MM-DD
+  sigma?: number // option: annual historical volatility of its theoretical price
+}
+
 export interface PaperAccount {
   id: number
   name: string
@@ -545,6 +560,7 @@ export interface Position {
   exit_reason: string | null
   exit_label: string | null
   origin: 'manual' | 'auto' | 'sim' | 'script' | 'autopilot' // autopilot = NEXUS's own account (3)
+  instrument?: PositionInstrument | null // a future or an option (NEXUS automática); null for shares, crypto…
   gate_verdict: Verdict | null
   gate_score: number | null
   // Live NEXUS advice for this position: "Cerrar ya: …" only when NEXUS itself leaves this side (EXIT_* or the opposite

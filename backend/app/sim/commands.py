@@ -576,7 +576,7 @@ _AP_COMPARE = ("azar", "comparar", "referencia")
 _AP_KIND = {"open": ("Abre", "success"), "close": ("Cierra", "info"), "skip": ("Descarta", "muted"),
             "info": ("Nota", "info")}
 AUTOPILOT_USAGE = ("autopilot [on|off] [lista <símbolos…> | escaner [N] | ambos [N]] [--tf 1h] [--max 5] [--risk 1] "
-                   "[--top 10] [--expo 100] [--freno 20] · "
+                   "[--top 10] [--expo 100] [--freno 20] [--margen 50] · "
                    "autopilot pos | log | azar | avisos on|off | close <id|símbolo|all> | reset [saldo] --yes")
 
 
@@ -634,6 +634,9 @@ def _print_autopilot(ctx: CommandContext, snap: dict) -> None:
     ctx.print(("Cuenta de efectivo: hasta el " + fmt_pct(expo, 0, False) + " de su capital invertido" if expo
                else "Sin tope de exposición propio") + " · freno de pérdidas: "
               + (fmt_pct(freno, 0, False) + " desde el saldo inicial" if freno else "desactivado"), "info")
+    fm = st.get("futures_margin_pct") or 0
+    ctx.print(("Futuros: contratos enteros, con hasta el " + fmt_pct(fm, 0, False) + " del capital como margen aproximado"
+               if fm else "No opera futuros (--margen 0)"), "muted")
     brake = st.get("brake") or {}
     if brake.get("active"):
         ctx.print(f"⛔ Freno de pérdidas activo: la cuenta está un {fmt_pct(brake.get('drawdown_pct'), 1, False)} por debajo "
@@ -807,7 +810,8 @@ async def _autopilot(ctx: CommandContext) -> None:
                                   ("risk", "risk_pct", "el riesgo por operación", False),
                                   ("top", "scanner_top", "el número de candidatos del escáner", False),
                                   ("expo", "max_exposure_pct", "la exposición máxima", True),
-                                  ("freno", "max_drawdown_pct", "el freno de pérdidas", True)):
+                                  ("freno", "max_drawdown_pct", "el freno de pérdidas", True),
+                                  ("margen", "futures_margin_pct", "el margen máximo en futuros", True)):
         value = _ap_number(ctx, flag, what, zero=zero)
         if value is not None:
             update[key] = value
