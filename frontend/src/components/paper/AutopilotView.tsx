@@ -54,9 +54,9 @@ const TF_OPTIONS = TIMEFRAMES.map((t) => ({ value: t, label: t }))
 const ORIGIN_LABELS: Record<string, string> = { autopilot: 'NEXUS' }
 
 const SOURCE_OPTIONS: { value: AutopilotSource; label: string; title: string }[] = [
-  { value: 'scanner', label: 'Escáner', title: 'Las mejores oportunidades TOMAR del último escaneo' },
+  { value: 'scanner', label: 'Escáner', title: 'Los mejores candidatos del último escaneo' },
   { value: 'list', label: 'Lista fija', title: 'Solo los símbolos de tu lista' },
-  { value: 'both', label: 'Ambos', title: 'Tu lista y las mejores oportunidades TOMAR del escáner' },
+  { value: 'both', label: 'Ambos', title: 'Tu lista y los mejores candidatos del escáner' },
 ]
 /** How it trades stocks and funds (autopilot.stock_instrument). */
 const INSTRUMENT_OPTIONS: { value: AutopilotStockInstrument; label: string }[] = [
@@ -613,9 +613,9 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
           </div>
           <span className="tiny muted">
             {draft.source === 'scanner'
-              ? 'Las mejores oportunidades TOMAR del último escaneo (filtro TOMAR con señal de NEXUS), el automático o uno que lances en Escáner. Después NEXUS decide en su propia temporalidad.'
+              ? 'Los mejores candidatos del último escaneo, el automático o uno que lances en Escáner: primero las oportunidades TOMAR (filtro TOMAR con señal de NEXUS) y después los mercados que el filtro aprueba a la espera de una señal. Solo mercados en dólares. Si un escaneo no encuentra ninguno, no vigila nada: «Ambos» vigila además tu lista.'
               : draft.source === 'both'
-                ? 'Tu lista (acciones, cripto…) y además las mejores oportunidades TOMAR del último escaneo. En cada vela cerrada NEXUS decide si entra y en qué dirección.'
+                ? 'Tu lista (acciones, cripto…) y además los mejores candidatos del último escaneo. En cada vela cerrada NEXUS decide si entra y en qué dirección: solo con su señal y el filtro TOMAR.'
                 : 'Solo los símbolos de la lista (acciones, cripto…): en cada vela cerrada NEXUS decide si entra y en qué dirección. Las acciones solo se operan con el mercado abierto.'}
           </span>
         </div>
@@ -715,10 +715,10 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
 export function emptyWatchText(s: AutopilotStatus): string {
   if (!s.enabled) return 'Pausada: no vigila ningún símbolo. Actívala en «Cómo opera» para que NEXUS empiece a operar.'
   if (s.source === 'list') return s.symbols.length ? 'Preparando la lista de símbolos…' : 'La lista está vacía: añade símbolos en «Cómo opera».'
-  if (!s.scan) return 'Cuando termine un escaneo, NEXUS vigilará sus mejores oportunidades TOMAR.'
+  if (!s.scan) return 'Cuando termine un escaneo, NEXUS vigilará sus mejores candidatos.'
   if (s.scan.finished_at === null) return 'Esperando a que termine el escaneo en curso.'
-  if (s.scan.opportunities <= 0)
-    return 'El último escaneo no encontró ninguna oportunidad TOMAR (filtro TOMAR con señal de NEXUS): no abrirá nada nuevo hasta que un escaneo encuentre alguna.'
+  if (s.source === 'scanner')
+    return 'El último escaneo no encontró candidatos (ni oportunidades TOMAR ni mercados que el filtro apruebe): no vigila nada hasta el próximo. Con «Ambos» vigila además tu lista.'
   return 'Nada que vigilar ahora mismo.'
 }
 
@@ -742,10 +742,13 @@ function ScanLine({ scan }: { scan: AutopilotScan | null }) {
 /** "Qué está vigilando": the candidates (and why), the direction when it is known and, for the scanner, its scan. */
 export const WatchCard = memo(function WatchCard({ status, onOpenChart }: { status: AutopilotStatus; onOpenChart: (symbol: string) => void }) {
   const { watching } = status
+  const scanPart = `${plural(status.scanner_top, 'candidato', 'candidatos')} del último escaneo`
   const sub =
     status.source === 'scanner'
-      ? `Hasta ${plural(status.scanner_top, 'oportunidad TOMAR', 'oportunidades TOMAR')} del último escaneo · decide en velas de ${status.tf}`
-      : `Lista fija · decide en velas de ${status.tf}`
+      ? `Hasta ${scanPart} · decide en velas de ${status.tf}`
+      : status.source === 'both'
+        ? `Tu lista y hasta ${scanPart} · decide en velas de ${status.tf}`
+        : `Lista fija · decide en velas de ${status.tf}`
   return (
     <Card
       flush
@@ -756,7 +759,7 @@ export const WatchCard = memo(function WatchCard({ status, onOpenChart }: { stat
       }
       sub={sub}
     >
-      {status.source === 'scanner' && <ScanLine scan={status.scan} />}
+      {status.source !== 'list' && <ScanLine scan={status.scan} />}
       {watching.length > 0 ? (
         <div className="table-wrap">
           <table className="table ap-table">

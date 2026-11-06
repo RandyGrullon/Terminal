@@ -95,8 +95,9 @@ def test_autopilot_is_off_by_default_with_its_own_account(runtime_factory, no_ba
                                                                                       False)
             assert (await engine.account(1))["balance"] == 10000.0  # the user's account keeps risk.account_size
             st = snap["autopilot"]
-            assert (st["enabled"], st["account_id"], st["source"], st["tf"], st["symbols"]) == (False, 3, "scanner",
-                                                                                               "1h", [])
+            # by default it watches a few liquid cryptos in dollars plus the scanner's candidates (a scan often has none)
+            assert (st["enabled"], st["account_id"], st["source"], st["tf"], st["symbols"]) == (
+                False, 3, "both", "1h", ["BINANCE:BTCUSDT", "BINANCE:ETHUSDT", "BINANCE:SOLUSDT"])
             assert (st["max_positions"], st["risk_pct"], st["scanner_top"]) == (5, 1.0, 10)
             assert st["watching"] == [] and st["scan"] is None and st["log"] == []
             assert (st["alerts"], st["alert_channels"]) == (False, 0)  # its alerts are opt-in; no alert service here
@@ -257,7 +258,7 @@ def test_scanner_mode_watches_the_newest_scan_tomar_opportunities(runtime_factor
             # a failed scan is no source, and a scan still running is not used until it finishes
             rt.scanner = FakeScanner({"id": 5, "status": "error", "finished_at": 1_759_999_000_000},
                                      [{"symbol": SOL, "opportunity": True, "direction": "long"}])
-            snap = await engine.set_autopilot(enabled=True, scanner_top=2)
+            snap = await engine.set_autopilot(enabled=True, source="scanner", scanner_top=2)
             assert snap["autopilot"]["watching"] == [] and snap["autopilot"]["scan"] is None
             rt.scanner = FakeScanner({"id": 6, "status": "running", "finished_at": None},
                                      [{"symbol": SOL, "opportunity": True, "direction": "long"}])
@@ -606,7 +607,7 @@ def test_set_autopilot_rejects_bad_values_in_spanish(runtime_factory, no_backgro
                 with pytest.raises(pp.PaperError) as err:
                     await engine.set_autopilot(**kwargs)
                 assert text in str(err.value)
-            assert engine.autopilot_status()["enabled"] is False and rt.settings.get("autopilot.source") == "scanner"
+            assert engine.autopilot_status()["enabled"] is False and rt.settings.get("autopilot.source") == "both"
             await engine.stop()
 
     asyncio.run(scenario())
@@ -651,3 +652,54 @@ def test_autopilot_api(api_client):
     assert c.get("/api/paper/account").json()["account"]["balance"] == 10000.0  # the user's account: untouched
     r = c.post("/api/paper/autopilot", json={"enabled": False})
     assert r.status_code == 200 and r.json()["autopilot"]["enabled"] is False
+
+
+def test_quotes_in_dollars_only():
+    for sym, quote, ok in (("BINANCE:BTCUSDT", "USDT", True), ("BINANCE:BTCUSDT.P", "USDT", True),
+                           ("COINBASE:ETHUSD", "USD", True), ("BINANCE:ACTTRY", "TRY", False),
+                           ("BINANCE:ETHBTC", "BTC", False), ("FX:EURUSD", "USD", True), ("FX:USDJPY", "JPY", False),
+                           ("NASDAQ:AAPL", None, True), ("SIM:NEXUS", None, True),
+                           ("OPT:NYSE:F:20261218:P:12", None, True)):
+        assert (pp.quote_currency(sym), pp.in_dollars(sym)) == (quote, ok), sym
+
+
+def test_default_watch_and_scanner_candidates_opportunities_first_in_dollars(runtime_factory, no_background):
+    TRY, ETHBTC, ADA, XRP = "BINANCE:ACTTRY", "BINANCE:ETHBTC", "BINANCE:ADAUSDT", "BINANCE:XRPUSDT"
+
+    async def scenario():
+        async with runtime_factory() as rt:
+            engine = await _engine(rt, {SYM: 100.0, SOL: 100.0, BTC: 100.0, ADA: 1.0, TRY: 5.0},
+                                   BarNexus(default=make_current("WAIT")))
+            rt.scanner = FakeScanner({"id": 9, "status": "done", "finished_at": 1_760_000_000_000}, [
+                {"symbol": TRY, "opportunity": True, "direction": "long", "deep": True, "verdict": "TAKE"},  # liras
+                {"symbol": SOL, "opportunity": True, "direction": "short", "deep": True, "verdict": "TAKE"},
+                {"symbol": ETHBTC, "opportunity": False, "direction": "long", "deep": True, "verdict": "TAKE"},  # BTC
+                {"symbol": ADA, "opportunity": False, "direction": "long", "deep": True, "verdict": "TAKE"},  # no signal
+                {"symbol": XRP, "opportunity": False, "direction": "long", "deep": True, "verdict": "AVOID"},
+                {"symbol": "BINANCE:DOGEUSDT", "opportunity": False, "deep": False, "verdict": None},
+            ])
+            # the default (both): a few liquid cryptos in dollars, always, plus the scanner's candidates
+            snap = await engine.set_autopilot(enabled=True)
+            assert _bare(snap["autopilot"]["watching"]) == [
+                {"symbol": ADA, "why": "escáner", "direction": "long"}, {"symbol": BTC, "why": "lista", "direction": None},
+                {"symbol": SYM, "why": "lista", "direction": None}, {"symbol": SOL, "why": "lista", "direction": None}]
+            await _settle(engine)
+            assert len(rt.nexus.calls) == 4  # each one decided at once on its last closed bar (ESPERAR: nothing opens)
+            # the scanner alone: its TOMAR opportunities first, then the markets the gate approves without a signal yet;
+            # never a pair quoted in another currency, nor one the gate rejects
+            snap = await engine.set_autopilot(source="scanner", scanner_top=5)
+            assert _bare(snap["autopilot"]["watching"]) == [{"symbol": ADA, "why": "escáner", "direction": "long"},
+                                                            {"symbol": SOL, "why": "escáner", "direction": "short"}]
+            assert snap["autopilot"]["scan"]["opportunities"] == 1  # the one in dollars
+            snap = await engine.set_autopilot(scanner_top=1)
+            assert [w["symbol"] for w in snap["autopilot"]["watching"]] == [SOL]
+            # a pair in another currency is never traded, even from its list (its account is in USD)
+            rt.nexus.default = make_current("BUY")
+            await engine.set_autopilot(source="list", symbols=[TRY])
+            await _settle(engine)
+            assert engine.open_positions(3) == []
+            assert any(e["symbol"] == TRY and e["text"] == "Largo descartado: ACTTRY cotiza en TRY, no en dólares, y la "
+                       "cuenta de NEXUS es en USD" for e in engine.autopilot_status()["log"])
+            await engine.stop()
+
+    asyncio.run(scenario())

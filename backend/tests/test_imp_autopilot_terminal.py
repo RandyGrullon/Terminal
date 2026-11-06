@@ -64,7 +64,8 @@ def test_status_on_with_a_list_and_off(client):
     assert res["ok"], res["lines"]
     text = _text(res)
     assert "NEXUS automática (cuenta demo 3, simulada) · PAUSADA" in text
-    assert "Qué vigila: escáner: hasta 10 oportunidades TOMAR del último escaneo · decide en velas de 1h" in text
+    assert ("Qué vigila: lista (BINANCE:BTCUSDT, BINANCE:ETHUSDT, BINANCE:SOLUSDT) y hasta 10 candidatos del último "
+            "escaneo (primero las oportunidades TOMAR) · decide en velas de 1h") in text  # the default: both
     assert "Sin escaneos terminados todavía" in text and "ganadoras sin operaciones cerradas todavía" in text
     assert "Avisos por Telegram o correo: desactivados (autopilot avisos on)" in text
     assert "no encontró ventaja" in text and "bróker" in text  # the honest note, verbatim
@@ -128,7 +129,7 @@ def test_cash_account_and_brake_from_the_terminal(client):
     assert res["ok"], res["lines"]
     st = res["data"]["autopilot"]
     assert (st["source"], st["scanner_top"], st["max_exposure_pct"], st["max_drawdown_pct"]) == ("both", 5, 80.0, 0.0)
-    assert "freno de pérdidas: desactivado" in _text(res) and "y hasta 5 oportunidades TOMAR" in _text(res)
+    assert "freno de pérdidas: desactivado" in _text(res) and "y hasta 5 candidatos del último escaneo" in _text(res)
     assert _term(client, "autopilot --freno 95")["ok"] is False
     assert _term(client, "autopilot --expo")["ok"] is False
 

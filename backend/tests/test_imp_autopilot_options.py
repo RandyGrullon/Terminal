@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import time
 from datetime import date
 
@@ -124,7 +125,8 @@ def test_auto_buys_a_put_to_bet_on_a_fall_and_shares_to_bet_on_a_rise(runtime_fa
     async def scenario():
         async with runtime_factory() as rt:
             nexus = StockNexus({F: _sell(12.0), AAPL: make_current("BUY", price=100.0)})
-            engine = await _engine(rt, {F: 12.0, AAPL: 100.0}, nexus)
+            # the open-risk cap off: the put's risk (half its premium) depends on the days left to its expiry
+            engine = await _engine(rt, {F: 12.0, AAPL: 100.0}, nexus, **{"paper.max_open_risk_pct": 0})
             st = (await engine.autopilot_snapshot())["autopilot"]
             assert (st["stock_instrument"], st["options_premium_pct"]) == ("auto", 10.0)
             await engine.set_autopilot(enabled=True, source="list", symbols=[F, AAPL])
@@ -152,7 +154,8 @@ def test_auto_buys_a_put_to_bet_on_a_fall_and_shares_to_bet_on_a_rise(runtime_fa
             assert put["sl"] == pytest.approx(premium * 0.5) and put["tp1"] == pytest.approx(premium * 1.5)
             assert (put["tp2"], put["tp3"]) == (pytest.approx(premium * 2.0), pytest.approx(premium * 2.5))
             log = " ".join(e["text"] for e in engine.autopilot_status()["log"])
-            assert "contrato put F 12 P" in log and "prima teórica" in log and "volatilidad histórica 33 %" in log
+            assert re.search(r"Compra \d+ contratos? put F 12 P", log) and "prima teórica" in log
+            assert "volatilidad histórica 33 %" in log
             assert any("Abierto F 12 P" in e["message"] and "(put)" in e["message"] for e in rt.bus.recent())
             # the gate decision is logged on the stock, with the gate's own levels (not premiums)
             rows = await rt.db.fetchall("SELECT symbol, direction, entry, taken FROM gate_log ORDER BY symbol")

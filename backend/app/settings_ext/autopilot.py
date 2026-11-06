@@ -8,10 +8,12 @@ from __future__ import annotations
 
 DEFAULTS: dict = {
     "autopilot.enabled": False,
-    # scanner = the best TOMAR opportunities (gate TOMAR + NEXUS signal) of the latest scan · list = autopilot.symbols ·
-    # both = the list plus those opportunities
-    "autopilot.source": "scanner",
-    "autopilot.symbols": [],
+    # scanner = the best candidates of the latest scan (its TOMAR opportunities first, then the markets the gate approves
+    # while NEXUS has no entry signal there yet; in dollars only) · list = autopilot.symbols · both = the list plus those
+    # candidates. Default both: the scanner's candidates come and go (a scan often has none), so it always watches a
+    # few liquid markets in dollars too.
+    "autopilot.source": "both",
+    "autopilot.symbols": ["BINANCE:BTCUSDT", "BINANCE:ETHUSDT", "BINANCE:SOLUSDT"],
     "autopilot.tf": "1h",
     "autopilot.max_positions": 5,  # open positions at most (one per symbol)
     "autopilot.risk_pct": 1.0,  # % of the account's equity risked per trade (distance to the stop)

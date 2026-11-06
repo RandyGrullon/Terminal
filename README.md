@@ -224,10 +224,13 @@ Arriba de *Cuenta demo*, el selector **Mi cuenta | NEXUS automática** cambia a 
 mezclan con los tuyos, y sus operaciones solo te avisan por Telegram o correo si lo activas. Está **apagada** hasta
 que la actives en «Cómo opera»:
 
-- **Qué vigila**: las mejores oportunidades TOMAR del último escaneo terminado (filtro TOMAR con señal de NEXUS; por
-  defecto las 10 primeras) o una **lista fija** de símbolos que tú eliges. «Qué está vigilando» muestra cada símbolo,
-  por qué está ahí y qué dijo NEXUS en su última vela cerrada (casi siempre ESPERAR o MANTENER: no operar también es
-  una decisión).
+- **Qué vigila**: por defecto, **«Ambos»**: una lista base de cripto líquidas en dólares (BTC, ETH y SOL, que puedes
+  cambiar) más los mejores candidatos del último escaneo terminado. Del escáner toma primero las oportunidades TOMAR
+  (filtro TOMAR con señal de NEXUS) y después los mercados que el filtro aprueba a la espera de una señal, hasta 10 y
+  solo en dólares. También puedes elegir solo el **Escáner** (si un escaneo no encuentra candidatos, no vigila nada) o
+  solo una **lista fija**. «Qué está vigilando» muestra cada símbolo, por qué está ahí y qué dijo NEXUS en su última
+  vela cerrada (casi siempre ESPERAR o MANTENER: no operar también es una decisión). Nunca opera pares cotizados en
+  otra moneda (liras, euros, BTC…): su cuenta es en dólares.
 - **Cuándo y cómo decide**: al cierre de cada vela de su temporalidad (1 h por defecto); un candidato nuevo se decide
   en el acto con su última vela cerrada. Solo entra si NEXUS da COMPRAR o VENDER **y** el filtro dice TOMAR, y sale
   con las reglas de salida de NEXUS además del SL, los TP parciales y el stop dinámico de siempre.

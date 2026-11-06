@@ -347,10 +347,11 @@ alerts.smtp_security "starttls" (starttls|ssl|none) · alerts.smtp_user "" · al
 alerts.email_from "" (empty = the SMTP user's address) · alerts.email_to "" (comma-separated)
 paper.max_open_risk_pct 6.0 · paper.max_positions_per_group 3 · paper.crypto_one_group true
 paper.daily_loss_limit_pct 3.0                                       (the three numeric limits: 0 = off)
-autopilot.enabled false · autopilot.source "scanner" (scanner|list) · autopilot.symbols [] · autopilot.tf "1h"
+autopilot.enabled false · autopilot.source "both" (scanner|list|both) · autopilot.symbols ["BINANCE:BTCUSDT",
+"BINANCE:ETHUSDT", "BINANCE:SOLUSDT"] · autopilot.tf "1h"
 autopilot.max_positions 5 (1..20) · autopilot.risk_pct 1.0 (0.1..5) · autopilot.scanner_top 10 (1..30)
 autopilot.initial_balance 1000 · autopilot.max_exposure_pct 100 (0..500; 0 = off) · autopilot.max_drawdown_pct 20
-(0..90; 0 = off) · autopilot.source also "both" (the list plus the scanner's opportunities)
+(0..90; 0 = off) · autopilot.source "both" = the list plus the scanner's candidates
 autopilot.futures_margin_pct 50 (0..100; 0 = it trades no futures)
 autopilot.stock_instrument "auto" (auto|shares|options) · autopilot.options_premium_pct 10 (0..50; 0 = no options)
 realtime.enabled true · realtime.twelvedata_credits_min 8 · realtime.twelvedata_credits_day 800 (0 = no daily cap)
@@ -1153,37 +1154,42 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
   - **NEXUS automática** (account 3, NEXUS's own demo account; settings `autopilot.*`, **off by default**): the same
     closed-bar trader as auto-trading (`AutoProfile`: account, origin, tf, symbols, position cap, risk %), with its
     own account and origin `autopilot`. Candidates: `source` list = `autopilot.symbols`; scanner = the first
-    `autopilot.scanner_top` rows with `opportunity` (gate TOMAR + NEXUS signal, §10) of the newest **finished** scan
-    (a running or failed scan gives none), re-read every 60 s by the monitor and at once when its settings change. A
-    new candidate is decided at once on its last closed bar (`floor_time(now) − tf`; synthetic `SIM:*` markets wait
-    for their next closed bar), then on every close of `autopilot.tf`; symbols it holds stay watched ('posición
-    abierta') after a newer scan drops them, so its exits stay its own. After a change of `autopilot.tf`, positions
-    opened on the old timeframe keep NEXUS's exits on their own bars (an exits-only `AutoProfile`, `entries=False`,
-    per timeframe it still holds; it never opens) and the new timeframe adds no second position on those symbols (each
-    trader follows only the positions of its own tf, `PaperEngine._follows`). Entries need NEXUS BUY / SELL and gate
-    TOMAR (ESPERAR / NO TOMAR are logged as discarded), never open while its loss brake is on (`AutopilotBrake`:
-    equity `autopilot.max_drawdown_pct` % under the initial balance; `autopilot_snapshot` fills `status.brake`) nor in
-    a market that is not live (`_market_live`: every class but crypto needs a quote with `market_open` ≠ false and a
-    live price, so stocks only trade in their session), are capped as a cash account
+    `autopilot.scanner_top` candidates of the newest **finished** scan (a running or failed scan gives none): its rows
+    with `opportunity` (gate TOMAR + NEXUS signal, §10) first, then its deep rows the gate approves (verdict TAKE)
+    while NEXUS has no entry signal there yet, both in scan rank and only quoted in dollars (`in_dollars`:
+    `quote_currency` of a crypto or forex pair in USD / USDT / USDC / FDUSD…; stocks and futures count as dollars);
+    both (the default, with BTC, ETH and SOL against USDT) = the list plus those candidates, since a scan often has
+    none. Either way it only enters on NEXUS's own signal at a bar close with the gate TOMAR, and never on a pair
+    quoted in another currency (noted in its log: its account is in USD). Re-read every 60 s by the monitor and at
+    once when its settings change. A new candidate is decided at once on its last closed bar (`floor_time(now) − tf`;
+    synthetic `SIM:*` markets wait for their next closed bar), then on every close of `autopilot.tf`; symbols it holds
+    stay watched ('posición abierta') after a newer scan drops them, so its exits stay its own. After a change of
+    `autopilot.tf`, positions opened on the old timeframe keep NEXUS's exits on their own bars (an exits-only
+    `AutoProfile`, `entries=False`, per timeframe it still holds; it never opens) and the new timeframe adds no second
+    position on those symbols (each trader follows only the positions of its own tf, `PaperEngine._follows`). Entries
+    need NEXUS BUY / SELL and gate TOMAR (ESPERAR / NO TOMAR are logged as discarded), never open while its loss brake
+    is on (`AutopilotBrake`: equity `autopilot.max_drawdown_pct` % under the initial balance; `autopilot_snapshot`
+    fills `status.brake`) nor in a market that is not live (`_market_live`: every class but crypto needs a quote with
+    `market_open` ≠ false and a live price, so stocks only trade in their session), are capped as a cash account
     (`open_position(max_exposure_pct=)`, atomic with the insert: everything but futures held, an option at its
-    premium, ≤ that % of equity; a smaller position when it does not fit whole, in whole contracts for an option,
-    rule `exposure` when under a tenth fits; futures have their own margin budget), are sized at
-    `autopilot.risk_pct` of the account's equity (an option by its premium budget), and respect
-    `autopilot.max_positions` (checked atomically with the insert in `open_position(max_positions=…)`, rule
-    `max_positions`: every candidate's bar closes at the same second and their decisions run concurrently) and the
-    portfolio risk rules of account 3. Settings changed elsewhere (Ajustes saves one key at a time) are re-read once
-    they settle (0.5 s), never half-saved; `set_autopilot` saves every key first and re-reads once. Turning it on or
-    off emits an info event and a log entry; paused, its open positions keep their stop and targets (1m feed) but no
-    decision is taken. Decision log (`autopilot_status().log`, ≤ 30, saved with the reads in meta `autopilot.state` by
-    one background writer and restored at start; a damaged value is skipped): opened (price, SL, gate), discarded and
-    why (filter, cap, risk rule), closed (NEXUS's exit or by hand with `close_autopilot`), missing data and errors (at
-    most one note per symbol every 6 h / 5 min). Each watched symbol also carries NEXUS's read of its last decided bar
-    (`last`: action and label, e.g. ESPERAR — most bars give no entry and are not logged), at the current tf only. Its
-    events (opened, closed, warnings) are prefixed 'NEXUS automática · ' in the event log; its trades become alerts
-    only in the opt-in category `autopilot` (setting `alerts.autopilot`, off by default; `set_autopilot(alerts=)`).
-    WS: `paper` topic, `{type: 'paper_autopilot', ...AutopilotSnapshot}` after each change and every 5 s while it
-    holds positions. Simulated only: nothing is sent to a broker, and the status `note` repeats that the published
-    validation found no edge (docs/VALIDATION.md).
+    premium, ≤ that % of equity; a smaller position when it does not fit whole, in whole contracts for an option, rule
+    `exposure` when under a tenth fits; futures have their own margin budget), are sized at `autopilot.risk_pct` of
+    the account's equity (an option by its premium budget), and respect `autopilot.max_positions` (checked atomically
+    with the insert in `open_position(max_positions=…)`, rule `max_positions`: every candidate's bar closes at the
+    same second and their decisions run concurrently) and the portfolio risk rules of account 3. Settings changed
+    elsewhere (Ajustes saves one key at a time) are re-read once they settle (0.5 s), never half-saved;
+    `set_autopilot` saves every key first and re-reads once. Turning it on or off emits an info event and a log entry;
+    paused, its open positions keep their stop and targets (1m feed) but no decision is taken. Decision log
+    (`autopilot_status().log`, ≤ 30, saved with the reads in meta `autopilot.state` by one background writer and
+    restored at start; a damaged value is skipped): opened (price, SL, gate), discarded and why (filter, cap, risk
+    rule), closed (NEXUS's exit or by hand with `close_autopilot`), missing data and errors (at most one note per
+    symbol every 6 h / 5 min). Each watched symbol also carries NEXUS's read of its last decided bar (`last`: action
+    and label, e.g. ESPERAR — most bars give no entry and are not logged), at the current tf only. Its events (opened,
+    closed, warnings) are prefixed 'NEXUS automática · ' in the event log; its trades become alerts only in the opt-in
+    category `autopilot` (setting `alerts.autopilot`, off by default; `set_autopilot(alerts=)`). WS: `paper` topic,
+    `{type: 'paper_autopilot', ...AutopilotSnapshot}` after each change and every 5 s while it holds positions.
+    Simulated only: nothing is sent to a broker, and the status `note` repeats that the published validation found no
+    edge (docs/VALIDATION.md).
   - **Index futures of NEXUS automática** (`app.engine.contracts`: ES / MES, NQ / MNQ, YM / MYM, RTY / M2K with
     multiplier, tick and an APPROXIMATE initial margin; TradingView symbols such as `CME_MINI:MES1!`): its trader
     calls `open_position(contracts=True, margin_pct=autopilot.futures_margin_pct)`. Whole contracts: n = floor(risk

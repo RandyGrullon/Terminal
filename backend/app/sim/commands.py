@@ -594,7 +594,7 @@ def _ap_what(st: dict) -> str:
     listed = ", ".join(st["symbols"]) or "vacía (añade símbolos: autopilot lista btc eth)"
     if st["source"] == "list":
         return "lista fija: " + listed
-    scan = f"hasta {st['scanner_top']} oportunidades TOMAR del último escaneo"
+    scan = f"hasta {st['scanner_top']} candidatos del último escaneo (primero las oportunidades TOMAR)"
     return f"lista ({listed}) y {scan}" if st["source"] == "both" else f"escáner: {scan}"
 
 
@@ -642,9 +642,9 @@ def _print_autopilot(ctx: CommandContext, snap: dict) -> None:
     ctx.print(f"Qué vigila: {_ap_what(st)} · decide en velas de {st['tf']} · máximo {st['max_positions']} posiciones · "
               f"riesgo {fmt_pct(st['risk_pct'], 1, False)} por operación", "info")
     scan = st.get("scan")
-    if st["source"] == "scanner":
+    if st["source"] in ("scanner", "both"):
         if scan is None:
-            ctx.print("Sin escaneos terminados todavía: vigilará las oportunidades TOMAR del próximo", "muted")
+            ctx.print("Sin escaneos terminados todavía: vigilará los mejores candidatos del próximo", "muted")
         elif scan.get("finished_at") is None:
             ctx.print(f"Escaneo #{scan['id']} aún en curso", "muted")
         else:
@@ -868,7 +868,9 @@ async def _autopilot(ctx: CommandContext) -> None:
             what = (f"su lista fija ({', '.join(st['symbols'])})" if st["symbols"]
                     else "su lista fija, todavía vacía (añade símbolos: autopilot lista btc eth)")
         else:
-            what = f"las mejores oportunidades TOMAR del último escaneo (hasta {st['scanner_top']})"
+            scan_what = f"los mejores candidatos del último escaneo (hasta {st['scanner_top']})"
+            what = (f"su lista ({', '.join(st['symbols'])}) y {scan_what}" if st["source"] == "both" and st["symbols"]
+                    else scan_what)
         ctx.print(f"✔ NEXUS automática activada: opera sola en su cuenta demo (simulada) con {what}. Solo entra con "
                   f"señal de NEXUS y filtro TOMAR, al cierre de cada vela de {st['tf']}, y solo mientras el servidor "
                   "está en marcha", "success")

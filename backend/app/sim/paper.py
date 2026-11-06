@@ -25,8 +25,10 @@ with gate TOMAR.
 Positions with origin 'sim' belong to the simulator: they are priced and managed only through `sim_bar`.
 
 NEXUS's own account (account 3, settings autopilot.*, off by default): the same closed-bar trader as auto-trading
-(origin 'autopilot', `AutoProfile`), with its candidates from a fixed list or the best TOMAR opportunities of the
-newest finished scan (a new candidate is decided at once on its last closed bar), at most autopilot.max_positions
+(origin 'autopilot', `AutoProfile`), with its candidates from a list (by default a few liquid cryptos in dollars) and
+the best candidates of the newest finished scan (TOMAR opportunities first, then markets the gate approves while NEXUS
+has no signal yet; a new candidate is decided at once on its last closed bar; pairs quoted in another currency than
+the dollar are never traded: its account is in USD), at most autopilot.max_positions
 positions, autopilot.risk_pct per trade and the portfolio risk rules of its own account. It keeps a short decision
 log (opened / discarded and why / closed); paused, its open positions keep their stop and targets. WS message
 {type 'paper_autopilot'} on topic 'paper'. Simulation only: nothing is ever sent to a broker.
@@ -66,7 +68,7 @@ from typing import Any
 import numpy as np
 
 from app import config
-from app.data.symbols import split_pair, strip_derivative
+from app.data.symbols import fx_pair, split_pair, strip_derivative
 from app.engine.costs import asset_class, fee_pct_for
 from app.engine.levels import ev_hold
 from app.engine.nexus_current import EARLY_EV
@@ -99,6 +101,8 @@ RISK_ACCOUNTS = frozenset({1, AUTOPILOT_ACCOUNT})
 # position origins: the user (manual / terminal script), auto-trading, the simulator, NEXUS's own account
 ORIGINS = ("manual", "auto", "sim", "script", "autopilot")
 AUTOPILOT_SOURCES = ("scanner", "list", "both")
+# quotes in dollars: NEXUS's own account is in USD, so it never trades a pair quoted in another currency (TRY, EUR, BTC…)
+USD_QUOTES = frozenset({"USD", "USDT", "USDC", "FDUSD", "USDE", "DAI", "BUSD", "TUSD", "USDP"})
 # asset classes outside the cash exposure of NEXUS's account (futures: their own approximate-margin rule); an
 # option's premium is cash paid, so an option counts in it at its premium value
 MARGIN_CLASSES = frozenset({"futures"})
@@ -229,6 +233,29 @@ def risk_group_label(group: str) -> str:
     if group.startswith("crypto:"):
         return f"Cripto {group.partition(':')[2]}"
     return RISK_GROUP_LABEL.get(group, group)
+
+
+def quote_currency(symbol: str) -> str | None:
+    """The currency a crypto or forex pair is quoted in ('USDT', 'TRY'…); None when it cannot be read from the symbol
+    (stocks, funds, futures, indices: their exchange's currency; simulated markets)."""
+    sym = str(symbol or "").strip().upper()
+    if not sym or sym.startswith("SIM:") or sym.startswith("OPT:"):
+        return None
+    cls = asset_class(sym)
+    ticker = sym.partition(":")[2] or sym
+    if cls == "crypto":
+        pair = split_pair(strip_derivative(ticker)[0])
+        return pair[1] if pair else None
+    if cls in ("forex", "commodity"):  # a metal against a currency (XAUUSD) counts as a commodity
+        pair = fx_pair(ticker)
+        return pair[1] if pair else None
+    return None
+
+
+def in_dollars(symbol: str) -> bool:
+    """The symbol is quoted in dollars (or a dollar stablecoin), or its currency cannot be read from it."""
+    quote = quote_currency(symbol)
+    return quote is None or quote in USD_QUOTES
 
 
 def utc_day(ts_s: int) -> int:
@@ -774,7 +801,7 @@ class PaperEngine:
             v = safe_float(self._setting(key, default))
             return default if v is None else min(max(v, lo), hi)
 
-        source = str(self._setting("autopilot.source", "scanner") or "scanner").strip().lower()
+        source = str(self._setting("autopilot.source", "both") or "both").strip().lower()
         try:
             tf = normalize_tf(self._setting("autopilot.tf", "1h") or "1h")
         except ValueError:
@@ -782,7 +809,7 @@ class PaperEngine:
         instr = str(self._setting("autopilot.stock_instrument", "auto") or "auto").strip().lower()
         return {
             "enabled": bool(self._setting("autopilot.enabled", False)),
-            "source": source if source in AUTOPILOT_SOURCES else "scanner",
+            "source": source if source in AUTOPILOT_SOURCES else "both",
             "symbols": [str(x).strip().upper() for x in (self._setting("autopilot.symbols", []) or []) if str(x).strip()],
             "tf": tf,
             "max_positions": int(num("autopilot.max_positions", 5, 1, 20)),
@@ -2567,6 +2594,13 @@ class PaperEngine:
                 else:
                     return
                 cfg = self._autopilot_cfg() if own else None
+                if cfg is not None and not in_dollars(symbol):  # its account is in USD
+                    if self._log.should_log(f"ap-usd:{symbol}", 6 * 3600):
+                        ticker = symbol.partition(":")[2] or symbol
+                        self._autopilot_note(symbol, "skip", f"{SIDE_LABEL[side]} descartado: {ticker} cotiza en "
+                                                             f"{quote_currency(symbol)}, no en dólares, y la cuenta de "
+                                                             "NEXUS es en USD")
+                    return
                 if cfg is not None:
                     brake = self._brake(await self.account(acct), cfg["max_drawdown_pct"])
                     if brake["active"]:
@@ -2729,8 +2763,9 @@ class PaperEngine:
 
     def _autopilot_toggled(self, cfg: dict[str, Any]) -> None:
         if cfg["enabled"]:
-            what = ("las mejores oportunidades TOMAR del escáner" if cfg["source"] == "scanner"
-                    else ", ".join(cfg["symbols"]) or "una lista vacía (añade símbolos)")
+            listed = ", ".join(cfg["symbols"]) or "una lista vacía (añade símbolos)"
+            what = {"scanner": "los mejores candidatos del escáner",
+                    "both": f"{listed} y los mejores candidatos del escáner"}.get(cfg["source"], listed)
             self._emit("info", "paper", f"NEXUS automática activada ({cfg['tf']}): opera sola con {what}; "
                                         "solo entra con señal de NEXUS y filtro TOMAR")
             self._autopilot_note("—", "info", "Activada")
@@ -2773,12 +2808,18 @@ class PaperEngine:
                     if self._log.should_log("autopilot-scan", 600):
                         self._emit("warn", "paper", f"NEXUS automática: no se pudo leer el último escaneo: {exc}")
             state = run.get("status") if run is not None else None
-            opps = [r for r in rows if r.get("opportunity")] if state == "done" else []
+            done = rows if state == "done" else []
+            # its candidates, in dollars only (its account is in USD): the TOMAR opportunities first, then the markets
+            # the gate approves while NEXUS has no entry signal there yet (the likeliest next entries); either way it
+            # only enters on NEXUS's signal at a bar close with the gate TOMAR
+            opps = [r for r in done if r.get("opportunity") and in_dollars(str(r.get("symbol") or ""))]
+            favorable = [r for r in done if not r.get("opportunity") and r.get("deep") and r.get("verdict") == "TAKE"
+                         and in_dollars(str(r.get("symbol") or ""))]
             # the newest finished scan, or one still running when none has finished (a failed one is not a source)
             self._autopilot_scan = None if state not in ("done", "running") else {
                 "id": int(run["id"]), "finished_at": run.get("finished_at") if state == "done" else None,
                 "opportunities": len(opps)}
-            for row in opps[: cfg["scanner_top"]]:
+            for row in (opps + favorable)[: cfg["scanner_top"]]:
                 direction = row.get("direction")
                 watch.setdefault(str(row["symbol"]).upper(), {  # a listed symbol stays "lista"
                     "why": "escáner", "direction": direction if direction in ("long", "short") else None})
