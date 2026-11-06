@@ -79,7 +79,13 @@ jobs:
             || echo "::warning::este runner no permite un espacio de nombres de red sin privilegios"
       - name: Pruebas (pytest, sin red)
         timeout-minutes: 20
-        run: python -m pytest -q -p no:cacheprovider -ra --durations=15
+        run: python -m pytest -q -p no:cacheprovider -ra --durations=15 --junitxml=.tmp/junit.xml
+      # The job log can only be downloaded by a signed-in user; annotations are public: each failed test (name, place
+      # and pytest's explanation) shows on the run page and through the API.
+      - name: Pruebas fallidas (anotaciones)
+        if: failure()
+        timeout-minutes: 1
+        run: python ../tools/ci/pytest_failures.py .tmp/junit.xml "Backend (SQLite)"
 
   backend-postgres:
     name: Backend (PostgreSQL 16)
@@ -120,7 +126,11 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
       - name: Pruebas sobre PostgreSQL (un esquema por prueba)
         timeout-minutes: 30
-        run: python -m pytest -q -p no:cacheprovider -ra --durations=15
+        run: python -m pytest -q -p no:cacheprovider -ra --durations=15 --junitxml=.tmp/junit.xml
+      - name: Pruebas fallidas (anotaciones)
+        if: failure()
+        timeout-minutes: 1
+        run: python ../tools/ci/pytest_failures.py .tmp/junit.xml "Backend (PostgreSQL 16)"
 
   frontend:
     name: Interfaz (Node 20)

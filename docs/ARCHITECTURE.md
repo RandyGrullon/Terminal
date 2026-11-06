@@ -1859,6 +1859,9 @@ Every push to main, every pull request and `workflow_dispatch`; `permissions: co
 - **Backend (PostgreSQL 16)**: the same suite against a `postgres:16` service (`NEXUS_TEST_PG_URL` on localhost: the
   client turns TLS off only for loopback hosts), one schema per test; no AppArmor step (the namespace test may skip
   with EPERM there).
+- Both backend jobs write a JUnit report (`--junitxml=.tmp/junit.xml`); on failure a step runs
+  `tools/ci/pytest_failures.py`, which turns each failed test (name, `file:line`, pytest's `E` lines; at most 10) into a
+  public `::error` annotation: the job log itself can only be downloaded by a signed-in user. It always exits 0.
 - **Interfaz (Node 20)**: `npm ci`, then typecheck, `npm test` and `npm run build`, each still running when an earlier
   one failed.
 - **Imagen Docker (Linux)** (job limit 55 min ≥ the sum of its step limits 15 + 10 + 25): build the production image;

@@ -116,8 +116,8 @@ def test_an_anchor_that_missed_a_later_recorded_veto_is_dropped(runtime_factory,
             after = [s for s in (await stored(rt))["snapshots"] if s["kind"] != "last"]
             assert len(after) >= len(anchors) - 1
             for s in after:  # every anchor at or after the vetoed bar comes from a run that applied the veto
-                if s["time"] >= vetoed_bar:
-                    assert s["state"]["resume"]["made"] > veto_at, s["time"]
+                if s["time"] >= vetoed_bar:  # made (run start − 1 ms) >= at: stale_for_vetoes' rule (a fast run can
+                    assert s["state"]["resume"]["made"] >= veto_at, s["time"]  # land in the veto's millisecond)
 
     asyncio.run(scenario())
 

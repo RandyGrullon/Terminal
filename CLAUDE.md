@@ -74,7 +74,7 @@ backend/.tmp/pgenv/Scripts/python.exe tools/pg_start.py backend/.tmp/pgdata   # 
 ```
 
 Estado tras «NEXUS automática» (su comando `autopilot`, su registro persistente y sus avisos opcionales; 06/11/2026,
-en Windows): backend 1952 passed / 27 skipped sobre SQLite y 1963 passed / 16 skipped sobre PostgreSQL (las
+en Windows): backend 1954 passed / 27 skipped sobre SQLite y 1965 passed / 16 skipped sobre PostgreSQL (las
 omisiones son las de PostgreSQL, red, solo Linux / POSIX y el lock exacto); UI 245 pruebas en 9 suites; `tsc` sin errores; contrato 127
 comprobaciones · 0 fallos · 6 avisos (sin red, `--symbol SIM:NEXUS` y base nueva, como en CI: los avisos son listas
 vacías y ningún informe de validación guardado). La prueba más lenta es `tests/test_imp_engine_repaint_history.py`
@@ -117,7 +117,8 @@ esquemas creados y borrados por las pruebas), arranca `tools/pg_start.py` con un
 - Pruebas: `backend/tests/` (pytest; fixtures en `conftest.py`, fakes en `test_*_fakes.py`), `frontend/tests/`
   (`run-all.mjs`).
 - Herramientas: `tools/contract_check.py`, `tools/pg_start.py`, `tools/fake_supabase.py`, `tools/lock_requirements.py`,
-  `tools/ci/` (`portability.py`, `docker_smoke.py`, `docker_tests.py`, `launcher_smoke.py`, `ci_common.py`).
+  `tools/ci/` (`portability.py`, `docker_smoke.py`, `docker_tests.py`, `launcher_smoke.py`, `pytest_failures.py`,
+  `ci_common.py`).
 - Docs: `docs/ARCHITECTURE.md`, `docs/DEPLOY.md`, `docs/VALIDATION.md` y `docs/validation/*.json` (informes
   publicados).
 

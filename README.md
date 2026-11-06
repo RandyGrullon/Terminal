@@ -479,6 +479,9 @@ puede lanzar a mano). No usa secretos y la app corre sin red (`NEXUS_OFFLINE=1`)
 - En *Actions → CI →* la ejecución: arriba, las anotaciones (errores y avisos con su motivo); abajo, el resumen con
   las tablas «Imagen Docker: …» (Estado | Comprobación | Detalle). Dentro de un trabajo, el paso fallido se abre solo
   y los registros largos (`docker logs`) están plegados.
+- Si falla alguna prueba del backend, su nombre, el lugar y la explicación de pytest salen como anotación en la página
+  de la ejecución (`tools/ci/pytest_failures.py` lee el informe JUnit), así que se ven sin abrir el registro, que
+  GitHub solo deja descargar con la sesión iniciada.
 - pytest termina con «N passed, M skipped». El resumen corto (`-ra`) lista cada prueba omitida con su motivo y
   `--durations=15`, las más lentas. Omisiones esperadas: las de PostgreSQL en el trabajo SQLite (se ejecutan en el
   otro), las de red (`NEXUS_NET_TESTS=1`), la comparación exacta del lock fuera de la imagen y las que necesitan git

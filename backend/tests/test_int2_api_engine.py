@@ -126,7 +126,7 @@ def test_the_vetoed_bucket_keeps_an_anchor_after_the_next_close(runtime_factory,
             assert newest["time"] in after and after[newest["time"]]["state"]["resume"]["made"] >= veto_at
             assert {s["time"] for s in anchors} <= set(after)  # no bucket was left empty
             for t, s in after.items():
-                if t >= vetoed_bar:
-                    assert s["state"]["resume"]["made"] > veto_at, t
+                if t >= vetoed_bar:  # every anchor from the vetoed bar on includes the veto (same rule as above)
+                    assert s["state"]["resume"]["made"] >= veto_at, t
 
     asyncio.run(scenario())

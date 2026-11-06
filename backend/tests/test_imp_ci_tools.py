@@ -28,6 +28,7 @@ try:
     import docker_tests  # noqa: E402
     import launcher_smoke  # noqa: E402
     import portability  # noqa: E402
+    import pytest_failures  # noqa: E402
 finally:
     sys.path.remove(str(CI_DIR))
 
@@ -170,6 +171,58 @@ def test_annotation_escaping(monkeypatch, capsys):
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     ci.annotate("error", "100% roto\nlínea 2", title="a: b, c")
     assert capsys.readouterr().out.strip() == "::error title=a%3A b%2C c::100%25 roto%0Alínea 2"
+
+
+JUNIT = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" errors="1" failures="1" skipped="0" tests="3">
+<testcase classname="tests.test_a" name="test_ok" time="0.1"/>
+<testcase classname="tests.test_b" name="test_bad[x]" time="0.2"><failure message="AssertionError: assert 1 == 2">def test_bad():
+&gt;       assert 1 == 2
+E       assert 1 == 2
+E        +  where 1 = len([0])
+
+tests/test_b.py:3: AssertionError</failure></testcase>
+<testcase classname="tests.test_c" name="test_err" time="0.0"><error message="failed on setup with &quot;RuntimeError: boom&quot;">RuntimeError: boom</error></testcase>
+</testsuite></testsuites>"""
+
+
+def test_failed_tests_become_public_annotations(tmp_path, monkeypatch, capsys):
+    report = tmp_path / "junit.xml"
+    report.write_text(JUNIT, encoding="utf-8")
+    found = pytest_failures.failures(report)
+    assert [(f["test"], f["kind"]) for f in found] == [("tests.test_b::test_bad[x]", "failure"),
+                                                        ("tests.test_c::test_err", "error")]
+    assert found[0]["where"] == "tests/test_b.py:3: AssertionError"
+    assert found[0]["explanation"] == "E       assert 1 == 2\nE        +  where 1 = len([0])"
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert pytest_failures.main([str(report), "Backend (SQLite)"]) == 0
+    out = capsys.readouterr().out
+    assert "Backend (SQLite): 2 pruebas fallidas" in out and "  tests.test_b::test_bad[x]" in out
+    assert ("::error title=Backend (SQLite) · tests.test_b%3A%3Atest_bad[x]::AssertionError: assert 1 == 2%0A"
+            "tests/test_b.py:3: AssertionError%0AE       assert 1 == 2") in out
+    assert '::error title=Backend (SQLite) · tests.test_c%3A%3Atest_err::failed on setup with "RuntimeError: boom"' in out
+    assert "test_ok" not in out
+    # nothing to report, no report at all, or an unreadable one: never a second failure of the job
+    clean = tmp_path / "clean.xml"
+    clean.write_text('<testsuites><testsuite><testcase classname="t" name="ok"/></testsuite></testsuites>',
+                     encoding="utf-8")
+    assert pytest_failures.main([str(clean)]) == 0 and "no tiene pruebas fallidas" in capsys.readouterr().out
+    assert pytest_failures.main([str(tmp_path / "missing.xml"), "X"]) == 0
+    assert "::warning title=X::No hay informe JUnit" in capsys.readouterr().out
+    (tmp_path / "bad.xml").write_text("<testsuites", encoding="utf-8")
+    assert pytest_failures.main([str(tmp_path / "bad.xml")]) == 0
+    assert "No se pudo leer el informe JUnit" in capsys.readouterr().out
+    many = "".join(f'<testcase classname="t" name="n{i}"><failure message="m{i}">x</failure></testcase>' for i in range(12))
+    (tmp_path / "many.xml").write_text(f"<testsuites><testsuite>{many}</testsuite></testsuites>", encoding="utf-8")
+    assert pytest_failures.main([str(tmp_path / "many.xml"), "Y"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("::error ") == 11 and "y 2 pruebas fallidas más" in out
+
+
+def test_ci_reports_failed_tests_as_annotations():
+    workflow = (CI_DIR.parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert workflow.count("--junitxml=.tmp/junit.xml") == 2
+    assert workflow.count("if: failure()") >= 2 and workflow.count("tools/ci/pytest_failures.py .tmp/junit.xml") == 2
 
 
 def test_run_and_bind_mount_helpers(tmp_path):
