@@ -56,6 +56,8 @@ export interface AutopilotStatus {
   watching: AutopilotWatch[]
   scan: AutopilotScan | null
   log: AutopilotLogEntry[] // newest first, at most 30
+  alerts: boolean // its trades as alerts by Telegram / email (setting alerts.autopilot, off by default)
+  alert_channels: number // alert channels on and complete now (0 = its alerts would reach nobody)
   note: string // honest Spanish note from the backend: shown verbatim
 }
 
@@ -77,4 +79,5 @@ export interface AutopilotUpdate {
   max_positions?: number
   risk_pct?: number
   scanner_top?: number
+  alerts?: boolean
 }

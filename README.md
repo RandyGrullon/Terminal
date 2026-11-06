@@ -221,8 +221,8 @@ Terminal: `buy btc --risk 1`, `limit btc <precio> --exp 2d`, `stop eth <precio> 
 
 Arriba de *Cuenta demo*, el selector **Mi cuenta | NEXUS automática** cambia a una segunda cuenta simulada que
 **opera sola** con los análisis de NEXUS. Es otra cuenta (la 3): su saldo, sus posiciones y su historial nunca se
-mezclan con los tuyos, y sus operaciones no envían alertas por Telegram ni por correo. Está **apagada** hasta que la
-actives en «Cómo opera»:
+mezclan con los tuyos, y sus operaciones solo te avisan por Telegram o correo si lo activas. Está **apagada** hasta
+que la actives en «Cómo opera»:
 
 - **Qué vigila**: las mejores oportunidades TOMAR del último escaneo terminado (filtro TOMAR con señal de NEXUS; por
   defecto las 10 primeras) o una **lista fija** de símbolos que tú eliges. «Qué está vigilando» muestra cada símbolo,
@@ -239,10 +239,14 @@ actives en «Cómo opera»:
   en la que las abrió, y no abre una segunda posición en esos símbolos.
 - Puedes **pausarla** (no abre nada nuevo; sus posiciones siguen con su stop y sus objetivos), cerrar sus posiciones
   a mano o **reiniciarla** con otro saldo.
+- **Avisos fuera de la app** (opcional, desactivado por defecto): con «Avisarme por Telegram o correo cuando opere»
+  recibes sus aperturas, cierres y stops por los canales de *Ajustes → Alertas*; si no hay ningún canal activo, la
+  vista te lo dice.
 - **Desde la terminal** (alias `piloto`): `autopilot` muestra su estado; `autopilot on btc eth --tf 4h --max 3 --risk
   0,5` la activa con una lista fija; `autopilot escaner 10` usa el escáner; `autopilot off` la pausa; `autopilot pos`
-  y `autopilot log` muestran sus posiciones y sus decisiones; `autopilot close <id|símbolo|all>` cierra a mano y
-  `autopilot reset [saldo] --yes` la reinicia (sin `--yes` solo avisa).
+  y `autopilot log` muestran sus posiciones y sus decisiones; `autopilot avisos on|off` activa sus avisos por
+  Telegram o correo; `autopilot close <id|símbolo|all>` cierra a mano y `autopilot reset [saldo] --yes` la reinicia
+  (sin `--yes` solo avisa).
 
 Es un experimento honesto, no una promesa: la validación publicada (`docs/VALIDATION.md`) **no encontró ventaja**, así
 que lo esperable es un resultado parecido a entrar al azar, menos las comisiones. Sirve para ver en tiempo real cómo se
@@ -295,7 +299,9 @@ Terminal: `learning`, `predictions`, `skill`, `model btc 1h`.
 *Ajustes → Alertas* envía avisos a **Telegram** o por **correo** aunque cierres la pestaña, mientras el servidor de
 NEXUS siga en marcha: cambios del semáforo y avisos antes de datos de alto impacto, entradas y salidas de NEXUS de tu
 lista de seguimiento (con «señal del modelo, no es asesoría financiera»), y aperturas, cierres y stops de la cuenta
-demo (marcados como simulados). No se envía nada hasta que actives un canal y guardes.
+demo (marcados como simulados). Las operaciones de **NEXUS automática** tienen su propio interruptor, **desactivado
+por defecto**: actívalo en *Ajustes → Alertas*, en «Cómo opera» de su vista o con `autopilot avisos on`. No se envía
+nada hasta que actives un canal y guardes.
 
 - **Telegram**: crea un bot con @BotFather, copia su token, escríbele una vez y busca tu ID de chat en
   `https://api.telegram.org/bot<token>/getUpdates` (el número de `"chat":{"id"…}`; en grupos empieza por −100).

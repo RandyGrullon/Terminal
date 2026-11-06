@@ -98,6 +98,7 @@ def test_autopilot_is_off_by_default_with_its_own_account(runtime_factory, no_ba
                                                                                                "1h", [])
             assert (st["max_positions"], st["risk_pct"], st["scanner_top"]) == (5, 1.0, 10)
             assert st["watching"] == [] and st["scan"] is None and st["log"] == []
+            assert (st["alerts"], st["alert_channels"]) == (False, 0)  # its alerts are opt-in; no alert service here
             assert "no encontró ventaja" in st["note"] and "bróker" in st["note"]
             assert snap["positions"] == [] and snap["history"] == [] and snap["risk"]["account_id"] == 3
             assert engine.status()["autopilot"] == {"enabled": False, "open_positions": 0, "watching": 0}
@@ -467,6 +468,26 @@ def test_positions_from_before_a_timeframe_change_keep_nexus_exits(runtime_facto
     asyncio.run(scenario())
 
 
+def test_its_trade_events_become_nexus_automatica_alerts(runtime_factory, no_background):
+    """The paper engine's events of account 3 carry what app.alerts.classify needs: category 'autopilot' (opt-in)."""
+    from app.alerts.classify import classify
+
+    async def scenario():
+        async with runtime_factory() as rt:
+            engine = await _engine(rt, {SYM: 100.0}, BarNexus(default=make_current("BUY")))
+            await engine.set_autopilot(enabled=True, source="list", symbols=[SYM])
+            await _settle(engine)
+            await engine.close_autopilot(all=True)
+            trades = [e for e in rt.bus.recent(level="trade") if (e.get("data") or {}).get("account_id") == 3]
+            got = [classify(e) for e in trades]
+            assert {(a.category, a.kind) for a in got} == {("autopilot", "opened"), ("autopilot", "closed")}
+            assert all(a.text.split(": ", 1)[0][2:] == "NEXUS automática (simulado)" for a in got)
+            assert not any("NEXUS automática · " in a.text for a in got)  # the engine's prefix is not repeated
+            await engine.stop()
+
+    asyncio.run(scenario())
+
+
 def test_set_autopilot_rejects_bad_values_in_spanish(runtime_factory, no_background):
     async def scenario():
         async with runtime_factory() as rt:
@@ -511,6 +532,12 @@ def test_autopilot_api(api_client):
     assert (st["enabled"], st["source"], st["symbols"], st["tf"]) == (True, "list", ["SIM:NEXUS"], "4h")
     assert (st["max_positions"], st["risk_pct"], st["scanner_top"]) == (3, 0.5, 4)
     assert c.get("/api/settings").json()["settings"]["autopilot.tf"] == "4h"
+    assert (st["alerts"], st["alert_channels"]) == (False, 0)
+    r = c.post("/api/paper/autopilot", json={"alerts": True})  # its trades as alerts (no channel configured here)
+    assert r.status_code == 200 and (r.json()["autopilot"]["alerts"], r.json()["autopilot"]["alert_channels"]) == (
+        True, 0)
+    assert c.get("/api/settings").json()["settings"]["alerts.autopilot"] is True
+    assert c.get("/api/alerts/status").json()["categories"]["autopilot"] is True
     status = c.get("/api/health").json()
     assert status["services"]["paper"]["autopilot"]["enabled"] is True
     r = c.post("/api/paper/autopilot/close", json={})

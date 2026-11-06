@@ -160,14 +160,15 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
   const src = readFileSync(path.join(SRC, 'api', 'types-autopilot.ts'), 'utf8')
   const t = interfaces(src)
   assert.deepEqual(t.AutopilotStatus, [
-    'enabled', 'account_id', 'source', 'tf', 'symbols', 'max_positions', 'risk_pct', 'scanner_top', 'watching', 'scan', 'log', 'note',
+    'enabled', 'account_id', 'source', 'tf', 'symbols', 'max_positions', 'risk_pct', 'scanner_top', 'watching', 'scan', 'log',
+    'alerts', 'alert_channels', 'note',
   ])
   assert.deepEqual(t.AutopilotSnapshot, ['account', 'positions', 'history', 'risk', 'autopilot'])
   assert.deepEqual(t.AutopilotWatch, ['symbol', 'why', 'direction?', 'last?'])
   assert.deepEqual(t.AutopilotLast, ['bar_time', 'tf', 'action', 'label'])
   assert.deepEqual(t.AutopilotLogEntry, ['ts', 'symbol', 'kind', 'text'])
   assert.deepEqual(t.AutopilotScan, ['id', 'finished_at', 'opportunities'])
-  assert.deepEqual(t.AutopilotUpdate, ['enabled?', 'source?', 'symbols?', 'tf?', 'max_positions?', 'risk_pct?', 'scanner_top?'])
+  assert.deepEqual(t.AutopilotUpdate, ['enabled?', 'source?', 'symbols?', 'tf?', 'max_positions?', 'risk_pct?', 'scanner_top?', 'alerts?'])
   assert.match(src, /export type AutopilotSource = 'scanner' \| 'list'/)
   assert.match(src, /export type AutopilotWhy = 'escáner' \| 'lista' \| 'posición abierta'/)
   const types = readFileSync(path.join(SRC, 'api', 'types.ts'), 'utf8')
@@ -432,6 +433,20 @@ test('controls: the scanner candidates are shown only in scanner mode; list mode
   const labels = [...scanner.matchAll(/<label for="([^"]+)">/g), ...list.matchAll(/<label for="([^"]+)">/g)]
   assert.ok(labels.length >= 6)
   for (const m of labels) assert.ok(scanner.includes(`id="${m[1]}"`) || list.includes(`id="${m[1]}"`), `${m[0]} names a control`)
+})
+
+test('controls: the alerts switch, and a warning when no alert channel would deliver them', () => {
+  const html = (over) =>
+    render(M.AutopilotControls, { status: M.normalizeAutopilot(snapshot(over)).autopilot, saving: false, error: null, onSave: async () => null })
+  const off = html({ alerts: false, alert_channels: 1 })
+  assert.ok(off.includes('Avisarme por Telegram o correo cuando opere') && off.includes('sus operaciones no se avisan fuera de la app'), off)
+  const none = html({ alerts: true, alert_channels: 0 })
+  assert.ok(none.includes('Ningún canal de avisos está activo: configura Telegram o correo en Ajustes › Alertas.'), none)
+  const on = html({ alerts: true, alert_channels: 2 })
+  assert.ok(on.includes('Avisa de sus aperturas, cierres y stops (operaciones simuladas)'), on)
+  const parsed = M.normalizeAutopilot(snapshot({ alerts: 'yes', alert_channels: -3 })).autopilot
+  assert.equal(parsed.alerts, false) // only a real true switches it on
+  assert.equal(parsed.alert_channels, 0)
 })
 
 test('controls: on / off at once, everything disabled while saving, the Spanish error shown', () => {

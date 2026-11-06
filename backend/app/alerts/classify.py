@@ -6,12 +6,12 @@ Forwarded events (anything else is ignored):
   end of a no-trade window. red -> critical, amber -> warn, green -> info.
 - NEXUS watcher (source 'nexus'): entries BUY / SELL and exits EXIT_LONG / EXIT_SHORT (level 'signal') -> warn; early
   exits (level 'warn', data.code EARLY_EXIT) -> critical. Synthetic markets (SIM:*) are never forwarded.
-- demo account (source 'paper', level 'trade', account 1 only: neither the simulator's source 'sim' / account 2 nor
-  NEXUS's own account 3): opened and closed ->
-  warn, stops (SL / trailing) -> critical when the trade lost money, else warn; partial targets -> info. The text
-  always says "simulado".
-- any module can opt in with data.notify = {category: macro|signals|paper, priority?: info|warn|critical, kind?,
-  text?} (or True: category from the source, priority from the level).
+- demo account (source 'paper', level 'trade'; never the simulator's source 'sim' / account 2): account 1 (the
+  user's) in category 'paper', account 3 (NEXUS automática, NEXUS's own account) in category 'autopilot' (opt-in, off
+  by default). Opened and closed -> warn, stops (SL / trailing) -> critical when the trade lost money, else warn;
+  partial targets -> info. The text always says "simulado".
+- any module can opt in with data.notify = {category: macro|signals|paper|autopilot, priority?: info|warn|critical,
+  kind?, text?} (or True: category from the source, priority from the level).
 """
 from __future__ import annotations
 
@@ -20,11 +20,13 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-CATEGORIES = ("macro", "signals", "paper")
+CATEGORIES = ("macro", "signals", "paper", "autopilot")
 PRIORITIES = ("info", "warn", "critical")
 PRIORITY_RANK = {"info": 0, "warn": 1, "critical": 2}
-CATEGORY_LABEL = {"macro": "Semáforo de mercado", "signals": "Señales NEXUS", "paper": "Cuenta demo"}
-CATEGORY_INLINE = {"macro": "semáforo de mercado", "signals": "señales NEXUS", "paper": "cuenta demo"}  # mid-sentence
+CATEGORY_LABEL = {"macro": "Semáforo de mercado", "signals": "Señales NEXUS", "paper": "Cuenta demo",
+                  "autopilot": "NEXUS automática"}
+CATEGORY_INLINE = {"macro": "semáforo de mercado", "signals": "señales NEXUS", "paper": "cuenta demo",
+                   "autopilot": "NEXUS automática"}  # mid-sentence
 PRIORITY_LABEL = {"info": "Todos", "warn": "Importantes y críticos", "critical": "Solo críticos"}
 MAX_LINE = 600
 BATCH_LINE = 280  # per alert in a message with several (12 × 280 + header and footer < Telegram's 4096)
@@ -42,6 +44,9 @@ SIGNAL_ACTIONS = {
 }
 STOP_REASONS = ("SL", "TRAIL")
 DEMO = "Cuenta demo (simulado)"
+AUTOPILOT = "NEXUS automática (simulado)"
+AUTOPILOT_ACCOUNT = 3  # NEXUS's own demo account (app.sim.paper.AUTOPILOT_ACCOUNT; this module stays pure)
+AUTOPILOT_PREFIX = "NEXUS automática · "  # the paper engine's prefix of that account's events
 SOURCE_CATEGORY = {"macro": "macro", "nexus": "signals", "paper": "paper"}
 LEVEL_PRIORITY = {"error": "critical", "warn": "warn", "signal": "warn", "trade": "warn"}
 _SPACES = re.compile(r"\s+")
@@ -52,12 +57,16 @@ FOOTER = {
     "signals": ("señal del modelo, no es asesoría financiera", "señales del modelo, no son asesoría financiera"),
     "paper": ("operación simulada de la cuenta demo, sin dinero real",
               "operaciones simuladas de la cuenta demo, sin dinero real"),
+    "autopilot": ("operación simulada de la cuenta propia de NEXUS, sin dinero real; la validación publicada no "
+                  "encontró ventaja",
+                  "operaciones simuladas de la cuenta propia de NEXUS, sin dinero real; la validación publicada no "
+                  "encontró ventaja"),
 }
 
 
 @dataclass
 class Alert:
-    category: str  # macro | signals | paper
+    category: str  # macro | signals | paper | autopilot
     kind: str  # e.g. macro_event_soon, entry, exit, early_exit, opened, closed, stop, partial
     priority: str  # info | warn | critical
     text: str  # one Spanish line, emoji first
@@ -162,9 +171,15 @@ def _paper(ev: dict, data: dict) -> Alert | None:
     if ev.get("level") != "trade":
         return None
     account = data.get("account_id")
-    if account is not None and account != 1:
-        return None  # only the user's demo account (2 belongs to the simulator, 3 to NEXUS itself)
+    if account is None or account == 1:
+        category, label, mark = "paper", DEMO, "🧪"
+    elif account == AUTOPILOT_ACCOUNT:
+        category, label, mark = "autopilot", AUTOPILOT, "🤖"
+    else:
+        return None  # account 2 belongs to the simulator
     text = one_line(ev.get("message"))
+    if category == "autopilot" and text.startswith(AUTOPILOT_PREFIX):
+        text = text[len(AUTOPILOT_PREFIX):]  # the label says whose trade it is
     if not text:
         return None
     pid = data.get("position_id")
@@ -175,14 +190,15 @@ def _paper(ev: dict, data: dict) -> Alert | None:
         if reason in STOP_REASONS:
             pnl = _num(data.get("pnl"))
             priority = "critical" if pnl is not None and pnl < 0 else "warn"
-            return Alert("paper", "stop", priority, f"🛑 {DEMO}: {text}", f"paper|{pid}|stop|{text}", symbol=symbol,
-                         **base)
-        return Alert("paper", "closed", "warn", f"🏁 {DEMO}: {text}", f"paper|{pid}|closed|{text}", symbol=symbol,
-                     **base)
+            return Alert(category, "stop", priority, f"🛑 {label}: {text}", f"{category}|{pid}|stop|{text}",
+                         symbol=symbol, **base)
+        return Alert(category, "closed", "warn", f"🏁 {label}: {text}", f"{category}|{pid}|closed|{text}",
+                     symbol=symbol, **base)
     if "side" in data and symbol:
-        return Alert("paper", "opened", "warn", f"🧪 {DEMO}: {text}", f"paper|{pid}|opened|{text}", symbol=symbol,
-                     **base)
-    return Alert("paper", "partial", "info", f"🎯 {DEMO}: {text}", f"paper|{pid}|partial|{text}", symbol=symbol, **base)
+        return Alert(category, "opened", "warn", f"{mark} {label}: {text}", f"{category}|{pid}|opened|{text}",
+                     symbol=symbol, **base)
+    return Alert(category, "partial", "info", f"🎯 {label}: {text}", f"{category}|{pid}|partial|{text}",
+                 symbol=symbol, **base)
 
 
 def _opt_in(ev: dict, source: str, data: dict) -> Alert | None:
@@ -202,6 +218,8 @@ def _opt_in(ev: dict, source: str, data: dict) -> Alert | None:
         return None
     if category == "paper" and "simulad" not in text.lower():
         text = f"{DEMO}: {text}"
+    elif category == "autopilot" and "simulad" not in text.lower():
+        text = f"{AUTOPILOT}: {text}"
     symbol = str(data.get("symbol") or "").strip().upper() or None
     kind = one_line(spec.get("kind") or "custom", 40)
     return Alert(category, kind, priority, text, f"notify|{source}|{kind}|{text}", symbol=symbol,

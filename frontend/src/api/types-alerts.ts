@@ -3,7 +3,7 @@
 // POST /api/alerts/test {channel?} -> AlertsTestResponse. Secrets (bot token, SMTP password) are never returned.
 
 export type AlertChannelId = 'telegram' | 'email'
-export type AlertCategory = 'macro' | 'signals' | 'paper'
+export type AlertCategory = 'macro' | 'signals' | 'paper' | 'autopilot' // autopilot = NEXUS automática (opt-in)
 /** info = todos · warn = importantes y críticos · critical = solo críticos. */
 export type AlertPriority = 'info' | 'warn' | 'critical'
 export type AlertDeliveryStatus = 'sent' | 'partial' | 'failed' | 'quiet' | 'rate_limited' | 'no_channel'

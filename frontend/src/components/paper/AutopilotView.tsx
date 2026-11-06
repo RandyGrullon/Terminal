@@ -130,6 +130,8 @@ export function normalizeStatus(raw: unknown): AutopilotStatus | null {
     watching: normalizeWatch(o.watching),
     scan: normalizeScan(o.scan),
     log: normalizeLog(o.log),
+    alerts: o.alerts === true,
+    alert_channels: Math.max(0, numOr(o.alert_channels, 0)),
     note: isStr(o.note) ? o.note : '',
   }
 }
@@ -250,6 +252,7 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
   const saved = useMemo(() => draftFrom(status), [key])
   const [draft, setDraft] = useState<AutopilotDraft>(saved)
   const [turning, setTurning] = useState<boolean | null>(null) // on / off being saved, shown at once
+  const [alerting, setAlerting] = useState<boolean | null>(null) // its alerts switch being saved
   const [submitting, setSubmitting] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
   const prevSaved = useRef(saved)
@@ -266,6 +269,7 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
   const dirty = draftDirty(draft, saved)
   const problem = validateDraft(draft)
   const enabled = turning ?? status.enabled
+  const alertsOn = alerting ?? status.alerts
   const shownError = localError ?? error
 
   const patch = (p: Partial<AutopilotDraft>) => {
@@ -280,6 +284,16 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
       await onSave({ enabled: next })
     } finally {
       setTurning(null)
+    }
+  }
+
+  const turnAlerts = async (next: boolean) => {
+    setLocalError(null)
+    setAlerting(next)
+    try {
+      await onSave({ alerts: next })
+    } finally {
+      setAlerting(null)
     }
   }
 
@@ -322,6 +336,19 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
           label={<span className={enabled ? 'pos bold' : 'text-2'}>{enabled ? 'Activa: NEXUS opera sola' : 'Pausada'}</span>}
         />
         {!enabled && <div className="tiny muted">Pausada: no abre posiciones nuevas; las abiertas siguen con su stop y sus objetivos.</div>}
+
+        <Toggle
+          checked={alertsOn}
+          onChange={(v) => void turnAlerts(v)}
+          label={<span className={alertsOn ? 'bold' : 'text-2'}>Avisarme por Telegram o correo cuando opere</span>}
+        />
+        <div className={`tiny ${alertsOn && status.alert_channels <= 0 ? 'warn' : 'muted'}`}>
+          {!alertsOn
+            ? 'Desactivado: sus operaciones no se avisan fuera de la app.'
+            : status.alert_channels > 0
+              ? 'Avisa de sus aperturas, cierres y stops (operaciones simuladas), según el nivel de avisos de Ajustes › Alertas.'
+              : 'Ningún canal de avisos está activo: configura Telegram o correo en Ajustes › Alertas.'}
+        </div>
 
         <div className="field">
           <span className="label" id={sourceLabelId}>
@@ -784,7 +811,9 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
         const s = normalizeAutopilot(await api.paper.autopilot.update(update))
         if (!s) throw new Error('Respuesta de la cuenta de NEXUS no válida')
         if (alive.current) showFresh(s)
-        if (update.enabled === undefined) notify('Cambios de NEXUS automática guardados', 'success')
+        if (update.alerts !== undefined)
+          notify(s.autopilot.alerts ? 'Avisos de NEXUS automática activados' : 'Avisos de NEXUS automática desactivados', 'info')
+        else if (update.enabled === undefined) notify('Cambios de NEXUS automática guardados', 'success')
         else notify(s.autopilot.enabled ? 'NEXUS automática activada: opera sola en su cuenta demo' : 'NEXUS automática pausada', 'info')
         return s.autopilot
       } catch (err) {

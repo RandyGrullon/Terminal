@@ -124,6 +124,30 @@ def test_filters_categories_level_and_watched_symbols(runtime_factory):
     asyncio.run(scenario())
 
 
+def test_nexus_automatica_alerts_are_opt_in(runtime_factory):
+    """NEXUS automática's trades (account 3) reach the channels only once the user turns their category on."""
+
+    async def scenario():
+        async with runtime_factory() as rt:
+            tg = FakeChannel()
+            svc = await make(rt, tg)
+            assert svc.full_status()["categories"]["autopilot"] is False and svc.active_channels() == 1
+            assert await svc.process(alerts(paper_open_event(account=3))) is None  # off by default
+            assert svc.counters["filtered"] == 1 and tg.sent == []
+            await rt.settings.update({"alerts.autopilot": True})
+            done = await svc.process(alerts(paper_close_event(account=3, reason="SL", pnl=-5.0)))
+            assert done["status"] == "sent" and done["priority"] == "critical" and len(tg.sent) == 1
+            text, subject = tg.sent[0]
+            assert text.startswith("🛑 NEXUS automática (simulado): Cerrado") and "no encontró ventaja" in text
+            assert subject.startswith("NEXUS · 🛑 NEXUS automática (simulado)")
+            await rt.settings.update({"alerts.paper": False})  # the user's account switch does not mute NEXUS's
+            assert (await svc.process(alerts(paper_open_event(pid=8, account=3))))["status"] == "sent"
+            assert await svc.process(alerts(paper_open_event(pid=9, account=1))) is None
+            await svc.stop()
+
+    asyncio.run(scenario())
+
+
 def test_dedupe_and_exit_collapsed_into_early_exit(runtime_factory):
     async def scenario():
         async with runtime_factory() as rt:

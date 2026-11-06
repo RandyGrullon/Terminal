@@ -338,7 +338,8 @@ macro.enabled true · macro.alerts true · macro.block_before_min 30 · macro.bl
 macro.warn_before_min 120 · macro.vix_caution 22 · macro.vix_danger 30 · macro.currencies ["USD"]
 ui.language "es" · ui.timezone "" · ui.chart_indicators []
 # feature modules (app/settings_ext/<feature>.py)
-alerts.macro true · alerts.signals true · alerts.paper true · alerts.min_level "warn" (info|warn|critical)
+alerts.macro true · alerts.signals true · alerts.paper true · alerts.autopilot false (NEXUS automática, opt-in)
+alerts.min_level "warn" (info|warn|critical)
 alerts.signal_symbols [] · alerts.max_per_hour 20 · alerts.quiet_enabled false · alerts.quiet_start "23:00"
 alerts.quiet_end "07:00" · alerts.quiet_critical false · alerts.telegram_enabled false · alerts.telegram_token ""
 alerts.telegram_chat_id "" · alerts.email_enabled false · alerts.smtp_host "" · alerts.smtp_port 587
@@ -664,7 +665,8 @@ POST /api/paper/close {position_id? | symbol? | all?} -> {closed: Position[]}
 POST /api/paper/reset {initial_balance?} -> PaperSnapshot
 POST /api/paper/auto {enabled, symbols?, tf?} -> {auto: {enabled, symbols, tf}}
 GET  /api/paper/autopilot                   -> AutopilotSnapshot (account 3, "NEXUS automática")
-POST /api/paper/autopilot {enabled?, source?: scanner|list, symbols?, tf?, max_positions?, risk_pct?, scanner_top?}
+POST /api/paper/autopilot {enabled?, source?: scanner|list, symbols?, tf?, max_positions?, risk_pct?, scanner_top?,
+                           alerts?}
      -> AutopilotSnapshot (only the given fields change; 400 {detail} in Spanish on a bad value)
 POST /api/paper/autopilot/reset {initial_balance?}     -> AutopilotSnapshot (account 3 only)
 POST /api/paper/autopilot/close {position_id? | all?}  -> AutopilotSnapshot (400 when neither; 404 unknown id)
@@ -684,19 +686,20 @@ GET  /api/learning/replay?days=&model_key=                       -> scanner repl
   limit, **never forced**. Cancel: 400 when nothing is specified, 404 for an unknown id, no pending order of the
   symbol, or an order that stopped being pending while the request waited. The WS `paper` message gains optional
   `orders` (pending) and `risk`; `GET /api/paper/account` is unchanged.
-- **NEXUS's own demo account** (types in `types-autopilot.ts`; rules: §11): `AutopilotSnapshot {account:
+- - **NEXUS's own demo account** (types in `types-autopilot.ts`; rules: §11): `AutopilotSnapshot {account:
   PaperAccount (id 3), positions, history: Position[], risk: PaperRisk | null, autopilot: AutopilotStatus}`;
   `AutopilotStatus {enabled, account_id: 3, source, tf, symbols, max_positions, risk_pct, scanner_top, watching:
   AutopilotWatch[] {symbol, why: escáner|lista|posición abierta, direction?, last?: AutopilotLast {bar_time (ms, open
   time of the last decided bar), tf, action (null = no analysis), label} | null}, scan: AutopilotScan {id, finished_at
-  (null while running; a failed scan is no source), opportunities} | null, log: AutopilotLogEntry[] {ts (ms),
-  symbol ('—' = not about one symbol), kind: open|close|skip|info, text} (newest first, ≤ 30, kept across restarts
-  in meta `autopilot.state`), note}`. 400 texts: 'Fuente no
-  válida: usa «scanner» (escáner) o «list» (lista fija)', 'El máximo de posiciones debe ser un número entero entre 1
-  y 20', 'El riesgo por operación (%) debe ser un número entre 0,1 y 5,0', 'El número de candidatos del escáner debe
-  ser un número entero entre 1 y 30', 'Como máximo 30 símbolos en la lista', an invalid tf. `Position.origin` gains
-  'autopilot'. The user can only switch it on/off, configure it, close its positions and reset it: no orders are
-  placed by hand in account 3.
+  (null while running; a failed scan is no source), opportunities} | null, log: AutopilotLogEntry[] {ts (ms), symbol
+  ('—' = not about one symbol), kind: open|close|skip|info, text} (newest first, ≤ 30, kept across restarts in meta
+  `autopilot.state`), alerts (setting `alerts.autopilot`: its trades as alerts, opt-in), alert_channels (alert
+  channels on and complete now, `AlertService.active_channels()`; 0 = they would reach nobody), note}`. 400 texts:
+  'Fuente no válida: usa «scanner» (escáner) o «list» (lista fija)', 'El máximo de posiciones debe ser un número
+  entero entre 1 y 20', 'El riesgo por operación (%) debe ser un número entre 0,1 y 5,0', 'El número de candidatos del
+  escáner debe ser un número entero entre 1 y 30', 'Como máximo 30 símbolos en la lista', an invalid tf.
+  `Position.origin` gains 'autopilot'. The user can only switch it on/off, configure it, close its positions and reset
+  it: no orders are placed by hand in account 3.
 - **Skill report** (`app.sim.evaluator.skill_report`, §10): `days` ≤ 0 = every stored row (the UI's 'Todo lo
   guardado' sends 0); a `source` other than empty / scanner / nexus → 400 'Fuente no válida: usa scanner o nexus', a
   non-finite `days` → 400, an unparsable one → 422; `model_key` is trimmed. Cached 60 s (600 s for longer windows or
@@ -1135,7 +1138,7 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     opposite entry, then the reverse entry), then opens a position on BUY/SELL with gate TAKE (one position per
     symbol). When several bars close at once (feed catching up) every bar's exit is followed, but only the newest
     closed bar may open a trade.
-  - **NEXUS automática** (account 3, NEXUS's own demo account; settings `autopilot.*`, **off by default**): the same
+  - - **NEXUS automática** (account 3, NEXUS's own demo account; settings `autopilot.*`, **off by default**): the same
     closed-bar trader as auto-trading (`AutoProfile`: account, origin, tf, symbols, position cap, risk %), with its
     own account and origin `autopilot`. Candidates: `source` list = `autopilot.symbols`; scanner = the first
     `autopilot.scanner_top` rows with `opportunity` (gate TOMAR + NEXUS signal, §10) of the newest **finished** scan
@@ -1157,10 +1160,11 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     why (filter, cap, risk rule), closed (NEXUS's exit or by hand with `close_autopilot`), missing data and errors (at
     most one note per symbol every 6 h / 5 min). Each watched symbol also carries NEXUS's read of its last decided bar
     (`last`: action and label, e.g. ESPERAR — most bars give no entry and are not logged), at the current tf only. Its
-    events (opened, closed, warnings) are prefixed 'NEXUS automática · ' in the event log and never become alerts
-    (app.alerts.classify forwards account 1 only). WS: `paper` topic, `{type: 'paper_autopilot',
-    ...AutopilotSnapshot}` after each change and every 5 s while it holds positions. Simulated only: nothing is sent
-    to a broker, and the status `note` repeats that the published validation found no edge (docs/VALIDATION.md).
+    events (opened, closed, warnings) are prefixed 'NEXUS automática · ' in the event log; its trades become alerts
+    only in the opt-in category `autopilot` (setting `alerts.autopilot`, off by default; `set_autopilot(alerts=)`).
+    WS: `paper` topic, `{type: 'paper_autopilot', ...AutopilotSnapshot}` after each change and every 5 s while it
+    holds positions. Simulated only: nothing is sent to a broker, and the status `note` repeats that the published
+    validation found no edge (docs/VALIDATION.md).
   - **gate_log rows from paper**: `time` = the decision bar (`gate.time`, else the fill time), `target_at` by the
     common convention (§7 Watcher), `source` = `sim` for simulated markets (simulator replay and synthetic trades,
     any `SIM:*` symbol), otherwise `paper`.
@@ -1715,25 +1719,29 @@ and `smtplib.SMTP` with fakes, and the live checker never calls `POST /api/alert
   `bus.remove_listener()`. State (counters received / sent / failed / filtered / deduped / quiet / rate_limited /
   no_channel / dropped, the last result per channel, the last test, ≤ 30 recent alerts, the policy memory) lives in
   `model_state(kind='alerts', key='state')`, so a deploy does not repeat messages.
-- **Classification** (pure): semáforo (source `macro`, `data.alert`): level changes, T−60 / T−15 / T−0 of
+- - **Classification** (pure): semáforo (source `macro`, `data.alert`): level changes, T−60 / T−15 / T−0 of
   high-impact events and the end of a no-trade window; red → critical, amber → warn, green → info. NEXUS watcher
   (source `nexus`): BUY / SELL / EXIT_LONG / EXIT_SHORT (level `signal`) → warn, EARLY_EXIT → critical; only the
   watched pairs (the watchlist at `watch.tf`, what the watcher follows), never `SIM:*`. Demo account (source `paper`,
-  level `trade`, account 1; the simulator's `sim` is not): opened / closed → warn, a stop (SL / trailing) → critical
-  when the trade lost money, else warn, partial targets → info; the text always says 'simulado'. Any module can opt
-  in with `data.notify = {category: macro|signals|paper, priority?, kind?, text?}` (or True). `collapse()` makes an
-  exit plus an early exit of one market one (critical) alert, before the dedupe. Signal texts say 'no es asesoría
-  financiera' and carry a delayed-data note from `hub.quotes` `delay_s` (4 s lookup).
-- **Policy** (`app.alerts.policy`, pure, injected clock): category switches (`alerts.macro / signals / paper`),
-  minimum priority (`alerts.min_level`), `alerts.signal_symbols` (narrows the watchlist; a bare ticker 'AAPL' matches
-  any exchange; the status warns about entries the watcher does not follow, only while it runs); dedupe of the same
-  alert key for 10 min, except that a new state of a group (semáforo kinds level / volatility / blackout_end; per
-  market `nexus|SYMBOL|tf`) drops the previous key, so red → amber → red and BUY → EXIT → BUY are announced again
-  while plain repeats, a restart re-announcing the same state and an exit + early-exit pair stay deduped; the hourly
-  message limit `alerts.max_per_hour` (rolling hour), which critical alerts may exceed only up to max(2 × limit, 60);
-  quiet hours in `ui.timezone` (else the server's zone), which also hold critical alerts unless
-  `alerts.quiet_critical`. Alerts left out by the limit or the quiet hours are counted and announced in the next
-  message. Policy memory = `{seen, sent, omitted, latest {group: [key, t]}}`.
+  level `trade`; the simulator's `sim` / account 2 is not): account 1 in category `paper` ('🧪 Cuenta demo (simulado):
+  …'), account 3 (NEXUS automática) in category `autopilot` ('🤖 NEXUS automática (simulado): …', the engine's 'NEXUS
+  automática · ' prefix removed; footer '… sin dinero real; la validación publicada no encontró ventaja'): opened /
+  closed → warn, a stop (SL / trailing) → critical when the trade lost money, else warn, partial targets → info; the
+  text always says 'simulado'. Any module can opt in with `data.notify = {category: macro|signals|paper|autopilot,
+  priority?, kind?, text?}` (or True). `collapse()` makes an exit plus an early exit of one market one (critical)
+  alert, before the dedupe. Signal texts say 'no es asesoría financiera' and carry a delayed-data note from
+  `hub.quotes` `delay_s` (4 s lookup).
+- - **Policy** (`app.alerts.policy`, pure, injected clock): category switches (`alerts.macro / signals / paper /
+  autopilot`; autopilot is off by default and independent of paper), minimum priority (`alerts.min_level`),
+  `alerts.signal_symbols` (narrows the watchlist; a bare ticker 'AAPL' matches any exchange; the status warns about
+  entries the watcher does not follow, only while it runs); dedupe of the same alert key for 10 min, except that a new
+  state of a group (semáforo kinds level / volatility / blackout_end; per market `nexus|SYMBOL|tf`) drops the previous
+  key, so red → amber → red and BUY → EXIT → BUY are announced again while plain repeats, a restart re-announcing the
+  same state and an exit + early-exit pair stay deduped; the hourly message limit `alerts.max_per_hour` (rolling
+  hour), which critical alerts may exceed only up to max(2 × limit, 60); quiet hours in `ui.timezone` (else the
+  server's zone), which also hold critical alerts unless `alerts.quiet_critical`. Alerts left out by the limit or the
+  quiet hours are counted and announced in the next message. Policy memory = `{seen, sent, omitted, latest {group:
+  [key, t]}}`.
 - **Channels** (`app.alerts.channels`): Telegram = the user's own bot, plain-text `sendMessage` on
   `https://api.telegram.org` through `http_client()` (token and chat id validated; one 429 retry of ≤ 10 s; ≤ 4000
   characters). E-mail = `smtplib` in a worker thread, STARTTLS (587) or SSL/TLS (465) verified with

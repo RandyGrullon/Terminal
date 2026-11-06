@@ -69,11 +69,34 @@ def test_paper_trades_say_simulated_and_stops_are_critical_when_losing():
     partial = classify(ev("paper", "trade", "BINANCE:BTCUSDT largo: TP1 alcanzado (+1,00 R) · 1/3 cerrado a 66.000",
                           {"position_id": 7, "account_id": 1}))
     assert partial.kind == "partial" and partial.priority == "info"
-    # the simulator (source sim, account 2), NEXUS's own account 3 and non-trade paper events are not forwarded
+    # the simulator (source sim, account 2) and non-trade paper events are not forwarded
     assert classify(paper_close_event(account=2)) is None
-    assert classify(paper_close_event(account=3)) is None
     assert classify({**paper_open_event(), "source": "sim"}) is None
     assert classify(ev("paper", "info", "Auto-trading activado", {"x": 1})) is None
+
+
+def test_nexus_automatica_trades_have_their_own_opt_in_category():
+    """Account 3 (NEXUS automática) trades are category 'autopilot': labelled as NEXUS's own simulated trades, the
+    paper engine's 'NEXUS automática · ' prefix not repeated, same priorities as the user's demo account."""
+    opened = classify(ev("paper", "trade", "NEXUS automática · Abierto BINANCE:ETHUSDT largo 2 @ 3.000 · SL 2.950",
+                         {"position_id": 9, "account_id": 3, "symbol": "BINANCE:ETHUSDT", "side": "long"}))
+    assert (opened.category, opened.kind, opened.priority) == ("autopilot", "opened", "warn")
+    assert opened.text == "🤖 NEXUS automática (simulado): Abierto BINANCE:ETHUSDT largo 2 @ 3.000 · SL 2.950"
+    stop = classify(paper_close_event(reason="SL", pnl=-12.0, account=3))
+    assert (stop.category, stop.kind, stop.priority) == ("autopilot", "stop", "critical")
+    assert stop.text.startswith("🛑 NEXUS automática (simulado): Cerrado") and stop.key.startswith("autopilot|7|stop|")
+    tp = classify(paper_close_event(reason="TP3", pnl=30.0, account=3))
+    assert (tp.category, tp.kind, tp.priority) == ("autopilot", "closed", "warn")
+    partial = classify(ev("paper", "trade", "NEXUS automática · BINANCE:ETHUSDT largo: TP1 alcanzado",
+                          {"position_id": 9, "account_id": 3}))
+    assert (partial.category, partial.kind, partial.priority) == ("autopilot", "partial", "info")
+    assert classify(ev("paper", "info", "NEXUS automática activada (1h)", {"account_id": 3})) is None  # not a trade
+    text, subject = compose([opened])
+    assert text.endswith("— NEXUS · operación simulada de la cuenta propia de NEXUS, sin dinero real; la validación "
+                         "publicada no encontró ventaja") and subject.startswith("NEXUS · 🤖 NEXUS automática")
+    # the opt-in hook can use the category too, and its text always says it is simulated
+    hook = classify(ev("paper", "info", "Resumen del día", {"notify": {"category": "autopilot", "priority": "info"}}))
+    assert hook.category == "autopilot" and hook.text == "NEXUS automática (simulado): Resumen del día"
 
 
 def test_opt_in_hook_and_garbage_events():

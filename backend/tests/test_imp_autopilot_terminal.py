@@ -66,6 +66,7 @@ def test_status_on_with_a_list_and_off(client):
     assert "NEXUS automática (cuenta demo 3, simulada) · PAUSADA" in text
     assert "Qué vigila: escáner: hasta 10 oportunidades TOMAR del último escaneo · decide en velas de 1h" in text
     assert "Sin escaneos terminados todavía" in text and "ganadoras sin operaciones cerradas todavía" in text
+    assert "Avisos por Telegram o correo: desactivados (autopilot avisos on)" in text
     assert "no encontró ventaja" in text and "bróker" in text  # the honest note, verbatim
     assert res["data"]["account"]["id"] == 3 and res["data"]["autopilot"]["enabled"] is False
 
@@ -107,6 +108,8 @@ def test_scanner_source_and_bad_input_refused_in_spanish(client):
         "autopilot btc": "No entiendo «btc»",
         "autopilot lista": "Faltan los símbolos de la lista",
         "autopilot close": "Indica qué cerrar",
+        "autopilot avisos": "Indica on u off",
+        "autopilot avisos quizas": "Indica on u off",
     }
     for line, why in bad.items():
         res = _term(client, line)
@@ -114,6 +117,19 @@ def test_scanner_source_and_bad_input_refused_in_spanish(client):
         assert why in _text(res), (line, _text(res))
     st = _term(client, "autopilot")["data"]["autopilot"]
     assert (st["enabled"], st["source"], st["scanner_top"], st["risk_pct"]) == (False, "scanner", 5, 1.0)  # unchanged
+
+
+def test_alerts_switch_from_the_terminal(client):
+    res = _term(client, "autopilot avisos on")
+    assert res["ok"] and res["data"]["autopilot"]["alerts"] is True
+    text = _text(res)
+    assert "⚠ Avisos por Telegram o correo: activados, pero ningún canal está activo (configúralo en Ajustes → " \
+           "Alertas)" in text and "aperturas, cierres y stops" in text
+    assert client.get("/api/settings").json()["settings"]["alerts.autopilot"] is True
+    assert "NEXUS automática" in _text(_term(client, "alertas"))  # the alerts status lists the category
+    res = _term(client, "piloto avisos off")
+    assert res["ok"] and res["data"]["autopilot"]["alerts"] is False
+    assert "Avisos por Telegram o correo: desactivados" in _text(res)
 
 
 def test_trades_positions_log_close_and_a_reset_that_needs_yes(client):

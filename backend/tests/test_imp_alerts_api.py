@@ -24,7 +24,8 @@ def test_status_shape_and_no_secrets(api_client):
         assert key in st
     assert st["running"] is True and st["offline"] is True and st["active_channels"] == 0
     assert [c["id"] for c in st["channels"]] == ["telegram", "email"]
-    assert st["categories"] == {"macro": True, "signals": True, "paper": True} and st["min_level"] == "warn"
+    assert st["categories"] == {"macro": True, "signals": True, "paper": True, "autopilot": False}  # opt-in
+    assert st["min_level"] == "warn"
     assert st["warnings"][0].startswith("Modo sin conexión (NEXUS_OFFLINE=1)")
     configure(api_client)
     st = api_client.get("/api/alerts/status").json()

@@ -447,6 +447,7 @@ class AutopilotRequest(BaseModel):
     max_positions: float | None = None
     risk_pct: float | None = None
     scanner_top: float | None = None
+    alerts: bool | None = None  # its trades as alerts (Telegram / email), setting alerts.autopilot
 
 
 @router.get("/api/paper/autopilot")
@@ -465,7 +466,7 @@ async def paper_autopilot_update(req: AutopilotRequest) -> dict:
     try:
         snap = await paper.set_autopilot(enabled=req.enabled, source=req.source, symbols=symbols, tf=req.tf,
                                          max_positions=req.max_positions, risk_pct=req.risk_pct,
-                                         scanner_top=req.scanner_top)
+                                         scanner_top=req.scanner_top, alerts=req.alerts)
     except (PaperError, ValueError, KeyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc).strip("'\"")) from None
     return clean_json(snap)

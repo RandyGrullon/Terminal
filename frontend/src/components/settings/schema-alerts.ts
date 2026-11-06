@@ -88,6 +88,12 @@ const FIELDS: FieldDef[] = [
     help: 'Aperturas, cierres y stops de la cuenta demo. Operaciones simuladas, sin dinero real.',
   },
   {
+    key: 'alerts.autopilot',
+    label: 'NEXUS automática',
+    kind: 'bool',
+    help: 'Aperturas, cierres y stops de la cuenta propia de NEXUS, que opera sola (Cuenta demo › NEXUS automática). Operaciones simuladas, sin dinero real. Desactivado por defecto.',
+  },
+  {
     key: 'alerts.min_level',
     label: 'Qué avisos enviar',
     kind: 'select',

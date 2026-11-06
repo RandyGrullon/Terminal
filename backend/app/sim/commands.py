@@ -570,10 +570,11 @@ _AP_POSITIONS = ("pos", "positions", "posiciones")
 _AP_LOG = ("log", "decisiones", "registro")
 _AP_CLOSE = ("close", "cerrar")
 _AP_RESET = ("reset", "reiniciar")
+_AP_ALERTS = ("avisos", "alertas", "alerts")
 _AP_KIND = {"open": ("Abre", "success"), "close": ("Cierra", "info"), "skip": ("Descarta", "muted"),
             "info": ("Nota", "info")}
 AUTOPILOT_USAGE = ("autopilot [on|off] [lista <símbolos…> | escaner [N]] [--tf 1h] [--max 5] [--risk 1] [--top 10] · "
-                   "autopilot pos | log | close <id|símbolo|all> | reset [saldo] --yes")
+                   "autopilot pos | log | avisos on|off | close <id|símbolo|all> | reset [saldo] --yes")
 
 
 def _ap_when(ctx: CommandContext, ms: Any) -> str:
@@ -623,11 +624,22 @@ def _print_autopilot(ctx: CommandContext, snap: dict) -> None:
         ctx.table(["Símbolo", "Motivo", "Dirección", "Última vela"], rows)
     elif st["enabled"]:
         ctx.print("Ahora mismo no vigila ningún símbolo", "muted")
+    ctx.print(_ap_alerts_line(st), "info" if st.get("alerts") else "muted")
     ctx.print(f"Saldo {fmt_num(a['balance'], 2)} · equity {fmt_num(a['equity'], 2)} · rentabilidad "
               f"{fmt_pct(a['return_pct'], 2)} · ganadoras {_ap_wins(a)} · posiciones abiertas {a['open_positions']}",
               "info")
     if st.get("note"):
         ctx.print(st["note"], "muted")
+
+
+def _ap_alerts_line(st: dict) -> str:
+    n = int(st.get("alert_channels") or 0)
+    if not st.get("alerts"):
+        return "Avisos por Telegram o correo: desactivados (autopilot avisos on)"
+    if n <= 0:
+        return ("Avisos por Telegram o correo: activados, pero ningún canal está activo (configúralo en Ajustes → "
+                "Alertas)")
+    return f"Avisos por Telegram o correo: activados ({n} {'canal activo' if n == 1 else 'canales activos'})"
 
 
 def _ap_number(ctx: CommandContext, flag: str, what: str) -> float | None:
@@ -690,6 +702,24 @@ async def _autopilot(ctx: CommandContext) -> None:
                       f"{fmt_r(p.get('r_multiple'))} ({fmt_pct(p.get('pnl_pct'), 2)} · {fmt_num(p.get('pnl'), 2, True)})",
                       "success" if (p.get("pnl") or 0) > 0 else "warn")
         ctx.data = {"closed": closed}
+        return
+
+    if sub in _AP_ALERTS:
+        word = args[1].lower() if len(args) > 1 else ""
+        if word not in _ON and word not in _OFF:
+            ctx.fail("Indica on u off. Ejemplo: autopilot avisos on")
+        try:
+            snap = await paper.set_autopilot(alerts=word in _ON)
+        except PaperError as exc:
+            ctx.fail(str(exc))
+        st = snap["autopilot"]
+        ok = st["alerts"] and int(st.get("alert_channels") or 0) > 0
+        ctx.print(("✔ " if ok or not st["alerts"] else "⚠ ") + _ap_alerts_line(st),
+                  "success" if ok else ("warn" if st["alerts"] else "info"))
+        if st["alerts"]:
+            ctx.print("Se avisa de sus aperturas, cierres y stops (operaciones simuladas), según el nivel de avisos de "
+                      "Ajustes → Alertas", "muted")
+        ctx.data = snap
         return
 
     if sub in _AP_RESET:

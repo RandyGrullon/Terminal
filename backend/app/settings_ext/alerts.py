@@ -11,6 +11,7 @@ DEFAULTS: dict = {
     "alerts.macro": True,  # semáforo: level changes and T−60 / T−15 / T−0 of high-impact events
     "alerts.signals": True,  # NEXUS entries, exits and early exits of the watched symbols (watchlist at watch.tf)
     "alerts.paper": True,  # demo account (account 1): opened, closed, stops (simulated)
+    "alerts.autopilot": False,  # NEXUS automática (account 3, it trades on its own): opened, closed, stops; opt-in
     "alerts.min_level": "warn",  # info (todos) | warn (importantes y críticos) | critical (solo críticos)
     # only these watched symbols get signal alerts (empty = the whole watchlist; 'AAPL' = that ticker on any exchange)
     "alerts.signal_symbols": [],

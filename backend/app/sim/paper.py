@@ -2566,8 +2566,18 @@ class PaperEngine:
             "watching": watching,
             "scan": dict(self._autopilot_scan) if self._autopilot_scan else None,
             "log": list(self._autopilot_log),
+            "alerts": bool(self._setting("alerts.autopilot", False)),
+            "alert_channels": self._alert_channels(),
             "note": AUTOPILOT_NOTE,
         }
+
+    def _alert_channels(self) -> int:
+        """Alert channels (Telegram, email) on and complete: 0 means its alerts would reach nobody."""
+        svc = getattr(self.rt, "alerts", None)
+        try:
+            return int(svc.active_channels()) if svc is not None and hasattr(svc, "active_channels") else 0
+        except Exception:
+            return 0
 
     async def autopilot_snapshot(self) -> dict[str, Any]:
         """AutopilotSnapshot: NEXUS's own account, its positions, history, portfolio risk and status."""
@@ -2585,11 +2595,15 @@ class PaperEngine:
         }
 
     async def set_autopilot(self, *, enabled: Any = None, source: Any = None, symbols: Any = None, tf: Any = None,
-                            max_positions: Any = None, risk_pct: Any = None, scanner_top: Any = None) -> dict[str, Any]:
-        """Change the settings of NEXUS's own account (only the given fields); Spanish PaperError on a bad value."""
+                            max_positions: Any = None, risk_pct: Any = None, scanner_top: Any = None,
+                            alerts: Any = None) -> dict[str, Any]:
+        """Change the settings of NEXUS's own account (only the given fields); Spanish PaperError on a bad value.
+        `alerts`: its trades as alerts through the user's channels (setting alerts.autopilot, opt-in)."""
         values: dict[str, Any] = {}
         if enabled is not None:
             values["autopilot.enabled"] = bool(enabled)
+        if alerts is not None:
+            values["alerts.autopilot"] = bool(alerts)
         if source is not None:
             src = str(source).strip().lower()
             if src not in AUTOPILOT_SOURCES:

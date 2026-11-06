@@ -121,7 +121,9 @@ def test_the_vetoed_bucket_keeps_an_anchor_after_the_next_close(runtime_factory,
             veto_at = (await svc._vetoes_for(SYM, "1h"))[(vetoed_bar, "long")]["at"]
             await closes(svc, rt, cs, clock, [k0 + 261])
             after = {s["time"]: s for s in await _stored(rt) if s["kind"] != "last"}
-            assert newest["time"] in after and after[newest["time"]]["state"]["resume"]["made"] > veto_at
+            # the anchor of that bar was rewritten by a run that read the veto: `made` (run start − 1 ms) is not before
+            # the veto's `at` (stale_for_vetoes: stale only when at > made); a fast run can land in the same ms
+            assert newest["time"] in after and after[newest["time"]]["state"]["resume"]["made"] >= veto_at
             assert {s["time"] for s in anchors} <= set(after)  # no bucket was left empty
             for t, s in after.items():
                 if t >= vetoed_bar:

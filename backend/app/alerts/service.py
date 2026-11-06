@@ -413,6 +413,10 @@ class AlertService:
 
     # ------------------------------------------------------------------ status
 
+    def active_channels(self) -> int:
+        """How many channels are on and complete (they would deliver an alert now)."""
+        return sum(1 for _, info in self._infos() if info.active)
+
     def status(self) -> dict:
         """Short JSON-safe status for /api/health (no secrets)."""
         active = [i.label for _, i in self._infos() if i.active]
