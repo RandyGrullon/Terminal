@@ -8,11 +8,17 @@ from __future__ import annotations
 
 DEFAULTS: dict = {
     "autopilot.enabled": False,
-    # scanner = the best TOMAR opportunities (gate TOMAR + NEXUS signal) of the latest scan · list = autopilot.symbols
+    # scanner = the best TOMAR opportunities (gate TOMAR + NEXUS signal) of the latest scan · list = autopilot.symbols ·
+    # both = the list plus those opportunities
     "autopilot.source": "scanner",
     "autopilot.symbols": [],
     "autopilot.tf": "1h",
     "autopilot.max_positions": 5,  # open positions at most (one per symbol)
     "autopilot.risk_pct": 1.0,  # % of the account's equity risked per trade (distance to the stop)
     "autopilot.scanner_top": 10,  # opportunities of the latest scan it may watch
+    "autopilot.initial_balance": 1000.0,  # its demo account starts with this (and a reset without another amount)
+    # a cash account: what it holds in shares / funds / crypto / other non-derivatives is at most this % of its equity
+    "autopilot.max_exposure_pct": 100.0,
+    # loss brake: no new entries once its equity is this % below its initial balance (0 = off)
+    "autopilot.max_drawdown_pct": 20.0,
 }

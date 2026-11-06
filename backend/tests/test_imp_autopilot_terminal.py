@@ -119,6 +119,20 @@ def test_scanner_source_and_bad_input_refused_in_spanish(client):
     assert (st["enabled"], st["source"], st["scanner_top"], st["risk_pct"]) == (False, "scanner", 5, 1.0)  # unchanged
 
 
+def test_cash_account_and_brake_from_the_terminal(client):
+    res = _term(client, "autopilot")
+    text = _text(res)
+    assert "Cuenta de efectivo: hasta el 100 % de su capital invertido · freno de pérdidas: 20 % desde el saldo inicial" \
+        in text and res["data"]["account"]["balance"] == 1000.0
+    res = _term(client, "autopilot ambos 5 --expo 80 --freno 0")
+    assert res["ok"], res["lines"]
+    st = res["data"]["autopilot"]
+    assert (st["source"], st["scanner_top"], st["max_exposure_pct"], st["max_drawdown_pct"]) == ("both", 5, 80.0, 0.0)
+    assert "freno de pérdidas: desactivado" in _text(res) and "y hasta 5 oportunidades TOMAR" in _text(res)
+    assert _term(client, "autopilot --freno 95")["ok"] is False
+    assert _term(client, "autopilot --expo")["ok"] is False
+
+
 def test_alerts_switch_from_the_terminal(client):
     res = _term(client, "autopilot avisos on")
     assert res["ok"] and res["data"]["autopilot"]["alerts"] is True

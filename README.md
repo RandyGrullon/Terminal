@@ -231,8 +231,16 @@ que la actives en «Cómo opera»:
 - **Cuándo y cómo decide**: al cierre de cada vela de su temporalidad (1 h por defecto); un candidato nuevo se decide
   en el acto con su última vela cerrada. Solo entra si NEXUS da COMPRAR o VENDER **y** el filtro dice TOMAR, y sale
   con las reglas de salida de NEXUS además del SL, los TP parciales y el stop dinámico de siempre.
-- **Límites**: máximo de posiciones abiertas (5), riesgo por operación (1 % de su capital, hasta el stop) y las mismas
-  reglas de riesgo de cartera que tu cuenta (*Ajustes → Riesgo de cartera*), contadas aparte.
+- **Su dinero**: empieza con **1.000 $** simulados (otra cantidad al reiniciarla). Es una cuenta de efectivo: no
+  invierte más del 100 % de su capital en acciones, fondos y cripto (si una operación no cabe entera, compra menos).
+- **Límites**: máximo de posiciones abiertas (5), riesgo por operación (1 % de su capital, hasta el stop), las mismas
+  reglas de riesgo de cartera que tu cuenta (*Ajustes → Riesgo de cartera*), contadas aparte, y un **freno de
+  pérdidas**: si cae un 20 % desde su saldo inicial deja de abrir operaciones hasta que la reinicies o cambies el
+  límite. «Cómo gestiona el dinero» explica estas reglas con sus números; limitan pérdidas, no garantizan ganancias.
+- **Acciones**: añade una clave gratuita de **Twelve Data** o **Polygon** en *Ajustes → Proveedores de datos* y pon
+  acciones en su lista (por ejemplo `NASDAQ:AAPL`, `NASDAQ:MSFT`, `AMEX:SPY`) con «Lista fija» o «Ambos» (lista +
+  escáner). Solo abre acciones con el mercado abierto y precio en vivo, y puede comprar fracciones. Con el plan
+  gratuito, mejor pocas acciones (5–8) en velas de 1 h: cada vela cerrada de cada acción es una consulta.
 - **Registro de decisiones**: qué abrió, qué descartó y por qué (filtro, límite de posiciones, riesgo) y qué cerró.
   Se guardan las 30 últimas en la base de datos, así que siguen ahí después de reiniciar el servidor.
 - Si **cambias la temporalidad** con posiciones abiertas, NEXUS sigue cerrándolas con sus reglas en la temporalidad

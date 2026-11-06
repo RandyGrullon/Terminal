@@ -35,7 +35,9 @@ export {
   AUTOPILOT_ACCOUNT_ID,
   AutopilotControls,
   AutopilotResetModal,
+  BrakeNotice,
   DecisionLog,
+  MoneyCard,
   KIND_INFO,
   WatchCard,
   autopilotFromMessage,
@@ -115,6 +117,8 @@ const CLOSED = position({
 function status(over = {}) {
   return {
     enabled: true, account_id: 3, source: 'scanner', tf: '1h', symbols: [], max_positions: 5, risk_pct: 1, scanner_top: 10,
+    alerts: false, alert_channels: 0, initial_balance: 1000, max_exposure_pct: 100, max_drawdown_pct: 20,
+    brake: { limit_pct: 20, drawdown_pct: 1.2, active: false },
     watching: [
       { symbol: 'BINANCE:SOLUSDT', why: 'escáner', direction: 'short' },
       { symbol: 'BINANCE:BTCUSDT', why: 'escáner', direction: 'long' },
@@ -164,7 +168,7 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
   const t = interfaces(src)
   assert.deepEqual(t.AutopilotStatus, [
     'enabled', 'account_id', 'source', 'tf', 'symbols', 'max_positions', 'risk_pct', 'scanner_top', 'watching', 'scan', 'log',
-    'alerts', 'alert_channels', 'note',
+    'alerts', 'alert_channels', 'initial_balance', 'max_exposure_pct', 'max_drawdown_pct', 'brake', 'note',
   ])
   assert.deepEqual(t.AutopilotSnapshot, ['account', 'positions', 'history', 'risk', 'autopilot'])
   assert.deepEqual(t.AutopilotWatch, ['symbol', 'why', 'direction?', 'last?'])
@@ -178,8 +182,12 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
   assert.match(src, /export type AutopilotVerdict = 'none' \| 'insufficient' \| 'no_edge' \| 'better' \| 'worse'/)
   assert.deepEqual(t.AutopilotLogEntry, ['ts', 'symbol', 'kind', 'text'])
   assert.deepEqual(t.AutopilotScan, ['id', 'finished_at', 'opportunities'])
-  assert.deepEqual(t.AutopilotUpdate, ['enabled?', 'source?', 'symbols?', 'tf?', 'max_positions?', 'risk_pct?', 'scanner_top?', 'alerts?'])
-  assert.match(src, /export type AutopilotSource = 'scanner' \| 'list'/)
+  assert.deepEqual(t.AutopilotUpdate, [
+    'enabled?', 'source?', 'symbols?', 'tf?', 'max_positions?', 'risk_pct?', 'scanner_top?', 'alerts?', 'max_exposure_pct?',
+    'max_drawdown_pct?',
+  ])
+  assert.deepEqual(t.AutopilotBrake, ['limit_pct', 'drawdown_pct', 'active'])
+  assert.match(src, /export type AutopilotSource = 'scanner' \| 'list' \| 'both'/)
   assert.match(src, /export type AutopilotWhy = 'escáner' \| 'lista' \| 'posición abierta'/)
   const types = readFileSync(path.join(SRC, 'api', 'types.ts'), 'utf8')
   assert.ok(types.includes("export * from './types-autopilot'"))
@@ -232,6 +240,37 @@ function comparison(over = {}) {
     ...over,
   }
 }
+
+test('both sources: the list and the scanner candidates are edited and sent together', () => {
+  const saved = M.draftFrom(M.normalizeAutopilot(snapshot({ source: 'both', symbols: ['NASDAQ:AAPL'] })).autopilot)
+  assert.equal(saved.source, 'both')
+  const changed = { ...saved, symbols: ['NASDAQ:AAPL', 'NASDAQ:MSFT'], scanner_top: 4, max_exposure_pct: 80, max_drawdown_pct: 15 }
+  assert.deepEqual(M.draftChanges(changed, saved), {
+    scanner_top: 4, max_exposure_pct: 80, max_drawdown_pct: 15, symbols: ['NASDAQ:AAPL', 'NASDAQ:MSFT'],
+  })
+  assert.match(M.validateDraft({ ...saved, max_drawdown_pct: 95 }), /El freno de pérdidas \(%\) debe ser un número entre 0,0 y 90,0/)
+  assert.match(M.validateDraft({ ...saved, max_exposure_pct: 600 }), /La exposición máxima \(%\) debe ser un número entre 0,0 y 500,0/)
+  const html = render(M.AutopilotControls, { status: M.normalizeAutopilot(snapshot({ source: 'both', symbols: ['NASDAQ:AAPL'] })).autopilot, saving: false, error: null, onSave: async () => null })
+  assert.ok(html.includes('Ambos') && html.includes('AAPL') && html.includes('Candidatos del escáner'), html)
+  assert.ok(html.includes('Exposición máxima (%)') && html.includes('Freno de pérdidas (%)'))
+  assert.equal(M.normalizeAutopilot(snapshot({ source: 'weird' })).autopilot.source, 'scanner')
+})
+
+test('money management: its own rules and numbers, never a promise; the brake notice says what to do', () => {
+  const st = M.normalizeAutopilot(snapshot({ risk_pct: 1.5, max_positions: 4, max_exposure_pct: 100, max_drawdown_pct: 20 })).autopilot
+  const html = render(M.MoneyCard, { status: st, dailyLossPct: 3 })
+  assert.ok(html.includes('Cómo gestiona el dinero') && html.includes('Cuenta simulada que empezó con'), html)
+  assert.ok(html.includes('Arriesga el 1,5 % de su capital'), html)
+  assert.ok(html.includes('Como mucho 4 posiciones a la vez'), html)
+  assert.ok(html.includes('no tiene invertido más del 100 % de su capital'), html)
+  assert.ok(html.includes('Se frena si pierde un 20 % desde su saldo inicial o un 3 % en el día'), html)
+  assert.ok(html.includes('no crean ventaja ni garantizan ganancias'), html)
+  const off = render(M.MoneyCard, { status: { ...st, max_drawdown_pct: 0, max_exposure_pct: 0 }, dailyLossPct: null })
+  assert.ok(off.includes('Sin freno de pérdidas acumuladas') && off.includes('Sin tope de exposición propio'), off)
+  assert.equal(render(M.BrakeNotice, { brake: { limit_pct: 20, drawdown_pct: 5, active: false } }), '')
+  const on = render(M.BrakeNotice, { brake: { limit_pct: 20, drawdown_pct: 24.5, active: true } })
+  assert.ok(on.includes('Freno de pérdidas activo') && on.includes('24,5 %') && on.includes('Reiníciala o cambia el freno'), on)
+})
 
 test('vs random entries: the backend verdict and note verbatim, "x de n", the interval only when it means something', () => {
   const card = (over, extra = {}) =>

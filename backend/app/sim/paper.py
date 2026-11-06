@@ -83,6 +83,7 @@ from app.sim.common import (
     json_loads,
     side_sign,
 )
+from app.engine.costs import asset_class
 from app.util import RateLimitedLog, clamp, floor_time, normalize_tf, now_ms, now_s, safe_float, tf_seconds
 
 AUTOPILOT_ACCOUNT = 3  # NEXUS's own demo account: trades on its own with its signals and the gate
@@ -91,7 +92,10 @@ ACCOUNTS = {1: "Principal", 2: "Simulación", AUTOPILOT_ACCOUNT: "NEXUS automát
 RISK_ACCOUNTS = frozenset({1, AUTOPILOT_ACCOUNT})
 # position origins: the user (manual / terminal script), auto-trading, the simulator, NEXUS's own account
 ORIGINS = ("manual", "auto", "sim", "script", "autopilot")
-AUTOPILOT_SOURCES = ("scanner", "list")
+AUTOPILOT_SOURCES = ("scanner", "list", "both")
+# asset classes outside the cash exposure of NEXUS's account (their own rules: futures margin, option premium)
+DERIVATIVE_CLASSES = frozenset({"futures", "option"})
+ALWAYS_OPEN_CLASSES = frozenset({"crypto"})  # 24/7 markets: no market-hours check before an entry
 AUTOPILOT_LOG_MAX = 30
 AUTOPILOT_REFRESH_S = 60.0  # how often the autopilot looks for a newer scan (its candidates)
 AUTOPILOT_SETTLE_S = 0.5  # quiet time after autopilot.* settings change (saved one key at a time) before re-reading
@@ -597,14 +601,32 @@ class PaperEngine:
             },
         }
 
+    def _initial_size(self, account_id: int) -> float:
+        """Initial balance of a new (or reset) demo account: risk.account_size; NEXUS's own one autopilot.initial_balance."""
+        key, default = (("autopilot.initial_balance", 1000.0) if account_id == AUTOPILOT_ACCOUNT
+                        else ("risk.account_size", 10000.0))
+        value = safe_float(self._setting(key, default))
+        return float(value) if value is not None and value > 0 else default
+
     async def ensure_accounts(self) -> None:
-        size = float(self._setting("risk.account_size", 10000.0) or 10000.0)
         ts = now_ms()
         await self.rt.db.executemany(
             "INSERT OR IGNORE INTO paper_accounts(id, name, balance, initial_balance, currency, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, 'USD', ?, ?)",
-            [(aid, name, size, size, ts, ts) for aid, name in ACCOUNTS.items()],
+            [(aid, name, self._initial_size(aid), self._initial_size(aid), ts, ts) for aid, name in ACCOUNTS.items()],
         )
+        # NEXUS's account created by an older version with the user's default size, never used: its own size now
+        size = self._initial_size(AUTOPILOT_ACCOUNT)
+        row = await self.rt.db.fetchone(
+            "SELECT balance, initial_balance, (SELECT COUNT(*) FROM paper_positions WHERE account_id=?) AS n "
+            "FROM paper_accounts WHERE id=?", (AUTOPILOT_ACCOUNT, AUTOPILOT_ACCOUNT)) or {}
+        initial, balance = safe_float(row.get("initial_balance")), safe_float(row.get("balance"))
+        legacy = float(self._setting("risk.account_size", 10000.0) or 10000.0)
+        if (int(row.get("n") or 0) == 0 and initial is not None and balance == initial == legacy
+                and abs(legacy - size) > 1e-9):
+            await self.rt.db.execute("UPDATE paper_accounts SET balance=?, initial_balance=?, updated_at=? WHERE id=?",
+                                     (size, size, ts, AUTOPILOT_ACCOUNT))
+            self._emit("info", "paper", f"NEXUS automática empieza con {fmt_num(size, 2)} (aún no había operado)")
 
     async def _register_listener(self) -> None:
         hub = self.rt.hub
@@ -692,6 +714,9 @@ class PaperEngine:
             "max_positions": int(num("autopilot.max_positions", 5, 1, 20)),
             "risk_pct": float(num("autopilot.risk_pct", 1.0, 0.1, 5.0)),
             "scanner_top": int(num("autopilot.scanner_top", 10, 1, 30)),
+            "initial_balance": self._initial_size(AUTOPILOT_ACCOUNT),
+            "max_exposure_pct": float(num("autopilot.max_exposure_pct", 100.0, 0.0, 500.0)),
+            "max_drawdown_pct": float(num("autopilot.max_drawdown_pct", 20.0, 0.0, 90.0)),
         }
 
     def _autopilot_held(self) -> dict[str, set[str]]:
@@ -922,7 +947,7 @@ class PaperEngine:
         elif account_id == AUTOPILOT_ACCOUNT:
             cfg = self._autopilot_cfg()
             auto, auto_tf = cfg["enabled"], cfg["tf"]
-            symbols = sorted(self._autopilot_watch) if cfg["source"] == "scanner" else cfg["symbols"]
+            symbols = sorted(self._autopilot_watch) if cfg["source"] != "list" else cfg["symbols"]
         else:
             auto = bool(self._sim_info.get("auto_trade"))
             symbols = list(self._sim_info.get("symbols") or [])
@@ -1276,6 +1301,7 @@ class PaperEngine:
         slippage: bool = True,
         order: dict | None = None,
         max_positions: int | None = None,
+        max_exposure_pct: float | None = None,
     ) -> dict:
         """Open a paper position. Returns {"position": Position, "gate": GateResult | None}.
 
@@ -1368,6 +1394,14 @@ class PaperEngine:
                 raise PaperError(f"La orden #{order['id']} ya no está pendiente")
             if max_positions:
                 self._check_max_positions(account_id, int(max_positions))
+            if max_exposure_pct is not None and asset_class(symbol) not in DERIVATIVE_CLASSES:
+                capped = self._cap_exposure(account_id, symbol, qty, fill, float(max_exposure_pct),
+                                            await self.equity(account_id))
+                if capped < qty:  # a smaller position that fits the cash account
+                    qty = capped
+                    fee = qty * fill * self._fee_pct(symbol) / 100.0
+                    meta["fees"] = fee
+                    meta["exposure_capped"] = True
             if account_id in RISK_ACCOUNTS:  # authoritative check, atomic with the insert (no other order opens)
                 await self._check_daily(account_id)
                 self._check_group(account_id, symbol)
@@ -2042,7 +2076,7 @@ class PaperEngine:
     async def reset(self, initial_balance: float | None = None, account_id: int = 1) -> dict:
         amount = safe_float(initial_balance)
         if amount is None:
-            amount = float(self._setting("risk.account_size", 10000.0) or 10000.0)
+            amount = self._initial_size(account_id)
         if amount <= 0:
             raise PaperError("El saldo inicial debe ser mayor que 0")
         await self.ensure_accounts()
@@ -2350,6 +2384,26 @@ class PaperEngine:
                     side = "short"
                 else:
                     return
+                cfg = self._autopilot_cfg() if own else None
+                if cfg is not None:
+                    brake = self._brake(await self.account(acct), cfg["max_drawdown_pct"])
+                    if brake["active"]:
+                        text = (f"{SIDE_LABEL[side]} descartado: freno de pérdidas activo (la cuenta está un "
+                                f"{fmt_pct(brake['drawdown_pct'], 1, False)} por debajo de su saldo inicial; límite "
+                                f"{fmt_pct(brake['limit_pct'], 0, False)}). Reiníciala o sube el límite para que vuelva a "
+                                "abrir operaciones.")
+                        if self._log.should_log("autopilot-brake", 6 * 3600):
+                            self._emit("warn", "paper", f"{prof.label}: freno de pérdidas activo: no abre operaciones "
+                                                        "nuevas", {"account_id": acct})
+                        if self._log.should_log(f"ap-brake:{symbol}", 6 * 3600):
+                            self._autopilot_note(symbol, "skip", text)
+                        return
+                    if not await self._market_live(symbol):
+                        if self._log.should_log(f"ap-closed:{symbol}", 6 * 3600):
+                            self._autopilot_note(symbol, "skip", f"{SIDE_LABEL[side]} descartado: el mercado está cerrado "
+                                                                 "o no hay precio en vivo; decide de nuevo en la próxima "
+                                                                 "vela con el mercado abierto")
+                        return
                 try:
                     if prof.max_positions > 0:
                         self._check_max_positions(acct, prof.max_positions)
@@ -2370,9 +2424,10 @@ class PaperEngine:
                         self._autopilot_note(symbol, "skip", text)
                     return
                 try:
-                    res = await self.open_position(acct, symbol, side, tf, origin=prof.origin, gate=gate,
-                                                   check_gate=False, risk_pct=prof.risk_pct,
-                                                   max_positions=prof.max_positions or None)
+                    res = await self.open_position(
+                        acct, symbol, side, tf, origin=prof.origin, gate=gate, check_gate=False, risk_pct=prof.risk_pct,
+                        max_positions=prof.max_positions or None,
+                        max_exposure_pct=(cfg["max_exposure_pct"] or None) if cfg is not None else None)
                 except PaperRiskBlocked as blk:  # lost the race for the last free slot / risk room
                     if self._log.should_log(f"auto-risk:{acct}:{symbol}:{blk.rule}", 3600):
                         self._emit("info", "paper", f"{prof.label}: {symbol} {SIDE_LABEL[side]} descartado: {blk.message}")
@@ -2494,10 +2549,11 @@ class PaperEngine:
             return
         self._autopilot_checked = time.monotonic()
         watch: dict[str, dict[str, Any]] = {}
-        if cfg["source"] == "list":
-            self._autopilot_scan = None
+        if cfg["source"] in ("list", "both"):
             for sym in cfg["symbols"]:
                 watch[sym] = {"why": "lista", "direction": None}
+        if cfg["source"] == "list":
+            self._autopilot_scan = None
         else:
             run, rows = None, []
             scanner = self.rt.scanner
@@ -2515,8 +2571,8 @@ class PaperEngine:
                 "opportunities": len(opps)}
             for row in opps[: cfg["scanner_top"]]:
                 direction = row.get("direction")
-                watch[str(row["symbol"]).upper()] = {"why": "escáner",
-                                                     "direction": direction if direction in ("long", "short") else None}
+                watch.setdefault(str(row["symbol"]).upper(), {  # a listed symbol stays "lista"
+                    "why": "escáner", "direction": direction if direction in ("long", "short") else None})
         # a new candidate (or every one, after a change of timeframe) is decided at once on its last closed bar
         fresh_tf = self._autopilot_tf != cfg["tf"]
         self._autopilot_tf = cfg["tf"]
@@ -2571,6 +2627,10 @@ class PaperEngine:
             "log": list(self._autopilot_log),
             "alerts": bool(self._setting("alerts.autopilot", False)),
             "alert_channels": self._alert_channels(),
+            "initial_balance": cfg["initial_balance"],
+            "max_exposure_pct": cfg["max_exposure_pct"],
+            "max_drawdown_pct": cfg["max_drawdown_pct"],
+            "brake": None,  # filled by autopilot_snapshot (it needs the account's equity)
             "note": AUTOPILOT_NOTE,
         }
 
@@ -2589,17 +2649,61 @@ class PaperEngine:
             risk = await self.risk_state(AUTOPILOT_ACCOUNT, account)
         except Exception:
             risk = None
+        status = self.autopilot_status()
+        status["brake"] = self._brake(account, status["max_drawdown_pct"])
         return {
             "account": account,
             "positions": self.open_positions(AUTOPILOT_ACCOUNT),
             "history": await self.history(AUTOPILOT_ACCOUNT),
             "risk": risk,
-            "autopilot": self.autopilot_status(),
+            "autopilot": status,
         }
+
+    @staticmethod
+    def _brake(account: dict, limit_pct: float) -> dict[str, Any]:
+        """AutopilotBrake: its loss brake (equity this % below the initial balance stops new entries)."""
+        initial = float(account.get("initial_balance") or 0.0)
+        equity = float(account.get("equity") or 0.0)
+        drawdown = max(0.0, (1.0 - equity / initial) * 100.0) if initial > 0 else 0.0
+        return {"limit_pct": float(limit_pct), "drawdown_pct": round(drawdown, 4),
+                "active": bool(limit_pct > 0 and drawdown >= limit_pct)}
+
+    async def _market_live(self, symbol: str) -> bool:
+        """A non-24/7 market (stocks, funds, futures, forex…) is open and its quote is a live price."""
+        if asset_class(symbol) in ALWAYS_OPEN_CLASSES or symbol.upper().startswith("SIM:"):
+            return True
+        hub = self.rt.hub
+        if hub is None or not hasattr(hub, "quotes"):
+            return False
+        try:
+            got = await asyncio.wait_for(hub.quotes([symbol]), timeout=20)
+        except Exception:
+            return False
+        q = got.get(symbol) if isinstance(got, dict) else None
+        return isinstance(q, dict) and q.get("market_open") is not False and quote_is_live(q, now_ms())
+
+    def _cap_exposure(self, account_id: int, symbol: str, qty: float, fill: float, pct: float,
+                      equity: float) -> float:
+        """Units within a cash account's exposure (non-derivatives held ≤ pct % of equity): the same qty, a smaller one
+        that fits, or PaperRiskBlocked 'exposure' when what is left is under a tenth of the order."""
+        cap = max(float(equity), 0.0) * float(pct) / 100.0
+        used = sum(float(p["qty_open"]) * float(self._position_price(p) or p["entry_price"])
+                   for p in self._open.values()
+                   if p["account_id"] == account_id and asset_class(p["symbol"]) not in DERIVATIVE_CLASSES)
+        room = cap - used
+        want = float(qty) * float(fill)
+        if want <= room:
+            return qty
+        if room <= 0.1 * want:
+            raise PaperRiskBlocked(
+                f"Exposición máxima: ya tiene {fmt_num(used, 2)} invertidos de {fmt_num(cap, 2)} "
+                f"({fmt_pct(pct, 0, False)} del capital), así que no cabe otra posición.", "exposure")
+        return room / float(fill)
 
     async def set_autopilot(self, *, enabled: Any = None, source: Any = None, symbols: Any = None, tf: Any = None,
                             max_positions: Any = None, risk_pct: Any = None, scanner_top: Any = None,
-                            alerts: Any = None) -> dict[str, Any]:
+                            alerts: Any = None, max_exposure_pct: Any = None,
+                            max_drawdown_pct: Any = None) -> dict[str, Any]:
         """Change the settings of NEXUS's own account (only the given fields); Spanish PaperError on a bad value.
         `alerts`: its trades as alerts through the user's channels (setting alerts.autopilot, opt-in)."""
         values: dict[str, Any] = {}
@@ -2610,7 +2714,7 @@ class PaperEngine:
         if source is not None:
             src = str(source).strip().lower()
             if src not in AUTOPILOT_SOURCES:
-                raise PaperError("Fuente no válida: usa «scanner» (escáner) o «list» (lista fija)")
+                raise PaperError("Fuente no válida: usa «scanner» (escáner), «list» (lista fija) o «both» (las dos)")
             values["autopilot.source"] = src
         if symbols is not None:
             if not isinstance(symbols, (list, tuple)):
@@ -2628,6 +2732,8 @@ class PaperEngine:
             ("max_positions", max_positions, 1, 20, "El máximo de posiciones", int),
             ("risk_pct", risk_pct, 0.1, 5.0, "El riesgo por operación (%)", float),
             ("scanner_top", scanner_top, 1, 30, "El número de candidatos del escáner", int),
+            ("max_exposure_pct", max_exposure_pct, 0, 500, "La exposición máxima (%)", float),
+            ("max_drawdown_pct", max_drawdown_pct, 0, 90, "El freno de pérdidas (%)", float),
         ):
             if value is None:
                 continue

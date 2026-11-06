@@ -7,8 +7,8 @@
 import type { PaperAccount, Position, Timeframe } from './types'
 import type { PaperRisk } from './types-paper-orders'
 
-/** scanner = the best TOMAR opportunities of the latest scan · list = fixed symbols (`symbols`). */
-export type AutopilotSource = 'scanner' | 'list'
+/** scanner = the best TOMAR opportunities of the latest scan · list = fixed symbols (`symbols`) · both = the two. */
+export type AutopilotSource = 'scanner' | 'list' | 'both'
 
 /** Why a symbol is watched (Spanish, shown as is). */
 export type AutopilotWhy = 'escáner' | 'lista' | 'posición abierta'
@@ -58,7 +58,18 @@ export interface AutopilotStatus {
   log: AutopilotLogEntry[] // newest first, at most 30
   alerts: boolean // its trades as alerts by Telegram / email (setting alerts.autopilot, off by default)
   alert_channels: number // alert channels on and complete now (0 = its alerts would reach nobody)
+  initial_balance: number // what its account starts with (autopilot.initial_balance, 1000 by default)
+  max_exposure_pct: number // cash account: shares / funds / crypto held ≤ this % of equity (0 = only the 5× cap)
+  max_drawdown_pct: number // loss brake: no new entries this % below the initial balance (0 = off)
+  brake: AutopilotBrake | null // null outside a snapshot
   note: string // honest Spanish note from the backend: shown verbatim
+}
+
+/** Its loss brake: equity `limit_pct` % below the initial balance stops new entries (open ones keep their exits). */
+export interface AutopilotBrake {
+  limit_pct: number
+  drawdown_pct: number // how far its equity is below the initial balance now (≥ 0)
+  active: boolean
 }
 
 /** GET /api/paper/autopilot · the answer of every POST below · WS 'paper' {type: 'paper_autopilot', ...}. */
@@ -115,4 +126,6 @@ export interface AutopilotUpdate {
   risk_pct?: number
   scanner_top?: number
   alerts?: boolean
+  max_exposure_pct?: number
+  max_drawdown_pct?: number
 }

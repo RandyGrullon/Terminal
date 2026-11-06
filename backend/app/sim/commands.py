@@ -565,6 +565,7 @@ async def _auto(ctx: CommandContext) -> None:
 AUTOPILOT_MIN_N = 30  # closed trades before its win share is given as a percentage (no conclusion below 30)
 _AP_LIST = ("lista", "list")
 _AP_SCANNER = ("escaner", "escáner", "scanner")
+_AP_BOTH = ("ambos", "both", "las-dos")
 _AP_STATUS = ("status", "estado", "ver")
 _AP_POSITIONS = ("pos", "positions", "posiciones")
 _AP_LOG = ("log", "decisiones", "registro")
@@ -574,7 +575,8 @@ _AP_ALERTS = ("avisos", "alertas", "alerts")
 _AP_COMPARE = ("azar", "comparar", "referencia")
 _AP_KIND = {"open": ("Abre", "success"), "close": ("Cierra", "info"), "skip": ("Descarta", "muted"),
             "info": ("Nota", "info")}
-AUTOPILOT_USAGE = ("autopilot [on|off] [lista <símbolos…> | escaner [N]] [--tf 1h] [--max 5] [--risk 1] [--top 10] · "
+AUTOPILOT_USAGE = ("autopilot [on|off] [lista <símbolos…> | escaner [N] | ambos [N]] [--tf 1h] [--max 5] [--risk 1] "
+                   "[--top 10] [--expo 100] [--freno 20] · "
                    "autopilot pos | log | azar | avisos on|off | close <id|símbolo|all> | reset [saldo] --yes")
 
 
@@ -585,9 +587,11 @@ def _ap_when(ctx: CommandContext, ms: Any) -> str:
 
 
 def _ap_what(st: dict) -> str:
+    listed = ", ".join(st["symbols"]) or "vacía (añade símbolos: autopilot lista btc eth)"
     if st["source"] == "list":
-        return "lista fija: " + (", ".join(st["symbols"]) or "vacía (añade símbolos: autopilot lista btc eth)")
-    return f"escáner: hasta {st['scanner_top']} oportunidades TOMAR del último escaneo"
+        return "lista fija: " + listed
+    scan = f"hasta {st['scanner_top']} oportunidades TOMAR del último escaneo"
+    return f"lista ({listed}) y {scan}" if st["source"] == "both" else f"escáner: {scan}"
 
 
 def _ap_wins(account: dict) -> str:
@@ -625,6 +629,15 @@ def _print_autopilot(ctx: CommandContext, snap: dict) -> None:
         ctx.table(["Símbolo", "Motivo", "Dirección", "Última vela"], rows)
     elif st["enabled"]:
         ctx.print("Ahora mismo no vigila ningún símbolo", "muted")
+    expo = st.get("max_exposure_pct") or 0
+    freno = st.get("max_drawdown_pct") or 0
+    ctx.print(("Cuenta de efectivo: hasta el " + fmt_pct(expo, 0, False) + " de su capital invertido" if expo
+               else "Sin tope de exposición propio") + " · freno de pérdidas: "
+              + (fmt_pct(freno, 0, False) + " desde el saldo inicial" if freno else "desactivado"), "info")
+    brake = st.get("brake") or {}
+    if brake.get("active"):
+        ctx.print(f"⛔ Freno de pérdidas activo: la cuenta está un {fmt_pct(brake.get('drawdown_pct'), 1, False)} por debajo "
+                  "de su saldo inicial; no abre operaciones nuevas (reiníciala o cambia --freno)", "warn")
     ctx.print(_ap_alerts_line(st), "info" if st.get("alerts") else "muted")
     ctx.print(f"Saldo {fmt_num(a['balance'], 2)} · equity {fmt_num(a['equity'], 2)} · rentabilidad "
               f"{fmt_pct(a['return_pct'], 2)} · ganadoras {_ap_wins(a)} · posiciones abiertas {a['open_positions']}",
@@ -643,9 +656,13 @@ def _ap_alerts_line(st: dict) -> str:
     return f"Avisos por Telegram o correo: activados ({n} {'canal activo' if n == 1 else 'canales activos'})"
 
 
-def _ap_number(ctx: CommandContext, flag: str, what: str) -> float | None:
+def _ap_number(ctx: CommandContext, flag: str, what: str, *, zero: bool = False) -> float | None:
     value = ctx.flag(flag)
-    return None if value is None else _number(ctx, value, what, flag=f"--{flag}")
+    if value is None:
+        return None
+    if zero and str(value).strip() in ("0", "0,0", "0.0"):
+        return 0.0  # 0 switches that limit off
+    return _number(ctx, value, what, flag=f"--{flag}")
 
 
 @command("autopilot", help="NEXUS automática: la cuenta demo propia de NEXUS, que opera sola (simulada)",
@@ -770,10 +787,10 @@ async def _autopilot(ctx: CommandContext) -> None:
         rest = args[1:]
     if rest:
         head = rest[0].lower()
-        if head in _AP_SCANNER:
-            update["source"] = "scanner"
+        if head in _AP_SCANNER or head in _AP_BOTH:
+            update["source"] = "scanner" if head in _AP_SCANNER else "both"
             if len(rest) > 2:
-                ctx.fail(f"Sobra «{rest[2]}». Uso: autopilot escaner [N]")
+                ctx.fail(f"Sobra «{rest[2]}». Uso: autopilot {head} [N]")
             if len(rest) == 2:
                 update["scanner_top"] = _number(ctx, rest[1], "el número de candidatos del escáner")
         elif head in _AP_LIST or "enabled" in update:  # autopilot on btc eth = a fixed list, like `auto on btc eth`
@@ -786,10 +803,12 @@ async def _autopilot(ctx: CommandContext) -> None:
             ctx.fail(f"No entiendo «{rest[0]}». Uso: {AUTOPILOT_USAGE}")
     if ctx.flag("tf") is not None:
         update["tf"] = _tf(ctx, str(ctx.flag("tf")))
-    for flag, key, what in (("max", "max_positions", "el máximo de posiciones"),
-                            ("risk", "risk_pct", "el riesgo por operación"),
-                            ("top", "scanner_top", "el número de candidatos del escáner")):
-        value = _ap_number(ctx, flag, what)
+    for flag, key, what, zero in (("max", "max_positions", "el máximo de posiciones", False),
+                                  ("risk", "risk_pct", "el riesgo por operación", False),
+                                  ("top", "scanner_top", "el número de candidatos del escáner", False),
+                                  ("expo", "max_exposure_pct", "la exposición máxima", True),
+                                  ("freno", "max_drawdown_pct", "el freno de pérdidas", True)):
+        value = _ap_number(ctx, flag, what, zero=zero)
         if value is not None:
             update[key] = value
     try:

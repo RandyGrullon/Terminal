@@ -91,8 +91,9 @@ def test_autopilot_is_off_by_default_with_its_own_account(runtime_factory, no_ba
             engine = await _engine(rt, {SYM: 100.0}, BarNexus(default=make_current("BUY")))
             snap = await engine.autopilot_snapshot()
             acct = snap["account"]
-            assert (acct["id"], acct["name"], acct["balance"], acct["auto_trade"]) == (3, "NEXUS automática", 10000.0,
+            assert (acct["id"], acct["name"], acct["balance"], acct["auto_trade"]) == (3, "NEXUS automática", 1000.0,
                                                                                       False)
+            assert (await engine.account(1))["balance"] == 10000.0  # the user's account keeps risk.account_size
             st = snap["autopilot"]
             assert (st["enabled"], st["account_id"], st["source"], st["tf"], st["symbols"]) == (False, 3, "scanner",
                                                                                                "1h", [])
@@ -129,8 +130,8 @@ def test_list_mode_trades_on_its_own_account_and_follows_nexus_exits(runtime_fac
             assert [upto for _, upto in rt.nexus.calls] in ([_last_closed()], [_last_closed() - H])
             pos = engine.open_positions(3)
             assert len(pos) == 1 and pos[0]["origin"] == "autopilot" and pos[0]["side"] == "long"
-            # 0.5 % of the account's 10 000 at risk between the entry and the stop
-            assert pos[0]["qty"] * abs(pos[0]["entry_price"] - pos[0]["sl"]) == pytest.approx(50.0, rel=1e-6)
+            # 0.5 % of the account's 1 000 at risk between the entry and the stop
+            assert pos[0]["qty"] * abs(pos[0]["entry_price"] - pos[0]["sl"]) == pytest.approx(5.0, rel=1e-6)
             assert engine.open_positions(1) == [] and await engine.history(1) == []  # the user's account: untouched
             log = engine.autopilot_status()["log"]
             assert [e["kind"] for e in log] == ["open", "info"] and log[1]["text"] == "Activada"
@@ -361,7 +362,7 @@ def test_pause_keeps_positions_and_reset_clears_only_its_account(runtime_factory
             assert len(engine.open_positions(3)) == 1
             await engine.reset(None, account_id=3)
             assert engine.open_positions(3) == [] and engine.autopilot_status()["log"] == []
-            assert (await engine.account(3))["balance"] == 10000.0
+            assert (await engine.account(3))["balance"] == 1000.0  # autopilot.initial_balance
             assert len(engine.open_positions(1)) == 1  # the user's account is untouched
             await engine.stop()
 
@@ -488,12 +489,111 @@ def test_its_trade_events_become_nexus_automatica_alerts(runtime_factory, no_bac
     asyncio.run(scenario())
 
 
+class SessionHub(FakeHub):
+    """FakeHub whose quotes say whether each market is open (stocks trade in sessions)."""
+
+    def __init__(self, *a, open_markets: set[str] | None = None, **kw):
+        super().__init__(*a, **kw)
+        self.open_markets = set(open_markets or ())
+
+    async def quotes(self, symbols):
+        return {s: {"symbol": s, "price": self.prices[s], "ts": pp.now_ms(),
+                    "market_open": s in self.open_markets or not s.startswith("NASDAQ:")}
+                for s in symbols if s in self.prices}
+
+
+def test_a_1000_cash_account_with_market_hours_an_exposure_cap_and_a_loss_brake(runtime_factory, no_background):
+    AAPL, MSFT = "NASDAQ:AAPL", "NASDAQ:MSFT"
+
+    async def scenario():
+        async with runtime_factory() as rt:
+            # a 0,5 % stop: 1 % of risk would need 200 % of the equity invested; the cash account allows 100 %
+            await rt.settings.update({"risk.slippage_pct": 0.0, "paper.max_positions_per_group": 5})
+            rt.hub = SessionHub(prices={AAPL: 100.0, MSFT: 100.0, SYM: 100.0}, open_markets={MSFT})
+            rt.nexus = BarNexus(default=make_current("BUY"))
+            engine = pp.PaperEngine(rt)
+            await engine.start()
+            assert (await engine.account(3))["initial_balance"] == 1000.0
+            st = (await engine.autopilot_snapshot())["autopilot"]
+            assert (st["initial_balance"], st["max_exposure_pct"], st["max_drawdown_pct"]) == (1000.0, 100.0, 20.0)
+            assert st["brake"] == {"limit_pct": 20.0, "drawdown_pct": 0.0, "active": False}
+            tight = make_current("BUY")
+            for g in tight["gate"].values():  # a 0,5-point stop at 100
+                g["sl"] = 99.5 if g["direction"] == "long" else 100.5
+            rt.nexus.default = tight
+            await engine.set_autopilot(enabled=True, source="list", symbols=[AAPL, MSFT])
+            await _settle(engine)
+            held = {p["symbol"]: p for p in engine.open_positions(3)}
+            assert list(held) == [MSFT]  # AAPL's market is closed: nothing opened there
+            notional = held[MSFT]["qty"] * held[MSFT]["entry_price"]
+            assert notional == pytest.approx(1000.0, rel=1e-3)  # capped to 100 % of the equity, not 200 %
+            log = engine.autopilot_status()["log"]
+            assert any(e["symbol"] == AAPL and "el mercado está cerrado" in e["text"] for e in log)
+            # the market opens: AAPL would be a second position, but the cash account is fully invested
+            rt.hub.open_markets.add(AAPL)
+            t = engine._auto_bar[(3, AAPL, "1h")]
+            await engine._on_candle(AAPL, "1h", _candle(t + H), True)
+            await _settle(engine)
+            assert [p["symbol"] for p in engine.open_positions(3)] == [MSFT]
+            assert any(e["symbol"] == AAPL and "Exposición máxima" in e["text"] for e in engine.autopilot_status()["log"])
+            # the loss brake: equity 25 % under the initial balance stops new entries (open ones keep their exits)
+            await engine.close_autopilot(all=True)
+            await rt.db.execute("UPDATE paper_accounts SET balance=? WHERE id=3", (750.0,))
+            snap = await engine.autopilot_snapshot()
+            assert snap["autopilot"]["brake"]["active"] is True and snap["autopilot"]["brake"]["drawdown_pct"] >= 24.9
+            await engine._on_candle(MSFT, "1h", _candle(engine._auto_bar[(3, MSFT, "1h")] + H), True)
+            await _settle(engine)
+            assert engine.open_positions(3) == []
+            assert any("freno de pérdidas activo" in e["text"] for e in engine.autopilot_status()["log"])
+            assert any("freno de pérdidas activo" in e["message"] for e in rt.bus.recent(level="warn"))
+            await engine.set_autopilot(max_drawdown_pct=0)  # 0 = off: it trades again
+            assert (await engine.autopilot_snapshot())["autopilot"]["brake"]["active"] is False
+            await engine.stop()
+
+    asyncio.run(scenario())
+
+
+def test_both_sources_and_an_old_account_of_10000_that_never_traded(runtime_factory, no_background):
+    async def scenario():
+        async with runtime_factory() as rt:
+            engine = await _engine(rt, {SYM: 100.0, SOL: 100.0, BTC: 100.0}, BarNexus(default=make_current("WAIT")))
+            rt.scanner = FakeScanner({"id": 3, "status": "done", "finished_at": 1}, [
+                {"symbol": SOL, "opportunity": True, "direction": "long"},
+                {"symbol": SYM, "opportunity": True, "direction": "short"}])
+            snap = await engine.set_autopilot(enabled=True, source="both", symbols=[SYM, BTC])
+            assert snap["autopilot"]["source"] == "both"
+            assert {(w["symbol"], w["why"]) for w in snap["autopilot"]["watching"]} == {
+                (SYM, "lista"), (BTC, "lista"), (SOL, "escáner")}  # a listed symbol stays "lista"
+            await engine.stop()
+            # an account 3 created by an older version with the user's 10 000, never used: it gets its own 1 000
+            await rt.db.execute("UPDATE paper_accounts SET balance=10000, initial_balance=10000 WHERE id=3")
+            again = pp.PaperEngine(rt)
+            await again.start()
+            assert (await again.account(3))["balance"] == 1000.0
+            assert any("empieza con 1.000,00" in e["message"] for e in rt.bus.recent())
+            await again.stop()
+            # once it has traded, a balance is never touched
+            await rt.db.execute("UPDATE paper_accounts SET balance=10000, initial_balance=10000 WHERE id=3")
+            await rt.db.execute(
+                "INSERT INTO paper_positions(account_id, symbol, tf, side, qty, qty_open, entry_price, entry_time, sl, "
+                "tp_hits, status, pnl, pnl_pct, origin, meta) VALUES (3, ?, '1h', 'long', 1, 0, 100, 1, 98, 0, "
+                "'closed', 0, 0, 'autopilot', '{}')", (SYM,))
+            third = pp.PaperEngine(rt)
+            await third.start()
+            assert (await third.account(3))["balance"] == 10000.0
+            await third.stop()
+
+    asyncio.run(scenario())
+
+
 def test_set_autopilot_rejects_bad_values_in_spanish(runtime_factory, no_background):
     async def scenario():
         async with runtime_factory() as rt:
             engine = await _engine(rt, {SYM: 100.0}, BarNexus())
             bad = [
                 ({"source": "brokers"}, "Fuente no válida"),
+                ({"max_exposure_pct": 900}, "La exposición máxima (%) debe ser un número entre 0,0 y 500,0"),
+                ({"max_drawdown_pct": 95}, "El freno de pérdidas (%) debe ser un número entre 0,0 y 90,0"),
                 ({"max_positions": 0}, "El máximo de posiciones debe ser un número entero entre 1 y 20"),
                 ({"max_positions": 2.5}, "número entero"),
                 ({"risk_pct": 9}, "El riesgo por operación (%) debe ser un número entre 0,1 y 5,0"),

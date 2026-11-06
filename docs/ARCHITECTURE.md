@@ -349,6 +349,8 @@ paper.max_open_risk_pct 6.0 · paper.max_positions_per_group 3 · paper.crypto_o
 paper.daily_loss_limit_pct 3.0                                       (the three numeric limits: 0 = off)
 autopilot.enabled false · autopilot.source "scanner" (scanner|list) · autopilot.symbols [] · autopilot.tf "1h"
 autopilot.max_positions 5 (1..20) · autopilot.risk_pct 1.0 (0.1..5) · autopilot.scanner_top 10 (1..30)
+autopilot.initial_balance 1000 · autopilot.max_exposure_pct 100 (0..500; 0 = off) · autopilot.max_drawdown_pct 20
+(0..90; 0 = off) · autopilot.source also "both" (the list plus the scanner's opportunities)
 realtime.enabled true · realtime.twelvedata_credits_min 8 · realtime.twelvedata_credits_day 800 (0 = no daily cap)
 realtime.polygon_calls_min 5 · realtime.reserve_pct 25 · realtime.max_symbols 4 · realtime.min_interval_s 15
 scanner.replay_days 7                     (int days, clamped 0..30 by the evaluator; 0 = vectors dropped at resolution)
@@ -666,8 +668,8 @@ POST /api/paper/reset {initial_balance?} -> PaperSnapshot
 POST /api/paper/auto {enabled, symbols?, tf?} -> {auto: {enabled, symbols, tf}}
 GET  /api/paper/autopilot                   -> AutopilotSnapshot (account 3, "NEXUS automática")
 GET  /api/paper/autopilot/compare?fresh=     -> AutopilotComparison (vs random entries; cached, fresh = recompute)
-POST /api/paper/autopilot {enabled?, source?: scanner|list, symbols?, tf?, max_positions?, risk_pct?, scanner_top?,
-                           alerts?}
+POST /api/paper/autopilot {enabled?, source?: scanner|list|both, symbols?, tf?, max_positions?, risk_pct?,
+                           scanner_top?, alerts?, max_exposure_pct?, max_drawdown_pct?}
      -> AutopilotSnapshot (only the given fields change; 400 {detail} in Spanish on a bad value)
 POST /api/paper/autopilot/reset {initial_balance?}     -> AutopilotSnapshot (account 3 only)
 POST /api/paper/autopilot/close {position_id? | all?}  -> AutopilotSnapshot (400 when neither; 404 unknown id)
@@ -687,13 +689,13 @@ GET  /api/learning/replay?days=&model_key=                       -> scanner repl
   limit, **never forced**. Cancel: 400 when nothing is specified, 404 for an unknown id, no pending order of the
   symbol, or an order that stopped being pending while the request waited. The WS `paper` message gains optional
   `orders` (pending) and `risk`; `GET /api/paper/account` is unchanged.
-- - **NEXUS's own demo account** (types in `types-autopilot.ts`; rules: §11): `AutopilotSnapshot {account:
-  PaperAccount (id 3), positions, history: Position[], risk: PaperRisk | null, autopilot: AutopilotStatus}`;
-  `AutopilotStatus {enabled, account_id: 3, source, tf, symbols, max_positions, risk_pct, scanner_top, watching:
-  AutopilotWatch[] {symbol, why: escáner|lista|posición abierta, direction?, last?: AutopilotLast {bar_time (ms, open
-  time of the last decided bar), tf, action (null = no analysis), label} | null}, scan: AutopilotScan {id, finished_at
-  (null while running; a failed scan is no source), opportunities} | null, log: AutopilotLogEntry[] {ts (ms), symbol
-  ('—' = not about one symbol), kind: open|close|skip|info, text} (newest first, ≤ 30, kept across restarts in meta
+- **NEXUS's own demo account** (types in `types-autopilot.ts`; rules: §11): `AutopilotSnapshot {account: PaperAccount
+  (id 3), positions, history: Position[], risk: PaperRisk | null, autopilot: AutopilotStatus}`; `AutopilotStatus
+  {enabled, account_id: 3, source, tf, symbols, max_positions, risk_pct, scanner_top, watching: AutopilotWatch[]
+  {symbol, why: escáner|lista|posición abierta, direction?, last?: AutopilotLast {bar_time (ms, open time of the last
+  decided bar), tf, action (null = no analysis), label} | null}, scan: AutopilotScan {id, finished_at (null while
+  running; a failed scan is no source), opportunities} | null, log: AutopilotLogEntry[] {ts (ms), symbol ('—' = not
+  about one symbol), kind: open|close|skip|info, text} (newest first, ≤ 30, kept across restarts in meta
   `autopilot.state`), alerts (setting `alerts.autopilot`: its trades as alerts, opt-in), alert_channels (alert
   channels on and complete now, `AlertService.active_channels()`; 0 = they would reach nobody), note}`. 400 texts:
   'Fuente no válida: usa «scanner» (escáner) o «list» (lista fija)', 'El máximo de posiciones debe ser un número
@@ -1103,7 +1105,9 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
   (run NEXUS on N synthetic markets with different seeds/regimes; keep it fast — cap bars/paths). Percentile fan,
   distributions, P(profit), P(ruin), VaR/CVaR. The fee is resolved like the backtest's.
 - **PaperEngine** (`rt.paper`): accounts 1 (Principal), 2 (Simulación) and 3 (NEXUS automática, below; created by
-  `ensure_accounts` on an existing database too). Orders at market (Trade Gate first: AVOID
+  `ensure_accounts` on an existing database too, with `autopilot.initial_balance`; an account 3 left by an older
+  version with the user's `risk.account_size` and no position ever gets that balance once). Orders at market (Trade
+  Gate first: AVOID
   → 409 unless `force`) or pending limit / stop orders (below), with SL/TP from the NEXUS gate levels when not given;
   sizing by `risk.per_trade_pct`; portfolio risk limits on accounts 1 and 3 (below).
   Subscribes hub (`owner="paper"`, 1m bars for real symbols) for open positions and pending orders; publishes WS
@@ -1140,7 +1144,7 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     opposite entry, then the reverse entry), then opens a position on BUY/SELL with gate TAKE (one position per
     symbol). When several bars close at once (feed catching up) every bar's exit is followed, but only the newest
     closed bar may open a trade.
-  - - **NEXUS automática** (account 3, NEXUS's own demo account; settings `autopilot.*`, **off by default**): the same
+  - **NEXUS automática** (account 3, NEXUS's own demo account; settings `autopilot.*`, **off by default**): the same
     closed-bar trader as auto-trading (`AutoProfile`: account, origin, tf, symbols, position cap, risk %), with its
     own account and origin `autopilot`. Candidates: `source` list = `autopilot.symbols`; scanner = the first
     `autopilot.scanner_top` rows with `opportunity` (gate TOMAR + NEXUS signal, §10) of the newest **finished** scan
@@ -1151,8 +1155,14 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     opened on the old timeframe keep NEXUS's exits on their own bars (an exits-only `AutoProfile`, `entries=False`,
     per timeframe it still holds; it never opens) and the new timeframe adds no second position on those symbols (each
     trader follows only the positions of its own tf, `PaperEngine._follows`). Entries need NEXUS BUY / SELL and gate
-    TOMAR (ESPERAR / NO TOMAR are logged as discarded), are sized at `autopilot.risk_pct` of the account's equity, and
-    respect `autopilot.max_positions` (checked atomically with the insert in `open_position(max_positions=…)`, rule
+    TOMAR (ESPERAR / NO TOMAR are logged as discarded), never open while its loss brake is on (`AutopilotBrake`:
+    equity `autopilot.max_drawdown_pct` % under the initial balance; `autopilot_snapshot` fills `status.brake`) nor in
+    a market that is not live (`_market_live`: every class but crypto needs a quote with `market_open` ≠ false and a
+    live price, so stocks only trade in their session), are capped as a cash account
+    (`open_position(max_exposure_pct=)`, atomic with the insert: shares / funds / crypto / other non-derivatives held
+    ≤ that % of equity; a smaller position when it does not fit whole, rule `exposure` when under a tenth fits;
+    futures and options have their own limits), are sized at `autopilot.risk_pct` of the account's equity, and respect
+    `autopilot.max_positions` (checked atomically with the insert in `open_position(max_positions=…)`, rule
     `max_positions`: every candidate's bar closes at the same second and their decisions run concurrently) and the
     portfolio risk rules of account 3. Settings changed elsewhere (Ajustes saves one key at a time) are re-read once
     they settle (0.5 s), never half-saved; `set_autopilot` saves every key first and re-reads once. Turning it on or
@@ -1735,19 +1745,19 @@ and `smtplib.SMTP` with fakes, and the live checker never calls `POST /api/alert
   `bus.remove_listener()`. State (counters received / sent / failed / filtered / deduped / quiet / rate_limited /
   no_channel / dropped, the last result per channel, the last test, ≤ 30 recent alerts, the policy memory) lives in
   `model_state(kind='alerts', key='state')`, so a deploy does not repeat messages.
-- - **Classification** (pure): semáforo (source `macro`, `data.alert`): level changes, T−60 / T−15 / T−0 of
-  high-impact events and the end of a no-trade window; red → critical, amber → warn, green → info. NEXUS watcher
-  (source `nexus`): BUY / SELL / EXIT_LONG / EXIT_SHORT (level `signal`) → warn, EARLY_EXIT → critical; only the
-  watched pairs (the watchlist at `watch.tf`, what the watcher follows), never `SIM:*`. Demo account (source `paper`,
-  level `trade`; the simulator's `sim` / account 2 is not): account 1 in category `paper` ('🧪 Cuenta demo (simulado):
-  …'), account 3 (NEXUS automática) in category `autopilot` ('🤖 NEXUS automática (simulado): …', the engine's 'NEXUS
-  automática · ' prefix removed; footer '… sin dinero real; la validación publicada no encontró ventaja'): opened /
-  closed → warn, a stop (SL / trailing) → critical when the trade lost money, else warn, partial targets → info; the
-  text always says 'simulado'. Any module can opt in with `data.notify = {category: macro|signals|paper|autopilot,
-  priority?, kind?, text?}` (or True). `collapse()` makes an exit plus an early exit of one market one (critical)
-  alert, before the dedupe. Signal texts say 'no es asesoría financiera' and carry a delayed-data note from
-  `hub.quotes` `delay_s` (4 s lookup).
-- - **Policy** (`app.alerts.policy`, pure, injected clock): category switches (`alerts.macro / signals / paper /
+- **Classification** (pure): semáforo (source `macro`, `data.alert`): level changes, T−60 / T−15 / T−0 of high-impact
+  events and the end of a no-trade window; red → critical, amber → warn, green → info. NEXUS watcher (source `nexus`):
+  BUY / SELL / EXIT_LONG / EXIT_SHORT (level `signal`) → warn, EARLY_EXIT → critical; only the watched pairs (the
+  watchlist at `watch.tf`, what the watcher follows), never `SIM:*`. Demo account (source `paper`, level `trade`; the
+  simulator's `sim` / account 2 is not): account 1 in category `paper` ('🧪 Cuenta demo (simulado): …'), account 3
+  (NEXUS automática) in category `autopilot` ('🤖 NEXUS automática (simulado): …', the engine's 'NEXUS automática · '
+  prefix removed; footer '… sin dinero real; la validación publicada no encontró ventaja'): opened / closed → warn, a
+  stop (SL / trailing) → critical when the trade lost money, else warn, partial targets → info; the text always says
+  'simulado'. Any module can opt in with `data.notify = {category: macro|signals|paper|autopilot, priority?, kind?,
+  text?}` (or True). `collapse()` makes an exit plus an early exit of one market one (critical) alert, before the
+  dedupe. Signal texts say 'no es asesoría financiera' and carry a delayed-data note from `hub.quotes` `delay_s` (4 s
+  lookup).
+- **Policy** (`app.alerts.policy`, pure, injected clock): category switches (`alerts.macro / signals / paper /
   autopilot`; autopilot is off by default and independent of paper), minimum priority (`alerts.min_level`),
   `alerts.signal_symbols` (narrows the watchlist; a bare ticker 'AAPL' matches any exchange; the status warns about
   entries the watcher does not follow, only while it runs); dedupe of the same alert key for 10 min, except that a new

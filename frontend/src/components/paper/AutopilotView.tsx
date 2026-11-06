@@ -8,6 +8,7 @@ import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from '
 import { Bot, Info, Radar, RefreshCw, RotateCcw, Scale, ScrollText, SlidersHorizontal, TriangleAlert, Wallet, X } from 'lucide-react'
 import { api, errorMessage } from '../../api/client'
 import type {
+  AutopilotBrake,
   AutopilotComparison,
   AutopilotLast,
   AutopilotLogEntry,
@@ -54,6 +55,7 @@ const ORIGIN_LABELS: Record<string, string> = { autopilot: 'NEXUS' }
 const SOURCE_OPTIONS: { value: AutopilotSource; label: string; title: string }[] = [
   { value: 'scanner', label: 'Escáner', title: 'Las mejores oportunidades TOMAR del último escaneo' },
   { value: 'list', label: 'Lista fija', title: 'Solo los símbolos de tu lista' },
+  { value: 'both', label: 'Ambos', title: 'Tu lista y las mejores oportunidades TOMAR del escáner' },
 ]
 const WHY_INFO: Record<string, { label: string; tone: Tone }> = {
   escáner: { label: 'Escáner', tone: 'accent' },
@@ -122,7 +124,7 @@ export function normalizeStatus(raw: unknown): AutopilotStatus | null {
   return {
     enabled: o.enabled,
     account_id: numOr(o.account_id, AUTOPILOT_ACCOUNT_ID),
-    source: o.source === 'list' ? 'list' : 'scanner',
+    source: o.source === 'list' || o.source === 'both' ? o.source : 'scanner',
     tf: asTimeframe(isStr(o.tf) ? o.tf : null) ?? '1h',
     symbols: Array.isArray(o.symbols) ? o.symbols.filter((s): s is string => isStr(s) && s !== '') : [],
     max_positions: numOr(o.max_positions, 5),
@@ -133,6 +135,10 @@ export function normalizeStatus(raw: unknown): AutopilotStatus | null {
     log: normalizeLog(o.log),
     alerts: o.alerts === true,
     alert_channels: Math.max(0, numOr(o.alert_channels, 0)),
+    initial_balance: numOr(o.initial_balance, 1000),
+    max_exposure_pct: numOr(o.max_exposure_pct, 100),
+    max_drawdown_pct: numOr(o.max_drawdown_pct, 20),
+    brake: normalizeBrake(o.brake),
     note: isStr(o.note) ? o.note : '',
   }
 }
@@ -151,6 +157,13 @@ export function normalizeAutopilot(raw: unknown): AutopilotSnapshot | null {
     risk: normalizeRisk(o.risk),
     autopilot,
   }
+}
+
+function normalizeBrake(raw: unknown): AutopilotBrake | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  if (!isNum(o.limit_pct) || !isNum(o.drawdown_pct)) return null
+  return { limit_pct: o.limit_pct, drawdown_pct: Math.max(0, o.drawdown_pct), active: o.active === true }
 }
 
 /** Defensive parse of an AutopilotComparison: null without its verdict and texts. */
@@ -189,6 +202,56 @@ const VERDICT_TONE: Record<AutopilotComparison['verdict'], Tone> = {
   no_edge: 'warn',
   better: 'accent',
   worse: 'neg',
+}
+
+/** "Cómo gestiona el dinero": its rules in plain words, with its own settings (never a promise of profit). */
+export function MoneyCard({ status, dailyLossPct }: { status: AutopilotStatus; dailyLossPct: number | null }) {
+  const pct = (v: number, d = 1) => `${fmtNum(v, Number.isInteger(v) ? 0 : d)} %`
+  const rules = [
+    `Arriesga el ${pct(status.risk_pct)} de su capital en cada operación: lo que perdería si salta el stop.`,
+    `Como mucho ${plural(status.max_positions, 'posición', 'posiciones')} a la vez, una por símbolo, y con el límite de posiciones por grupo correlacionado de tu riesgo de cartera.`,
+    status.max_exposure_pct > 0
+      ? `Cuenta de efectivo: no tiene invertido más del ${pct(status.max_exposure_pct, 0)} de su capital en acciones, fondos y cripto (si no cabe entera, compra menos).`
+      : 'Sin tope de exposición propio: solo el límite general de 5 veces el capital por posición.',
+    'Cierra 1/3 en el primer objetivo y sube el stop a la entrada; otro 1/3 en el segundo, y deja correr el resto con un stop dinámico.',
+    'Sale antes si NEXUS cambia de opinión al cierre de una vela, y nunca abre en un mercado cerrado.',
+    status.max_drawdown_pct > 0
+      ? `Se frena si pierde un ${pct(status.max_drawdown_pct, 0)} desde su saldo inicial${dailyLossPct ? ` o un ${pct(dailyLossPct)} en el día` : ''}.`
+      : `Sin freno de pérdidas acumuladas${dailyLossPct ? `; sí se frena si pierde un ${pct(dailyLossPct)} en el día` : ''}.`,
+  ]
+  return (
+    <Card
+      title={
+        <>
+          <Wallet size={14} /> Cómo gestiona el dinero
+        </>
+      }
+      sub={`Cuenta simulada que empezó con ${fmtMoney(status.initial_balance)}`}
+    >
+      <ul className="ap-rules small">
+        {rules.map((r) => (
+          <li key={r}>{r}</li>
+        ))}
+      </ul>
+      <div className="tiny muted">
+        Estas reglas limitan las pérdidas y el tamaño de cada operación; no crean ventaja ni garantizan ganancias. La validación publicada no encontró ventaja.
+      </div>
+    </Card>
+  )
+}
+
+/** The brake notice: why it opens nothing new and what to do. */
+export function BrakeNotice({ brake }: { brake: AutopilotBrake | null }) {
+  if (!brake?.active) return null
+  return (
+    <div className="notice ap-brake" role="alert">
+      <TriangleAlert size={15} style={{ flex: 'none', marginTop: 1 }} />
+      <span>
+        Freno de pérdidas activo: la cuenta está un {fmtNum(brake.drawdown_pct, 1)} % por debajo de su saldo inicial (límite {fmtNum(brake.limit_pct, 0)} %). No abre
+        operaciones nuevas; las abiertas siguen con su stop y sus objetivos. Reiníciala o cambia el freno en «Cómo opera».
+      </span>
+    </div>
+  )
 }
 
 /** The 95 % interval as shown (the backend's rule: none below 10 trades, «muy incierto» below 30). */
@@ -289,23 +352,45 @@ export interface AutopilotDraft {
   max_positions: number | null
   risk_pct: number | null
   scanner_top: number | null
+  max_exposure_pct: number | null
+  max_drawdown_pct: number | null
 }
 
-type NumField = 'max_positions' | 'risk_pct' | 'scanner_top'
+type NumField = 'max_positions' | 'risk_pct' | 'scanner_top' | 'max_exposure_pct' | 'max_drawdown_pct'
 
 /** The server's limits for each number (same wording as its 400 answers). */
 const RANGES: Record<NumField, { lo: number; hi: number; int: boolean; what: string }> = {
   max_positions: { lo: 1, hi: 20, int: true, what: 'El máximo de posiciones' },
   risk_pct: { lo: 0.1, hi: 5, int: false, what: 'El riesgo por operación (%)' },
   scanner_top: { lo: 1, hi: 30, int: true, what: 'El número de candidatos del escáner' },
+  max_exposure_pct: { lo: 0, hi: 500, int: false, what: 'La exposición máxima (%)' },
+  max_drawdown_pct: { lo: 0, hi: 90, int: false, what: 'El freno de pérdidas (%)' },
 }
 
-/** Numbers shown for a source: the scanner candidates only in scanner mode. */
-const numFields = (source: AutopilotSource): NumField[] =>
-  source === 'scanner' ? ['max_positions', 'risk_pct', 'scanner_top'] : ['max_positions', 'risk_pct']
+/** The list is used by the sources list and both; the scanner candidates by scanner and both. */
+const usesList = (source: AutopilotSource) => source !== 'scanner'
+const usesScanner = (source: AutopilotSource) => source !== 'list'
+
+/** Numbers shown for a source: the scanner candidates only when the scanner is used. */
+const numFields = (source: AutopilotSource): NumField[] => [
+  'max_positions',
+  'risk_pct',
+  ...(usesScanner(source) ? (['scanner_top'] as NumField[]) : []),
+  'max_exposure_pct',
+  'max_drawdown_pct',
+]
 
 export function draftFrom(s: AutopilotStatus): AutopilotDraft {
-  return { source: s.source, symbols: [...s.symbols], tf: s.tf, max_positions: s.max_positions, risk_pct: s.risk_pct, scanner_top: s.scanner_top }
+  return {
+    source: s.source,
+    symbols: [...s.symbols],
+    tf: s.tf,
+    max_positions: s.max_positions,
+    risk_pct: s.risk_pct,
+    scanner_top: s.scanner_top,
+    max_exposure_pct: s.max_exposure_pct,
+    max_drawdown_pct: s.max_drawdown_pct,
+  }
 }
 
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i])
@@ -320,7 +405,7 @@ export function draftChanges(d: AutopilotDraft, saved: AutopilotDraft): Autopilo
     const v = d[k]
     if (v !== null && v !== saved[k]) out[k] = v
   }
-  if (d.source === 'list' && !sameList(d.symbols, saved.symbols)) out.symbols = [...d.symbols]
+  if (usesList(d.source) && !sameList(d.symbols, saved.symbols)) out.symbols = [...d.symbols]
   return out
 }
 
@@ -339,7 +424,7 @@ export function validateDraft(d: AutopilotDraft): string | null {
       return `${r.what} debe ser ${r.int ? 'un número entero' : 'un número'} entre ${fmtNum(r.lo, digits)} y ${fmtNum(r.hi, digits)}.`
     }
   }
-  if (d.source === 'list' && d.symbols.length > MAX_SYMBOLS) return `Como máximo ${MAX_SYMBOLS} símbolos en la lista.`
+  if (usesList(d.source) && d.symbols.length > MAX_SYMBOLS) return `Como máximo ${MAX_SYMBOLS} símbolos en la lista.`
   return null
 }
 
@@ -482,11 +567,13 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
           <span className="tiny muted">
             {draft.source === 'scanner'
               ? 'Las mejores oportunidades TOMAR del último escaneo (filtro TOMAR con señal de NEXUS), el automático o uno que lances en Escáner. Después NEXUS decide en su propia temporalidad.'
-              : 'Solo los símbolos de la lista: en cada vela cerrada NEXUS decide si entra y en qué dirección.'}
+              : draft.source === 'both'
+                ? 'Tu lista (acciones, cripto…) y además las mejores oportunidades TOMAR del último escaneo. En cada vela cerrada NEXUS decide si entra y en qué dirección.'
+                : 'Solo los símbolos de la lista (acciones, cripto…): en cada vela cerrada NEXUS decide si entra y en qué dirección. Las acciones solo se operan con el mercado abierto.'}
           </span>
         </div>
 
-        {draft.source === 'list' && (
+        {usesList(draft.source) && (
           <Field label={`Símbolos (${draft.symbols.length})`}>
             {draft.symbols.length > 0 ? (
               <div className="pp-chips">
@@ -521,11 +608,17 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
           <Field label="Riesgo por operación (%)" hint="Del capital, hasta el stop: de 0,1 a 5">
             <NumberInput value={draft.risk_pct} onChange={(v) => patch({ risk_pct: v })} min={0.1} max={5} step={0.1} />
           </Field>
-          {draft.source === 'scanner' && (
+          {usesScanner(draft.source) && (
             <Field label="Candidatos del escáner" hint="Oportunidades del último escaneo que vigila: de 1 a 30">
               <NumberInput value={draft.scanner_top} onChange={(v) => patch({ scanner_top: v })} min={1} max={30} step={1} />
             </Field>
           )}
+          <Field label="Exposición máxima (%)" hint="Lo invertido en acciones, fondos y cripto, del capital: 100 = sin apalancamiento">
+            <NumberInput value={draft.max_exposure_pct} onChange={(v) => patch({ max_exposure_pct: v })} min={0} max={500} step={10} />
+          </Field>
+          <Field label="Freno de pérdidas (%)" hint="Deja de abrir operaciones si cae este % desde su saldo inicial (0 = sin freno)">
+            <NumberInput value={draft.max_drawdown_pct} onChange={(v) => patch({ max_drawdown_pct: v })} min={0} max={90} step={5} />
+          </Field>
         </div>
 
         {problem && <div className="tiny warn">{problem}</div>}
@@ -1070,6 +1163,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
 
   const compareCard = <CompareCard cmp={cmp} loading={cmpLoading} error={cmpError} onRefresh={() => void loadCmp(true)} />
   const controls = status ? <AutopilotControls status={status} saving={saving} error={saveError} onSave={save} /> : null
+  const moneyCard = status ? <MoneyCard status={status} dailyLossPct={snap?.risk?.daily_loss_limit_pct ?? null} /> : null
   const watchCard = status ? <WatchCard status={status} onOpenChart={openSymbol} /> : null
   const logCard = status ? <DecisionLog log={status.log} onOpenChart={openSymbol} /> : null
 
@@ -1118,6 +1212,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
       ) : (
         <>
           {error && <ErrorBox error={`${error} · mostrando los últimos datos conocidos`} onRetry={() => void load()} />}
+          <BrakeNotice brake={status?.brake ?? null} />
           <PaperStats account={snap.account} winTally />
           {wide ? (
             <div className="pp-layout">
@@ -1129,6 +1224,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
               </div>
               <div className="pp-side">
                 {controls}
+                {moneyCard}
                 {watchCard}
                 <RiskPanel risk={snap.risk} />
               </div>
@@ -1138,7 +1234,10 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
               {positionsCard}
               {compareCard}
               <div className="ap-cols">
-                <div className="ap-col">{controls}</div>
+                <div className="ap-col">
+                  {controls}
+                  {moneyCard}
+                </div>
                 <div className="ap-col">
                   {watchCard}
                   {logCard}
