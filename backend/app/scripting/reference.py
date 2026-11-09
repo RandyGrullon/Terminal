@@ -54,6 +54,22 @@ _SYMBOL = _section(
      "True según la temporalidad sea intradía, diaria o semanal."),
 )
 
+_NEWS = _section(
+    "Noticias (calendario económico)",
+    ("noticias.cerca", "noticias.cerca(antes=30, despues=30, eventos=\"principales\", moneda=\"USD\")",
+     "Serie booleana: True en las velas que tocan la ventana [noticia − antes, noticia + despues] (en minutos). "
+     "Úsala como filtro de «no operar»: when=senal & ~noticias.cerca(30, 30). Las horas de publicación se conocen "
+     "de antemano, así que no es mirar el futuro. eventos: \"principales\" (IPC, informe de empleo y Fed, con "
+     "historial desde febrero de 2024), \"alto\", \"medio\" o \"todos\" (estos tres solo tienen datos desde noviembre "
+     "de 2026: no sirven para backtests largos). moneda=None incluye todas las divisas."),
+    ("noticias.lista", "noticias.lista(eventos=\"principales\", moneda=\"USD\")",
+     "Lista de (hora Unix UTC, título, divisa, impacto) de las noticias del periodo de las velas, la más antigua "
+     "primero. Ejemplo: for t, titulo, divisa, impacto in noticias.lista(): print(titulo)"),
+    ("noticias.desde", "noticias.desde · noticias.hasta · noticias.disponible",
+     "Desde y hasta qué hora Unix están completas las noticias principales, y si esta ejecución recibió el "
+     "calendario (False sin el módulo de mercado: entonces noticias.cerca() no marca nada y la consola lo avisa)."),
+)
+
 _INPUTS = _section(
     "Entradas (input.*)",
     ("input.int", "input.int(defval, title, minval=None, maxval=None, step=None, options=None)",
@@ -288,7 +304,7 @@ _PYTHON = _section(
 
 REFERENCE: dict = {
     "sections": [
-        _DECLARATION, _SERIES, _SYMBOL, _INPUTS, _TA_MA, _TA_OSC, _TA_VOL, _TA_TREND, _TA_VOLUME, _TA_EXTREMES, _TA_EVENTS,
+        _DECLARATION, _SERIES, _SYMBOL, _NEWS, _INPUTS, _TA_MA, _TA_OSC, _TA_VOL, _TA_TREND, _TA_VOLUME, _TA_EXTREMES, _TA_EVENTS,
         _TA_STATS, _MISSING, _DRAWING, _ALERTS, _STRATEGY, _COLORS, _PYTHON,
     ]
 }

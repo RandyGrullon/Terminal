@@ -20,6 +20,7 @@ REQUIRED = {
     "Breakout de Donchian con stop ATR (estrategia)",
 }
 STRATEGIES = {"Cruce de EMAs (estrategia)", "Supertrend + filtro ADX (estrategia)",
+              "Rango de sesión: barrida o ruptura (estrategia)",
               "NEXUS-lite: mini ensamble con filtro de no operar", "Breakout de Donchian con stop ATR (estrategia)"}
 EXAMPLES = examples_mod.load_examples()
 IDS = [ex["file"] for ex in EXAMPLES]

@@ -23,6 +23,7 @@ CODE_MAX = 100_000  # same limit as the compiler (validator.MAX_CODE_CHARS)
 LIMIT_MIN = 50
 LIMIT_MAX = 5000
 RUN_TIMEOUT_S = 10.0
+NEWS_MARGIN_S = 2 * 86400  # calendar margin around the candles of a run (noticias)
 MAX_CONCURRENT_RUNS = 2
 STDOUT_EVENT_LINES = 40
 STDOUT_LINE_MAX = 300
@@ -487,12 +488,14 @@ class ScriptService:
         run_script = _load_sandbox()
         sym = await self._resolve_symbol(symbol)
         candles = await self._candles(sym, tf_key, bars)
+        news = self._news(candles)
+        extra = {"news": news} if news is not None else {}
         started = time.perf_counter()
         async with self._run_sem:
             try:
                 raw = await asyncio.wait_for(
                     asyncio.to_thread(run_script, text, candles, dict(inputs or {}), symbol=sym, tf=tf_key,
-                                      timeout=RUN_TIMEOUT_S),
+                                      timeout=RUN_TIMEOUT_S, **extra),
                     timeout=RUN_TIMEOUT_S + 20,
                 )
             except asyncio.TimeoutError:
@@ -509,6 +512,20 @@ class ScriptService:
             self._run_errors += 1
         self._run_events(result, sym, tf_key, name)
         return result
+
+    def _news(self, candles: list[dict]) -> dict | None:
+        """Economic calendar for `noticias` over the candles' dates (± NEWS_MARGIN_S), from the macro module. None
+        when the module is not loaded or fails: the script then runs without news (noticias.disponible = False)."""
+        macro = getattr(self.rt, "macro", None)
+        if macro is None or not candles or not hasattr(macro, "script_events"):
+            return None
+        try:
+            first, last = int(candles[0]["time"]), int(candles[-1]["time"])
+            return macro.script_events(first - NEWS_MARGIN_S, last + NEWS_MARGIN_S)
+        except Exception as exc:  # noqa: BLE001 - news are optional: never break a run
+            if self._log.should_log("news", 600):
+                self._emit("warn", f"PyChart: no se pudo preparar el calendario de noticias: {_clip(exc, EVENT_TEXT_MAX)}")
+            return None
 
     async def _resolve_symbol(self, symbol: Any) -> str:
         text = str(symbol or "").strip()

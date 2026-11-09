@@ -1342,9 +1342,25 @@ pivotlow barssince valuewhen cum linreg correlation percentrank median vwap wpr 
 `hline(price, title, color, style)`, `bgcolor(cond, color)`, `alertcondition(cond, title, message)`,
 `strategy.entry(id, direction, when, qty_pct, stop, limit, comment, qty)`,
 `strategy.exit(id, from_entry, stop, limit, trail_atr, when, update, comment)`, `strategy.close(id, when)`,
-`strategy.close_all(when)`, `color.*` constants, `print()` → stdout (shown in the terminal). Ship ≥ 8 example
+`strategy.close_all(when)`, `color.*` constants, `print()` → stdout (shown in the terminal),
+`noticias.cerca(antes=30, despues=30, eventos="principales", moneda="USD")` / `noticias.lista(eventos, moneda)` /
+`noticias.desde` · `hasta` · `disponible` (economic calendar, `app.scripting.runtime_news`, below). Ship ≥ 8 example
 scripts (EMA cross strategy, RSI divergence, Supertrend, Bollinger squeeze, MACD + volume, Ichimoku, VWAP bands,
-"NEXUS-lite" mini ensemble). Scripts stored in table `scripts` (examples seeded on start, `is_example=1`).
+"NEXUS-lite" mini ensemble, Donchian breakout, session ranges Sídney → Asia / Londres → NY and the session-range
+sweep / breakout strategy with its news filter). Scripts stored in table `scripts` (examples seeded on start,
+`is_example=1`).
+
+News (`noticias`): the worker has no network, so `ScriptService.run` asks `rt.macro.script_events(first − 2 d,
+last + 2 d)` (§15) and passes it as `run_script(..., news=...)`; the launcher bounds it (`sandbox.clean_news`: ≤ 20 000
+events, titles ≤ 120 characters) into `payload["news"]` and the worker hands it to `ScriptContext.news`. Without the
+macro module, or if it fails (one warn event, at most every 10 min), the run goes on without news:
+`noticias.disponible` is False and `cerca()` marks nothing (a console notice says so). `cerca` = bars whose
+[open, open + duration) overlaps [event − antes, event + despues] in minutes (0..10 080); scheduled release times are
+public in advance, so this is not looking at future prices. Sets: "principales" (CPI, employment, FOMC: continuous
+from Feb 2024), "alto", "medio", "todos" (these three only have data from Nov 2026 on: a notice says they are not fit
+for long backtests); `moneda=None` = every currency. Notices also mark bars before `desde` or after `hasta`. The
+object is read-only (`__slots__`, `__setattr__` raises) and its private fields are unreachable (the validator rejects
+attributes starting with `_`). Tests: `tests/test_imp_news_pychart.py`, `tests/test_imp_news_calendar.py`.
 
 Order semantics (`runtime_strategy` + `runtime_backtest`): a script runs once over the whole series, so orders are
 vectorized *rules*. Signals are evaluated at the bar close and filled at the next bar open; `stop` / `limit` (of
@@ -1719,6 +1735,16 @@ Sources (verified with plain requests from this network):
   14:45 Frankfurt (Dec 2026 – Dec 2027; the usual times, the meeting calendar gives dates only); BoE Bank Rate 12:00
   London (Nov 2026 – Dec 2027); BoJ 12:00 Tokyo as a reference only ('hora aproximada': BoJ has no fixed time). All
   lists, FOMC included, end in Dec 2027 and need yearly upkeep.
+- Past official dates (`app/macro/history.py`, read on 2026-11-09 on the BLS release archives and the Fed's FOMC
+  calendar): the ACTUAL publication dates of CPI and the Employment Situation (Feb 2024 – Oct 2026, 08:30 New York,
+  including the ones moved by the 2025 lapse in appropriations; the October 2025 reports were not published on their
+  own) and the 2024–2025 FOMC decisions (14:00) and press conferences (14:30). They feed only PyChart's `noticias`
+  (§12), never the semáforo, and are continuous with the forward lists (`from_s()` = 2024-02-01 00:00 New York,
+  `until_s()` = the shortest forward schedule): the «principal» kinds `PRINCIPAL_KINDS` (us_cpi, us_nfp,
+  fomc_decision, fomc_press). The FOMC notation vote of 22 Aug 2025 is not listed (no 14:00 statement).
+- `MacroService.script_events(start_s, end_s)` -> `{events: [{time, title, currency, impact, principal}], from,
+  until}`: the weekly feed copy + `history` + FOMC + official calendars over the range, merged like `events()`; a feed
+  copy of a principal release (`feed_matches`) is principal too. At most 20 000 events per run.
 - Merge (`calendar.merge_extra(feed, fomc + official)`): an official event the weekly feed already lists (same
   currency, release family `FEED_MATCH`, ±2 h) is dropped and the feed copy wins (FOMC copies still become high impact
   with the SEP note); a live and a curated copy of one release are kept once, the live one. `MacroEvent.source` ∈
@@ -2116,6 +2142,10 @@ Calendar and alerts:
   included, ends in Dec 2027. ECB 14:15 / 14:45 and BoE 12:00 are their usual times, not confirmed per date. BoJ times
   are a reference: the official BoJ window (JPY scopes only, and only when the weekly feed does not list that
   meeting) is still ±block minutes around 12:00 Tokyo and can miss a late release (it is labelled 'hora aproximada').
+- **News in PyChart backtests**: only CPI, the employment report and the FOMC have past dates (Feb 2024 on,
+  `app/macro/history.py`); every other event exists from Nov 2026 (forward schedules) or the current week (feed).
+  Unscheduled news (speeches, geopolitics) are never there. A news filter in a backtest shows what avoiding those
+  scheduled releases would have done, nothing more, and it does not prove an edge either way.
 - **Official calendar coverage**: beyond the weekly feed only official releases are known (no forecast or previous, no
   medium-impact data of other countries, no speeches). Coverage is per source, not per kind: a live copy hides the
   curated dates of every kind it lists up to the last entry of the whole calendar. Curated BLS fallbacks exist only

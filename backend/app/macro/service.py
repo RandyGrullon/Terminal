@@ -13,6 +13,7 @@ from typing import Any, Callable
 from app import config
 from app.macro import calendar as cal
 from app.macro import fomc
+from app.macro import history
 from app.macro import official as off
 from app.macro import schedules
 from app.macro.alerts import AlertTracker
@@ -30,6 +31,7 @@ FOMC_PAST_S = 2 * 86400
 FOMC_AHEAD_S = 400 * 86400
 STATUS_AHEAD_S = 60 * 86400
 OFFICIAL_LOG_S = 6 * 3600
+SCRIPT_EVENTS_MAX = 20000  # events handed to one PyChart run (≈3 years of every source fit well below)
 _NO_INFO_KINDS = frozenset({"global", "sim", "crypto", "forex", "us_equities"})
 
 
@@ -134,6 +136,27 @@ class MacroService:
         feed = self.cache["events"] if self.cache else []
         start, end = now - FOMC_PAST_S, now + ahead_s
         return cal.merge_extra(feed, fomc.fomc_events(start, end) + off.official_events(self.official, start, end))
+
+    def script_events(self, start_s: int, end_s: int) -> dict:
+        """Calendar for a PyChart run over [start_s, end_s] (the `noticias` API of app.scripting.runtime_news): the
+        weekly feed copy, the official calendars and the past official dates (history.py), merged like events().
+        Every event says whether it is «principal» (CPI, employment, FOMC: the kinds with continuous data from
+        history.from_s()); `from` / `until` bound that continuous coverage."""
+        start, end = int(start_s), int(end_s)
+        feed = [e for e in (self.cache["events"] if self.cache else []) if start <= int(e["time"]) <= end]
+        extra = (history.history_events(start, end) + fomc.fomc_events(start, end)
+                 + off.official_events(self.official, start, end))
+        out = []
+        for ev in cal.merge_extra(feed, extra)[:SCRIPT_EVENTS_MAX]:
+            kind, title = ev.get("kind"), str(ev.get("title") or "")
+            if kind is not None:
+                principal = kind in history.PRINCIPAL_KINDS
+            else:  # a weekly-feed copy stands in for the official release it duplicates
+                principal = ev.get("currency") == "USD" and any(cal.feed_matches(k, title) for k in history.PRINCIPAL_KINDS)
+            out.append({"time": int(ev["time"]), "title": str(ev.get("title_es") or title)[:120],
+                        "currency": str(ev.get("currency") or "")[:8], "impact": str(ev.get("impact") or "low"),
+                        "principal": bool(principal)})
+        return {"events": out, "from": history.from_s(), "until": history.until_s()}
 
     def coverage(self, now_s: int | None = None) -> dict:
         """Which source covers what (CalendarCoverage, optional field of GET /api/macro/calendar): the weekly feed

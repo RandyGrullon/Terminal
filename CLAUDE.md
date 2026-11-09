@@ -104,10 +104,12 @@ PostgreSQL local se vuelve muy lenta (miles de esquemas creados y borrados por l
     2 «Simulación» y 3 «NEXUS automática», que opera sola con un `AutoProfile` como el auto-trading;
     `autopilot_compare.py` la compara con entrar al azar con el método de la validación), escáner,
     evaluador de predicciones (habilidad frente a la referencia, repetición offline), backtest, simulador, Monte Carlo.
-  - `scripting/`: PyChart (validador AST, `worker.py` en subproceso aislado, `sandbox.py`).
+  - `scripting/`: PyChart (validador AST, `worker.py` en subproceso aislado, `sandbox.py`; `runtime_news.py` =
+    `noticias`, el calendario económico que el servidor pasa en el payload porque el worker no tiene red).
   - `macro/`: semáforo (calendario económico, FOMC, VIX, futuros, DXY, tipos, funding); `official.py` (ICS en vivo
     del BLS y del BEA), `schedules.py` (fechas fijas de BCE, BoE, BoJ, BLS y BEA hasta dic. 2027: actualízalas cada
-    año con fechas comprobadas en las páginas oficiales).
+    año con fechas comprobadas en las páginas oficiales), `history.py` (fechas oficiales pasadas de IPC, empleo y
+    FOMC desde feb. 2024, solo para `noticias` de PyChart).
   - `alerts/`: `AlertService`, `classify.py`, `policy.py` (deduplicado, límite por hora, horas de silencio),
     `channels.py` (Telegram y SMTP).
   - `validation/`: validación walk-forward (`walkforward.py`, `mechanics.py`, `stats.py`, `verdict.py`,

@@ -129,8 +129,10 @@ class ScriptContext:
         symbol: str = "",
         tf: str = "",
         stdout: OutputBuffer | None = None,
+        news: dict | None = None,
     ) -> None:
         self.bars = bars
+        self.news = news if isinstance(news, dict) else None  # economic calendar of the run (runtime_news)
         self.n = bars.n
         self.inputs = dict(inputs or {})
         self.symbol = str(symbol or "")
