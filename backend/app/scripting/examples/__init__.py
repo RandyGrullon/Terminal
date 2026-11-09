@@ -65,6 +65,20 @@ EXAMPLES: tuple[tuple[str, str, str], ...] = (
         "Ruptura del canal de Donchian (sistema tortuga) con stop inicial ATR, trailing ATR y salida por el "
         "canal corto.",
     ),
+    (
+        "sesiones_sydney_londres.py",
+        "Rangos de sesión: Sídney → Asia, Londres → NY",
+        "Marca el máximo y el mínimo de Sídney (para operar en Asia) y de Londres (para operar en Nueva York), las "
+        "rupturas y barridas de esos niveles y las noticias principales (IPC, empleo, Fed); resume el historial "
+        "como «x de n».",
+    ),
+    (
+        "estrategia_rangos_sesion.py",
+        "Rango de sesión: barrida o ruptura (estrategia)",
+        "Reglas fijas sobre el rango de Londres o de Sídney: vende o compra tras una barrida (reversión) o una "
+        "ruptura (continuación), con stop, objetivo, una operación por sesión, cierre al final de la ventana y "
+        "filtro de noticias (IPC, empleo, Fed).",
+    ),
 )
 
 

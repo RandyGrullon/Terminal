@@ -702,8 +702,10 @@ def run_payload(payload: dict) -> dict[str, Any]:
             return result
         inputs = payload.get("inputs")
         buffer = OutputBuffer()
+        news = payload.get("news")
         ctx = ScriptContext(_bars_from_payload(payload), inputs if isinstance(inputs, dict) else {},
-                            symbol=str(payload.get("symbol") or ""), tf=str(payload.get("tf") or ""), stdout=buffer)
+                            symbol=str(payload.get("symbol") or ""), tf=str(payload.get("tf") or ""), stdout=buffer,
+                            news=news if isinstance(news, dict) else None)
         namespace = build_namespace(ctx)
         registry = build_module_registry()
         printer = make_print(buffer)

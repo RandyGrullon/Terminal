@@ -34,6 +34,7 @@ from .runtime_base import (
     to_series,
 )
 from .runtime_metrics import bar_seconds
+from .runtime_news import NewsAPI
 from .runtime_plot import (
     ColorAPI,
     HLineAPI,
@@ -300,6 +301,7 @@ def build_namespace(ctx: ScriptContext) -> dict[str, Any]:
         "alertcondition": alertcondition_factory(ctx),
         "location": LocationAPI(),
         "shape": ShapeAPI(),
+        "noticias": NewsAPI(ctx),
         "syminfo": ReadOnlyNamespace("syminfo", tickerid=symbol, ticker=ticker or symbol, prefix=prefix),
         "timeframe": ReadOnlyNamespace(
             "timeframe",

@@ -35,6 +35,7 @@ WORKER_PATH = Path(__file__).resolve().with_name("worker.py")
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 SANDBOX_DIR = BACKEND_DIR / ".tmp" / "sandbox"
 MAX_BARS = 20_000
+MAX_NEWS_EVENTS = 20_000  # calendar events handed to one run (noticias)
 MAX_CONCURRENT = 4
 MIN_TIMEOUT_S = 0.5
 MAX_TIMEOUT_S = 60.0
@@ -108,6 +109,35 @@ def clean_candles(candles: Iterable[Any] | None) -> list[dict]:
         }
     rows = [by_time[t] for t in sorted(by_time)]
     return rows[-MAX_BARS:]
+
+
+def clean_news(news: Any) -> dict | None:
+    """Economic calendar of a run (``noticias`` in the script): plain JSON with bounded strings and at most
+    ``MAX_NEWS_EVENTS`` events; None when there is no calendar."""
+    if not isinstance(news, dict):
+        return None
+    events = []
+    for ev in news.get("events") or ():
+        if len(events) >= MAX_NEWS_EVENTS:
+            break
+        if not isinstance(ev, dict):
+            continue
+        ts = _num(ev.get("time"))
+        if ts is None:
+            continue
+        events.append({
+            "time": int(ts),
+            "title": str(ev.get("title") or "")[:120],
+            "currency": str(ev.get("currency") or "")[:8],
+            "impact": str(ev.get("impact") or "low")[:10],
+            "principal": bool(ev.get("principal")),
+        })
+
+    def bound(value: Any) -> int | None:
+        num = _num(value)
+        return int(num) if num is not None else None
+
+    return {"events": events, "from": bound(news.get("from")), "until": bound(news.get("until"))}
 
 
 def _worker_env() -> dict[str, str]:
@@ -418,9 +448,10 @@ def run_script(
     symbol: str = "",
     tf: str = "",
     timeout: float = 10.0,
+    news: dict | None = None,
 ) -> dict[str, Any]:
     """Validates and runs a PyChart script over ``candles``; returns a ScriptRunResult dict (never raises for
-    user errors)."""
+    user errors). ``news`` is the economic calendar for ``noticias`` (MacroService.script_events)."""
     started = time.perf_counter()
     try:
         limit = float(timeout)
@@ -449,6 +480,9 @@ def run_script(
             "symbol": str(symbol or ""),
             "tf": str(tf or ""),
         }
+        calendar = clean_news(news)
+        if calendar is not None:
+            payload["news"] = calendar
         result = execute_payload(payload, limit)
         if not result.get("ok"):
             result["meta"] = dict(compiled.get("meta") or result.get("meta") or {})

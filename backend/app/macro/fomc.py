@@ -69,6 +69,12 @@ def _event(kind: str, day: str, sep: bool) -> dict:
     }
 
 
+def meeting_event(kind: str, day: str, sep: bool) -> dict:
+    """Decision ('decision') or press conference ('press') event of a meeting decided on `day` (also used by
+    history.py for the past meetings that MEETINGS does not list)."""
+    return _event(kind, day, sep)
+
+
 def fomc_events(start_s: int | None = None, end_s: int | None = None) -> list[dict]:
     """Decision + press conference events of every scheduled meeting, optionally limited to [start_s, end_s]."""
     out: list[dict] = []

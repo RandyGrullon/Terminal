@@ -83,6 +83,14 @@ const STATIC: { section: string; items: [string, string][] }[] = [
     ],
   },
   {
+    section: 'Noticias',
+    items: [
+      ['noticias.cerca', '(antes=30, despues=30, eventos="principales", moneda="USD")'],
+      ['noticias.lista', '(eventos="principales", moneda="USD")'],
+      ['noticias.disponible', 'True si la ejecución tiene calendario'],
+    ],
+  },
+  {
     section: 'Estrategia',
     items: [
       ['strategy.entry', '(id, direction, when, qty_pct)'],
