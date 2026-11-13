@@ -488,6 +488,13 @@ async def paper_autopilot_compare(fresh: bool = False) -> dict:
     return clean_json(await paper.autopilot_comparison(fresh=fresh))
 
 
+@router.get("/api/paper/autopilot/journal")
+async def paper_autopilot_journal(fresh: bool = False) -> dict:
+    """AutopilotJournal: its closed trades by cause, session, regime, news, filter score, side and market."""
+    paper = _service("paper", "La cuenta demo")
+    return clean_json(await paper.autopilot_journal(fresh=fresh))
+
+
 @router.post("/api/paper/autopilot/reset")
 async def paper_autopilot_reset(req: ResetRequest | None = None) -> dict:
     paper = _service("paper", "La cuenta demo")

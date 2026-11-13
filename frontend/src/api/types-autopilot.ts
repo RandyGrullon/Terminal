@@ -104,6 +104,47 @@ export interface AutopilotCompareRandom {
   mean_r: number | null // mean of the per-trade references (R)
 }
 
+/** Verdict of a group of its closed trades: none · small (under 30) · unclear (no interval, or it includes 0) ·
+ *  loses / wins (the whole 95 % interval of the mean R below / above 0). */
+export type AutopilotJournalVerdict = 'none' | 'small' | 'unclear' | 'loses' | 'wins'
+
+/** One group of its closed trades (e.g. cause «En contra desde el principio», session «Londres»). */
+export interface AutopilotJournalBucket {
+  key: string
+  label: string
+  n: number // closed trades in the group
+  wins: number // winners: «wins de n»
+  mean_r: number | null // mean R, net of fees
+  ci95: [number, number] | null // 95 % interval of the mean R (bootstrap by day; none below 10 trades or 8 days)
+  verdict: AutopilotJournalVerdict
+  verdict_label: string
+}
+
+/** One way of grouping its trades: cause · session · regime · news · gate · side · market. */
+export interface AutopilotJournalGroup {
+  dimension: string
+  label: string
+  buckets: AutopilotJournalBucket[]
+}
+
+/** GET /api/paper/autopilot/journal[?fresh=true]: the journal of its closed trades (app.sim.journal). */
+export interface AutopilotJournal {
+  generated_at: number
+  trades: number
+  wins: number
+  mean_r: number | null
+  ci95: [number, number] | null
+  verdict: AutopilotJournalVerdict
+  verdict_label: string
+  mae_r_losers: number | null // mean adverse excursion of the losers (R)
+  mfe_r_losers: number | null // mean favourable excursion of the losers (R): how far they went right before losing
+  mae_r_winners: number | null
+  mfe_r_winners: number | null
+  groups: AutopilotJournalGroup[]
+  insights: string[] // plain-Spanish findings, «x de n»; nothing concluded below 30 trades
+  note: string
+}
+
 /** GET /api/paper/autopilot/compare[?fresh=true]: NEXUS automática against random entries in the same markets. */
 export interface AutopilotComparison {
   generated_at: number // ms

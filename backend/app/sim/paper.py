@@ -73,6 +73,8 @@ from app.engine.costs import asset_class, fee_pct_for
 from app.engine.levels import ev_hold
 from app.engine.nexus_current import EARLY_EV
 from app.engine.service_watch import gate_target_ms
+from app.sim import journal as J
+from app.validation.stats import seed_for as S_seed
 from app.sim import metrics as M
 from app.sim.common import (
     EXIT_LABEL,
@@ -117,6 +119,7 @@ AUTOPILOT_SETTLE_S = 0.5  # quiet time after autopilot.* settings change (saved 
 AUTOPILOT_STATE_KEY = "autopilot.state"  # meta: its decision log and last read per symbol (kept across restarts)
 AUTOPILOT_KINDS = ("open", "close", "skip", "info")
 COMPARE_TTL_S = 300.0  # its comparison with random entries is recomputed at most every 5 min (new outcomes come in)
+JOURNAL_LIMIT = 500  # newest closed trades its journal analyses
 AUTOPILOT_NOTE = (
     "Cuenta 100 % simulada que opera sola con las señales de NEXUS y el filtro; nunca se envía nada a un bróker. "
     "La validación publicada (docs/VALIDATION.md) no encontró ventaja: lo esperable son resultados parecidos a "
@@ -619,6 +622,7 @@ class PaperEngine:
         self._autopilot_saving = False
         self._compare_cache: tuple[tuple[int, int], float, dict[str, Any]] | None = None
         self._compare_lock = asyncio.Lock()
+        self._journal_cache: tuple[tuple[int, int], float, dict[str, Any]] | None = None
         self._stale_warned: set[str] = set()  # symbols whose "sin precio en vivo" warning was already emitted
         # pending orders (account 1): id -> order dict; ids whose fill is being decided (gate at the fill price)
         self._orders: dict[int, dict] = {}
@@ -1440,6 +1444,7 @@ class PaperEngine:
         contracts: bool = False,
         margin_pct: float | None = None,
         instrument: dict | None = None,
+        context: dict | None = None,
     ) -> dict:
         """Open a paper position. Returns {"position": Position, "gate": GateResult | None}.
 
@@ -1450,7 +1455,8 @@ class PaperEngine:
         rule 'max_positions'): bars of several symbols close at once and their decisions run concurrently.
         `instrument`: an option's contract (NEXUS's own account, kind 'option', see _option_plan): `qty` = contracts
         × 100 and `price` = its theoretical premium; levels on the premium, whole contracts under the exposure cap,
-        and its gate decision logged on the underlying."""
+        and its gate decision logged on the underlying. `context`: what NEXUS saw at the entry (its trader's
+        regime, score and the gate's score), kept in meta.context for its journal (app.sim.journal)."""
         side = _norm_side(side)
         symbol = str(symbol or "").strip().upper()
         if not symbol:
@@ -1546,6 +1552,9 @@ class PaperEngine:
             "gate_summary": gate.get("summary") if gate else None,
             "forced": bool(force and gate is not None and gate.get("verdict") == "AVOID"),
         }
+        if isinstance(context, dict):  # for its journal: the volatility of the market at the entry, % of the price
+            meta["context"] = {**context, "atr_pct": (round(atr / fill * 100.0, 4) if atr and fill > 0 and not option
+                                                      else None)}
         if order is not None:
             meta.update({"order_id": order["id"], "order_kind": order["kind"], "order_price": order["price"]})
         verdict = gate.get("verdict") if gate else None
@@ -2175,6 +2184,11 @@ class PaperEngine:
             pos["pnl_pct"] = net / notional * 100.0 if notional > 0 else 0.0
             # net of entry + exit fees, like the engine's and the backtest's R (same sign as the P&L)
             pos["r_multiple"] = net / (pos["qty"] * risk_unit) if risk_unit > 0 and pos["qty"] > 0 else None
+            # its journal: how far it went against / in favour (R) and why it ended so (app.sim.journal)
+            meta["journal"] = J.close_entry(
+                side=pos["side"], entry=pos["entry_price"], risk_unit=risk_unit, high_water=meta.get("high_water"),
+                low_water=meta.get("low_water"), exit_price=pos["exit_price"], r=pos.get("r_multiple"),
+                reason=pos["exit_reason"], entry_time=pos["entry_time"], exit_time=pos["exit_time"])
         async with self.rt.db.transaction() as tx:
             if rows:
                 await tx.executemany(
@@ -2642,6 +2656,11 @@ class PaperEngine:
                 # a stock or fund may be traded with an option (autopilot.stock_instrument): a call or a put
                 plan: dict[str, Any] | None = None
                 what = SIDE_LABEL[side]
+                # what NEXUS saw on this bar, for the journal of its trades
+                context = {"regime": str(current.get("regime") or "") or None,
+                           "score": safe_float(current.get("score")), "prob_up": safe_float(current.get("prob_up")),
+                           "gate_score": safe_float(gate.get("score")),
+                           "win_prob": safe_float(gate.get("win_prob"))} if own else None
                 if cfg is not None and self._uses_options(cfg, symbol, side):
                     what = "Call" if side == "long" else "Put"
                 try:
@@ -2651,13 +2670,15 @@ class PaperEngine:
                             acct, plan["symbol"], "long", tf, qty=plan["qty"], sl=plan["sl"], tps=plan["tps"],
                             price=plan["premium"], origin=prof.origin, gate=gate, check_gate=False,
                             risk_pct=prof.risk_pct, max_positions=prof.max_positions or None,
-                            max_exposure_pct=cfg["max_exposure_pct"] or None, instrument=plan["instrument"])
+                            max_exposure_pct=cfg["max_exposure_pct"] or None, instrument=plan["instrument"],
+                            context=context)
                     else:
                         res = await self.open_position(
                             acct, symbol, side, tf, origin=prof.origin, gate=gate, check_gate=False,
                             risk_pct=prof.risk_pct, max_positions=prof.max_positions or None,
                             max_exposure_pct=(cfg["max_exposure_pct"] or None) if cfg is not None else None,
-                            contracts=cfg is not None, margin_pct=cfg["futures_margin_pct"] if cfg is not None else None)
+                            contracts=cfg is not None, margin_pct=cfg["futures_margin_pct"] if cfg is not None else None,
+                            context=context)
                 except PaperRiskBlocked as blk:  # no option fits / lost the race for the last free slot / risk room
                     if self._log.should_log(f"auto-risk:{acct}:{symbol}:{blk.rule}", 3600):
                         self._emit("info", "paper", f"{prof.label}: {symbol} {what} descartado: {blk.message}")
@@ -3173,6 +3194,38 @@ class PaperEngine:
                                                      slippage_pct=self._slip_pct())
             self._compare_cache = (key, time.monotonic(), result)
             return result
+
+    async def autopilot_journal(self, *, fresh: bool = False) -> dict[str, Any]:
+        """AutopilotJournal: its newest JOURNAL_LIMIT closed trades grouped by cause, session, regime, news, filter
+        score, side and market (app.sim.journal). Cached until a trade closes or COMPARE_TTL_S passes."""
+        rows = await self.rt.db.fetchall(
+            "SELECT id, symbol, side, entry_price, entry_time, exit_price, exit_time, exit_reason, r_multiple, "
+            "gate_score, meta FROM paper_positions WHERE account_id=? AND status='closed' AND origin='autopilot' "
+            "AND r_multiple IS NOT NULL ORDER BY id DESC LIMIT ?", (AUTOPILOT_ACCOUNT, JOURNAL_LIMIT))
+        key = (len(rows), max((int(r["id"]) for r in rows), default=0))
+        c = self._journal_cache
+        if not fresh and c is not None and c[0] == key and time.monotonic() - c[1] < COMPARE_TTL_S:
+            return c[2]
+        trades = []
+        for row in rows:
+            meta = json_loads(row.get("meta"), {}) or {}
+            meta = meta if isinstance(meta, dict) else {}
+            journal = meta.get("journal")
+            if not isinstance(journal, dict):  # closed before the journal existed: from its water marks
+                journal = J.close_entry(
+                    side=row["side"], entry=row["entry_price"], risk_unit=meta.get("risk_unit"),
+                    high_water=meta.get("high_water"), low_water=meta.get("low_water"), exit_price=row["exit_price"],
+                    r=row["r_multiple"], reason=row["exit_reason"], entry_time=row["entry_time"],
+                    exit_time=row["exit_time"])
+            trades.append({"r": row["r_multiple"], "side": row["side"], "symbol": row["symbol"],
+                           "entry_time": row["entry_time"], "exit_time": row["exit_time"],
+                           "exit_reason": row["exit_reason"], "gate_score": row.get("gate_score"),
+                           "context": meta.get("context") if isinstance(meta.get("context"), dict) else None,
+                           "journal": journal, "instrument": meta.get("instrument")})
+        result = await asyncio.to_thread(J.analyze, trades, seed=S_seed("journal", len(trades)))
+        result["generated_at"] = now_ms()
+        self._journal_cache = (key, time.monotonic(), result)
+        return result
 
     async def close_autopilot(self, position_id: int | None = None, all: bool = False, *,
                               symbol: str | None = None) -> list[dict]:

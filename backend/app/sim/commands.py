@@ -573,6 +573,7 @@ _AP_CLOSE = ("close", "cerrar")
 _AP_RESET = ("reset", "reiniciar")
 _AP_ALERTS = ("avisos", "alertas", "alerts")
 _AP_COMPARE = ("azar", "comparar", "referencia")
+_AP_JOURNAL = ("diario", "errores", "patrones", "journal")
 _AP_KIND = {"open": ("Abre", "success"), "close": ("Cierra", "info"), "skip": ("Descarta", "muted"),
             "info": ("Nota", "info")}
 # --instrumento: how it trades stocks and funds (autopilot.stock_instrument)
@@ -581,7 +582,7 @@ _AP_INSTRUMENTS = {"auto": "auto", "nexus": "auto", "acciones": "shares", "share
 AUTOPILOT_USAGE = ("autopilot [on|off] [lista <símbolos…> | escaner [N] | ambos [N]] [--tf 1h] [--max 5] [--risk 1] "
                    "[--top 10] [--expo 100] [--freno 20] [--margen 50] [--instrumento auto|acciones|opciones] "
                    "[--prima 10] · "
-                   "autopilot pos | log | azar | avisos on|off | close <id|símbolo|all> | reset [saldo] --yes")
+                   "autopilot pos | log | azar | diario | avisos on|off | close <id|símbolo|all> | reset [saldo] --yes")
 
 
 def _ap_when(ctx: CommandContext, ms: Any) -> str:
@@ -780,6 +781,26 @@ async def _autopilot(ctx: CommandContext) -> None:
                       + ("día" if c["days"] == 1 else "días"), "info")
         ctx.print(c["note"], "muted")
         ctx.data = c
+        return
+
+    if sub in _AP_JOURNAL:
+        j = await paper.autopilot_journal(fresh=bool(ctx.flag("fresh", False)))
+        ctx.print(f"Diario de NEXUS automática · {j['verdict_label']}", "system")
+        if j["trades"]:
+            ci = j.get("ci95")
+            ctx.print(f"{j['wins']} de {j['trades']} ganadoras · R medio {fmt_r(j['mean_r'], 2)} · IC 95 %: "
+                      + (f"{fmt_r(ci[0], 2)} a {fmt_r(ci[1], 2)}" if ci else "sin intervalo"), "info")
+        for line in j["insights"]:
+            ctx.print("• " + line, "info")
+        for g in j["groups"]:
+            if not g["buckets"]:
+                continue
+            ctx.print(g["label"], "system")
+            ctx.table(["", "Ganadoras", "R medio", "Veredicto"], [
+                [b["label"], f"{b['wins']} de {b['n']}", fmt_r(b["mean_r"], 2), b["verdict_label"]]
+                for b in g["buckets"]])
+        ctx.print(j["note"], "muted")
+        ctx.data = j
         return
 
     if sub in _AP_ALERTS:

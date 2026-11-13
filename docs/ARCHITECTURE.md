@@ -671,6 +671,7 @@ POST /api/paper/reset {initial_balance?} -> PaperSnapshot
 POST /api/paper/auto {enabled, symbols?, tf?} -> {auto: {enabled, symbols, tf}}
 GET  /api/paper/autopilot                   -> AutopilotSnapshot (account 3, "NEXUS automática")
 GET  /api/paper/autopilot/compare?fresh=     -> AutopilotComparison (vs random entries; cached, fresh = recompute)
+GET  /api/paper/autopilot/journal?fresh=     -> AutopilotJournal (its trade journal; cached, fresh = recompute)
 POST /api/paper/autopilot {enabled?, source?: scanner|list|both, symbols?, tf?, max_positions?, risk_pct?,
                            scanner_top?, alerts?, max_exposure_pct?, max_drawdown_pct?, futures_margin_pct?,
                            stock_instrument?: auto|shares|options, options_premium_pct?}
@@ -1223,6 +1224,24 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     days before its expiry with a live price of the stock, or settles it at its intrinsic value with the last known
     price once the expiry passed (reason `EXPIRY`). Its gate decision goes to gate_log on the underlying with the
     gate's own levels. The comparison with random entries leaves options out (their R is on a theoretical premium).
+  - **Journal of NEXUS automática** (`app.sim.journal`, `autopilot_journal()`, `GET /api/paper/autopilot/journal`,
+    terminal `autopilot diario`): when its trader opens, `open_position(context=)` keeps in `meta.context` what NEXUS
+    saw on that bar (regime, score, P(up), the gate's score and win probability; `atr_pct` = ATR % of the fill, none
+    for an option); every close stores `meta.journal` (`close_entry`: MAE / MFE in R from the water marks and the exit
+    price, the cause — objetivo, parcial_equilibrio, stop_dinamico, salida_nexus_ganancia, en_contra (< 0.25R in its
+    favour), stop_tras_favor, devolvio (≥ 1R in its favour, then ≤ 0), salida_nexus_perdida, vencimiento, manual,
+    otra — and the time held). `analyze` groups its newest 500 closed trades by cause, entry session (New York time:
+    Asia 18–3 h, Londres 3–8 h, Nueva York 8–17 h, 17–18 h between sessions, Friday 17 h – Sunday 18 h weekend),
+    regime, news (an entry within ±60 min of a principal US release: CPI, employment report, FOMC decision or press
+    conference, from app.macro.history and the forward schedules; none outside their coverage), gate score (≥ 80,
+    70–79, < 70), direction (an option: its bet on the stock) and market. Each group and the total: «wins de n», mean
+    R, `ci95` (block bootstrap by UTC day of the exit; none below 10 trades or 8 days) and a verdict: none · small (<
+    30) · unclear · loses / wins (the whole interval below / above 0; «Negativo / Positivo con evidencia»), plus mean
+    excursions and up to 6 plain-Spanish `insights`. Older trades without `meta.journal` get it from their water
+    marks; without `meta.context` their regime is «Sin datos». Cached like the comparison. `AutopilotJournal
+    {generated_at, trades, wins, mean_r, ci95, verdict, verdict_label, mae_r_losers, mfe_r_losers, mae_r_winners,
+    mfe_r_winners, groups: AutopilotJournalGroup[] {dimension, label, buckets: AutopilotJournalBucket[] {key, label,
+    n, wins, mean_r, ci95, verdict, verdict_label}}, insights, note}`.
   - **NEXUS automática against random entries** (`app.sim.autopilot_compare`, `autopilot_comparison()`, `GET
     /api/paper/autopilot/compare`, terminal `autopilot azar`): the newest 200 closed trades of account 3 (origin
     `autopilot`). Each trade's decision bar = the last bar closed at its entry; its reference = the mean R of the

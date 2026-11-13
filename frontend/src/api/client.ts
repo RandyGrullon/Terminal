@@ -6,6 +6,7 @@ import { authEnabled, currentSession, ensureFreshSession, getAccessToken, refres
 import { apiUrl } from '../lib/config'
 import type {
   AutopilotComparison,
+  AutopilotJournal,
   AutopilotSnapshot,
   AutopilotUpdate,
   BacktestResult,
@@ -289,6 +290,7 @@ export const api = {
       close: (body: { position_id?: number; all?: boolean }) => post<AutopilotSnapshot>('/api/paper/autopilot/close', body),
       // Against random entries in the same markets (computed on demand, cached by the server; fresh = recompute)
       compare: (fresh = false) => get<AutopilotComparison>('/api/paper/autopilot/compare', fresh ? { fresh: true } : undefined),
+      journal: (fresh = false) => get<AutopilotJournal>('/api/paper/autopilot/journal', fresh ? { fresh: true } : undefined),
     },
   },
 

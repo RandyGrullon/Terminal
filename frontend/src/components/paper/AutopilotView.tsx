@@ -5,11 +5,14 @@
 // {type: 'paper_autopilot'} (the user's {type: 'paper'} messages are account 1 and never feed this view); a GET every
 // 30 s while the page is visible is the fallback.
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { Bot, Info, Radar, RefreshCw, RotateCcw, Scale, ScrollText, SlidersHorizontal, TriangleAlert, Wallet, X } from 'lucide-react'
+import { BookOpen, Bot, Info, Radar, RefreshCw, RotateCcw, Scale, ScrollText, SlidersHorizontal, TriangleAlert, Wallet, X } from 'lucide-react'
 import { api, errorMessage } from '../../api/client'
 import type {
   AutopilotBrake,
   AutopilotComparison,
+  AutopilotJournal,
+  AutopilotJournalBucket,
+  AutopilotJournalVerdict,
   AutopilotLast,
   AutopilotLogEntry,
   AutopilotScan,
@@ -204,6 +207,122 @@ export function normalizeComparison(raw: unknown): AutopilotComparison | null {
     text: o.text,
     note: isStr(o.note) ? o.note : '',
   }
+}
+
+const JOURNAL_VERDICTS: AutopilotJournalVerdict[] = ['none', 'small', 'unclear', 'loses', 'wins']
+const JOURNAL_TONE: Record<AutopilotJournalVerdict, Tone> = { none: 'muted', small: 'muted', unclear: 'muted', loses: 'neg', wins: 'accent' }
+
+function pair(v: unknown): [number, number] | null {
+  return Array.isArray(v) && v.length === 2 && isNum(v[0]) && isNum(v[1]) ? [v[0], v[1]] : null
+}
+
+function journalVerdict(v: unknown): AutopilotJournalVerdict {
+  return JOURNAL_VERDICTS.find((x) => x === v) ?? 'none'
+}
+
+/** Defensive parse of an AutopilotJournal: null without its counts and texts. */
+export function normalizeJournal(raw: unknown): AutopilotJournal | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  if (!isNum(o.trades) || !Array.isArray(o.groups) || !isStr(o.verdict_label)) return null
+  const int = (v: unknown) => Math.max(0, Math.round(numOr(v, 0)))
+  const opt = (v: unknown) => (isNum(v) ? v : null)
+  const bucket = (b: unknown): AutopilotJournalBucket | null => {
+    if (!b || typeof b !== 'object') return null
+    const x = b as Record<string, unknown>
+    if (!isStr(x.key) || !isStr(x.label)) return null
+    const verdict = journalVerdict(x.verdict)
+    return { key: x.key, label: x.label, n: int(x.n), wins: int(x.wins), mean_r: opt(x.mean_r), ci95: pair(x.ci95), verdict,
+      verdict_label: isStr(x.verdict_label) ? x.verdict_label : '' }
+  }
+  const groups = o.groups
+    .map((g) => {
+      if (!g || typeof g !== 'object') return null
+      const x = g as Record<string, unknown>
+      if (!isStr(x.dimension) || !isStr(x.label) || !Array.isArray(x.buckets)) return null
+      return { dimension: x.dimension, label: x.label,
+        buckets: x.buckets.map(bucket).filter((b): b is AutopilotJournalBucket => b !== null) }
+    })
+    .filter((g): g is AutopilotJournal['groups'][number] => g !== null)
+  return {
+    generated_at: numOr(o.generated_at, 0), trades: int(o.trades), wins: int(o.wins), mean_r: opt(o.mean_r), ci95: pair(o.ci95),
+    verdict: journalVerdict(o.verdict), verdict_label: o.verdict_label, mae_r_losers: opt(o.mae_r_losers),
+    mfe_r_losers: opt(o.mfe_r_losers), mae_r_winners: opt(o.mae_r_winners), mfe_r_winners: opt(o.mfe_r_winners),
+    groups, insights: Array.isArray(o.insights) ? o.insights.filter(isStr) : [], note: isStr(o.note) ? o.note : '',
+  }
+}
+
+/** «Diario de operaciones»: what its trades have in common (cause, session, regime, news…), «x de n» and the mean R,
+ *  with the backend's verdicts verbatim (nothing concluded below 30 trades). */
+export function JournalCard({ journal, loading, error, onRefresh }: { journal: AutopilotJournal | null; loading: boolean; error: string | null; onRefresh: () => void }) {
+  return (
+    <Card
+      title={
+        <>
+          <BookOpen size={14} /> Diario de operaciones {journal && <Badge tone={JOURNAL_TONE[journal.verdict]}>{journal.verdict_label}</Badge>}
+        </>
+      }
+      sub="Qué tienen en común sus operaciones: causa, sesión, régimen, noticias, filtro y mercado"
+      actions={
+        <Button size="sm" variant="ghost" icon={<RefreshCw size={13} />} onClick={onRefresh} loading={loading} title="Volver a analizar sus operaciones cerradas">
+          Recalcular
+        </Button>
+      }
+    >
+      {error && <ErrorBox error={error} onRetry={onRefresh} />}
+      {!journal ? (
+        !error && <Loading label="Analizando sus operaciones…" />
+      ) : (
+        <div className="col gap-2">
+          {journal.trades > 0 && (
+            <div className="small">
+              {fmtInt(journal.wins)} de {fmtInt(journal.trades)} ganadoras · R medio {fmtR(journal.mean_r)}
+              {journal.ci95 ? ` · IC 95 %: ${fmtR(journal.ci95[0])} a ${fmtR(journal.ci95[1])}` : ''}
+            </div>
+          )}
+          {journal.insights.length > 0 && (
+            <ul className="ap-rules small">
+              {journal.insights.map((t) => (
+                <li key={t}>{t}</li>
+              ))}
+            </ul>
+          )}
+          {journal.trades > 0 &&
+            journal.groups
+              .filter((g) => g.buckets.length > 0)
+              .map((g) => (
+                <div key={g.dimension} className="table-wrap">
+                  <table className="table ap-table">
+                    <thead>
+                      <tr>
+                        <th>{g.label}</th>
+                        <th>Ganadoras</th>
+                        <th>R medio</th>
+                        <th>Veredicto</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {g.buckets.map((b) => (
+                        <tr key={b.key}>
+                          <td>{b.label}</td>
+                          <td>
+                            {fmtInt(b.wins)} de {fmtInt(b.n)}
+                          </td>
+                          <td className="mono">{fmtR(b.mean_r)}</td>
+                          <td>
+                            <Badge tone={JOURNAL_TONE[b.verdict]}>{b.verdict_label}</Badge>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+          <div className="tiny muted">{journal.note}</div>
+        </div>
+      )}
+    </Card>
+  )
 }
 
 const VERDICT_TONE: Record<AutopilotComparison['verdict'], Tone> = {
@@ -999,6 +1118,10 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
   const [cmpLoading, setCmpLoading] = useState(false)
   const [cmpError, setCmpError] = useState<string | null>(null)
   const cmpSeq = useRef(0)
+  const [journal, setJournal] = useState<AutopilotJournal | null>(null)
+  const [journalLoading, setJournalLoading] = useState(false)
+  const [journalError, setJournalError] = useState<string | null>(null)
+  const journalSeq = useRef(0)
 
   useEffect(() => {
     alive.current = true
@@ -1167,10 +1290,29 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
       if (alive.current && id === cmpSeq.current) setCmpLoading(false)
     }
   }, [])
+  // Its journal: on open, whenever a trade closes, and on demand ("Recalcular")
+  const loadJournal = useCallback(async (fresh: boolean) => {
+    const id = ++journalSeq.current
+    setJournalLoading(true)
+    try {
+      const j = normalizeJournal(await api.paper.autopilot.journal(fresh))
+      if (!alive.current || id !== journalSeq.current) return
+      if (!j) throw new Error('Respuesta del diario no válida')
+      setJournal(j)
+      setJournalError(null)
+    } catch (err) {
+      if (alive.current && id === journalSeq.current) setJournalError(errorMessage(err))
+    } finally {
+      if (alive.current && id === journalSeq.current) setJournalLoading(false)
+    }
+  }, [])
   const closedCount = snap ? snap.account.trades : null
   useEffect(() => {
-    if (closedCount !== null) void loadCmp(false)
-  }, [closedCount, loadCmp])
+    if (closedCount !== null) {
+      void loadCmp(false)
+      void loadJournal(false)
+    }
+  }, [closedCount, loadCmp, loadJournal])
   const wide = useMediaQuery('(min-width: 1700px)')
 
   // ------------------------------------------------------------------ blocks
@@ -1222,6 +1364,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
   )
 
   const compareCard = <CompareCard cmp={cmp} loading={cmpLoading} error={cmpError} onRefresh={() => void loadCmp(true)} />
+  const journalCard = <JournalCard journal={journal} loading={journalLoading} error={journalError} onRefresh={() => void loadJournal(true)} />
   const controls = status ? <AutopilotControls status={status} saving={saving} error={saveError} onSave={save} /> : null
   const moneyCard = status ? <MoneyCard status={status} dailyLossPct={snap?.risk?.daily_loss_limit_pct ?? null} /> : null
   const watchCard = status ? <WatchCard status={status} onOpenChart={openSymbol} /> : null
@@ -1279,6 +1422,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
               <div className="pp-main">
                 {positionsCard}
                 {compareCard}
+                {journalCard}
                 {logCard}
                 {historyCard}
               </div>
@@ -1293,6 +1437,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
             <>
               {positionsCard}
               {compareCard}
+              {journalCard}
               <div className="ap-cols">
                 <div className="ap-col">
                   {controls}

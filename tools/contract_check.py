@@ -404,6 +404,13 @@ def main() -> int:
         check_obj(rep, ifaces, "AutopilotComparison", d, "paper.autopilot.compare")
         check_obj(rep, ifaces, "AutopilotCompareNexus", d.get("nexus"), "paper.autopilot.compare.nexus")
         check_obj(rep, ifaces, "AutopilotCompareRandom", d.get("random"), "paper.autopilot.compare.random")
+    d = call("GET", "/api/paper/autopilot/journal")  # its trade journal (a computation, read-only)
+    if d:
+        check_obj(rep, ifaces, "AutopilotJournal", d, "paper.autopilot.journal")
+        for g in (d.get("groups") or [])[:2]:
+            check_obj(rep, ifaces, "AutopilotJournalGroup", g, "paper.autopilot.journal.group")
+            if g.get("buckets"):
+                check_list(rep, ifaces, "AutopilotJournalBucket", g["buckets"], "paper.autopilot.journal.bucket", 2)
     d = call("GET", "/api/scanner/runs")
     if d:
         check_list(rep, ifaces, "ScanRun", d.get("runs"), "scanner.runs", 1)

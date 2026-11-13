@@ -47,8 +47,10 @@ export {
   emptyWatchText,
   CompareCard,
   compareInterval,
+  JournalCard,
   normalizeAutopilot,
   normalizeComparison,
+  normalizeJournal,
   normalizeLast,
   subscribeAutopilot,
   validateDraft,
@@ -180,6 +182,13 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
     'verdict_label', 'text', 'note',
   ])
   assert.deepEqual(t.AutopilotCompareNexus, ['n', 'wins', 'mean_r'])
+  assert.deepEqual(t.AutopilotJournal, [
+    'generated_at', 'trades', 'wins', 'mean_r', 'ci95', 'verdict', 'verdict_label', 'mae_r_losers', 'mfe_r_losers',
+    'mae_r_winners', 'mfe_r_winners', 'groups', 'insights', 'note',
+  ])
+  assert.deepEqual(t.AutopilotJournalGroup, ['dimension', 'label', 'buckets'])
+  assert.deepEqual(t.AutopilotJournalBucket, ['key', 'label', 'n', 'wins', 'mean_r', 'ci95', 'verdict', 'verdict_label'])
+  assert.match(src, /export type AutopilotJournalVerdict = 'none' \| 'small' \| 'unclear' \| 'loses' \| 'wins'/)
   assert.deepEqual(t.AutopilotCompareRandom, ['entries', 'wins', 'mean_r'])
   assert.match(src, /export type AutopilotVerdict = 'none' \| 'insufficient' \| 'no_edge' \| 'better' \| 'worse'/)
   assert.deepEqual(t.AutopilotLogEntry, ['ts', 'symbol', 'kind', 'text'])
@@ -233,6 +242,27 @@ test('client: api.paper.autopilot calls its four routes with only the given fiel
   assert.equal(new URL(seen[8].url, 'http://localhost').searchParams.get('fresh'), 'true')
 })
 
+function journal(over = {}) {
+  return {
+    generated_at: NOW, trades: 7, wins: 3, mean_r: -0.12, ci95: null, verdict: 'small', verdict_label: 'Muestra pequeña',
+    mae_r_losers: 0.9, mfe_r_losers: 0.3, mae_r_winners: 0.4, mfe_r_winners: 1.8,
+    groups: [
+      { dimension: 'cause', label: 'Causa', buckets: [
+        { key: 'en_contra', label: 'En contra desde el principio', n: 3, wins: 0, mean_r: -1.05, ci95: null, verdict: 'small', verdict_label: 'Muestra pequeña' },
+        { key: 'objetivo', label: 'Llegó a su objetivo', n: 3, wins: 3, mean_r: 1.4, ci95: null, verdict: 'small', verdict_label: 'Muestra pequeña' },
+      ] },
+      { dimension: 'session', label: 'Sesión de entrada', buckets: [
+        { key: 'londres', label: 'Londres (3–8 h)', n: 7, wins: 3, mean_r: -0.12, ci95: null, verdict: 'small', verdict_label: 'Muestra pequeña' },
+      ] },
+      { dimension: 'regime', label: 'Régimen de NEXUS', buckets: [] },
+    ],
+    insights: ['Con 7 operaciones cerradas todavía no se puede concluir nada: hacen falta al menos 30.',
+      '3 de 4 pérdidas: «En contra desde el principio».'],
+    note: 'Diario de las operaciones cerradas de NEXUS automática (simuladas). Describe lo que pasó: no garantiza lo que pasará.',
+    ...over,
+  }
+}
+
 function comparison(over = {}) {
   return {
     generated_at: NOW, window_bars: 48, trades: 12, compared: 11, missing: 1, days: 6,
@@ -283,6 +313,28 @@ test('money management: its own rules and numbers, never a promise; the brake no
   assert.equal(render(M.BrakeNotice, { brake: { limit_pct: 20, drawdown_pct: 5, active: false } }), '')
   const on = render(M.BrakeNotice, { brake: { limit_pct: 20, drawdown_pct: 24.5, active: true } })
   assert.ok(on.includes('Freno de pérdidas activo') && on.includes('24,5 %') && on.includes('Reiníciala o cambia el freno'), on)
+})
+
+test('journal: «x de n» per cause and session, the backend verdicts and findings verbatim, empty groups hidden', () => {
+  const html = render(M.JournalCard, { journal: M.normalizeJournal(journal()), loading: false, error: null, onRefresh: noop })
+  assert.ok(html.includes('Diario de operaciones') && html.includes('>Muestra pequeña<'), html)
+  assert.ok(html.includes('3 de 7 ganadoras') && html.includes('R medio -0,12R'), html)
+  assert.ok(html.includes('En contra desde el principio') && html.includes('0 de 3') && html.includes('Londres (3–8 h)'), html)
+  assert.ok(html.includes('hacen falta al menos 30') && html.includes('3 de 4 pérdidas'), html)
+  assert.ok(!html.includes('Régimen de NEXUS'), 'a group without trades is not drawn')
+  assert.ok(html.includes('no garantiza lo que pasará'), 'the note is shown')
+  assert.ok(!/% acierto|% de acierto/.test(html), 'never a bare hit rate')
+  const loses = M.normalizeJournal(journal({ trades: 40, verdict: 'loses', verdict_label: 'Negativo con evidencia', ci95: [-0.4, -0.05] }))
+  const card = render(M.JournalCard, { journal: loses, loading: false, error: null, onRefresh: noop })
+  assert.ok(card.includes('IC 95 %: -0,40R a -0,05R') && card.includes('Negativo con evidencia'), card)
+  const empty = render(M.JournalCard, { journal: M.normalizeJournal(journal({ trades: 0, wins: 0, mean_r: null, verdict: 'none',
+    verdict_label: 'Sin operaciones', insights: ['Aún no hay operaciones cerradas de NEXUS automática que analizar.'] })),
+  loading: false, error: null, onRefresh: noop })
+  assert.ok(empty.includes('Aún no hay operaciones cerradas') && !empty.includes('<table'), empty)
+  assert.equal(M.normalizeJournal({ trades: 'x' }), null)
+  assert.equal(M.normalizeJournal(journal({ verdict: 'great' })).verdict, 'none')
+  const waiting = render(M.JournalCard, { journal: null, loading: true, error: null, onRefresh: noop })
+  assert.ok(waiting.includes('Analizando sus operaciones'))
 })
 
 test('vs random entries: the backend verdict and note verbatim, "x de n", the interval only when it means something', () => {

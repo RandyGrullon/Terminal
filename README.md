@@ -266,6 +266,13 @@ que la actives en «Cómo opera»:
   en la que las abrió, y no abre una segunda posición en esos símbolos.
 - Puedes **pausarla** (no abre nada nuevo; sus posiciones siguen con su stop y sus objetivos), cerrar sus posiciones
   a mano o **reiniciarla** con otro saldo.
+- **Diario de operaciones**: al abrir guarda lo que vio NEXUS (régimen, puntuación del filtro) y al cerrar cuánto fue
+  a favor y en contra y por qué terminó así («En contra desde el principio», «Ganaba 1R o más y lo devolvió»,
+  «Llegó a su objetivo»…). Su tarjeta agrupa las operaciones por causa, sesión (Asia, Londres, Nueva York, fin de
+  semana), régimen, noticias de EE. UU. cerca (IPC, empleo, Fed), puntuación del filtro, dirección y mercado, como
+  «x de n» con el R medio, y resume lo más llamativo. Solo califica un grupo con 30 operaciones o más y cuando su
+  intervalo del 95 % no incluye el cero: describe lo que pasó, no garantiza lo que pasará. En la terminal:
+  `autopilot diario`.
 - **Frente a entrar al azar**: su tarjeta compara cada operación cerrada con entradas al azar, en largo y en corto,
   en las 48 velas anteriores a su decisión y en el mismo mercado, con los niveles por defecto y las salidas mecánicas
   de NEXUS, comisiones y deslizamiento (el método de la validación publicada). Muestra las ganadoras como «x de n», la
