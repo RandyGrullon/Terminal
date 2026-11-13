@@ -415,6 +415,12 @@ def main() -> int:
     d = call("GET", "/api/ai/status")  # the local copilot (off by default: Ollama is not called; chat never is)
     if d:
         check_obj(rep, ifaces, "AIStatus", d, "ai.status")
+    d = call("GET", "/api/broker/status")  # practice-broker mirror (off by default: Alpaca is not called; sync never)
+    if d:
+        check_obj(rep, ifaces, "BrokerStatus", d, "broker.status")
+        check_obj(rep, ifaces, "BrokerStats", d.get("stats"), "broker.status.stats")
+        if d.get("entries"):
+            check_list(rep, ifaces, "BrokerMirrorEntry", d.get("entries"), "broker.status.entries")
     d = call("GET", "/api/paper/autopilot/journal")  # its trade journal (a computation, read-only)
     if d:
         check_obj(rep, ifaces, "AutopilotJournal", d, "paper.autopilot.journal")

@@ -24,6 +24,7 @@ export const SERVICE_LABEL: Record<string, string> = {
   alerts: 'Alertas externas',
   validation: 'Validación walk-forward',
   ai: 'Copiloto IA (Ollama)',
+  broker: 'Espejo en Alpaca (práctica)',
   auth: 'Autenticación',
 }
 

@@ -8,14 +8,15 @@ módulo) está en `docs/ARCHITECTURE.md`, que es la fuente de verdad. Guía de u
 
 Terminal local de investigación de trading, **solo simulación / papel**: FastAPI (Python) + React/TypeScript. Gráficos
 de cualquier activo de TradingView, motor autoadaptativo NEXUS (comprar / vender / mantener, niveles «hasta aquí»,
-salidas anticipadas), filtro «¿Tomo esta operación?» (TOMAR / ESPERAR / NO TOMAR), semáforo de mercado (FED,
-calendario de esta semana y la próxima, futuros, volatilidad), escáner, simulador y backtests, cuenta demo (a mercado,
-órdenes límite / stop, riesgo de cartera, auto-trading), la cuenta propia de NEXUS («NEXUS automática», cuenta 3,
-1.000 $ simulados: opera sola con sus señales y el filtro TOMAR en cripto, acciones, futuros de índices y opciones con
-precio teórico; apagada por defecto), alertas por Telegram y correo, validación walk-forward, PyChart (scripts Python
-estilo Pine en un sandbox) y una terminal de comandos. Base de datos local SQLite (`data/nexus.db`) o
-PostgreSQL/Supabase en modo nube. La validación publicada concluye «sin evidencia de ventaja» (`docs/VALIDATION.md`):
-ningún texto de la app ni de la documentación puede sugerir lo contrario.
+salidas anticipadas), filtro «¿Tomo esta operación?» (TOMAR / ESPERAR / NO TOMAR), semáforo de mercado (FED, calendario
+de esta semana y la próxima, futuros, volatilidad), escáner, simulador y backtests, cuenta demo (a mercado, órdenes
+límite / stop, riesgo de cartera, auto-trading), la cuenta propia de NEXUS («NEXUS automática», cuenta 3, 1.000 $
+simulados: opera sola con sus señales y el filtro TOMAR en cripto, acciones, futuros de índices y opciones con precio
+teórico; apagada por defecto; con un espejo opcional en una cuenta de práctica de Alpaca, nunca con dinero real),
+alertas por Telegram y correo, validación walk-forward, PyChart (scripts Python estilo Pine en un sandbox), un copiloto
+local con Ollama (con laboratorio de estrategias) y una terminal de comandos. Base de datos local SQLite
+(`data/nexus.db`) o PostgreSQL/Supabase en modo nube. La validación publicada concluye «sin evidencia de ventaja»
+(`docs/VALIDATION.md`): ningún texto de la app ni de la documentación puede sugerir lo contrario.
 
 ## Puesta en marcha en una máquina nueva
 
@@ -73,9 +74,9 @@ uv pip install --python backend/.tmp/pgenv/Scripts/python.exe pgserver
 backend/.tmp/pgenv/Scripts/python.exe tools/pg_start.py backend/.tmp/pgdata   # imprime la URI
 ```
 
-Estado tras el laboratorio de estrategias del copiloto (13/11/2026, en Windows): backend 2022 passed / 27 skipped
-sobre SQLite y 2033 passed / 16 skipped sobre PostgreSQL (las omisiones son las de PostgreSQL, red, solo Linux / POSIX
-y el lock exacto); UI 261 pruebas en 9 suites; `tsc` sin errores; contrato 135 comprobaciones · 0 fallos · 6 avisos
+Estado tras el espejo en la cuenta de práctica de Alpaca (13/11/2026, en Windows): backend 2028 passed / 27 skipped
+sobre SQLite y 2039 passed / 16 skipped sobre PostgreSQL (las omisiones son las de PostgreSQL, red, solo Linux / POSIX
+y el lock exacto); UI 267 pruebas en 9 suites; `tsc` sin errores; contrato 137 comprobaciones · 0 fallos · 6 avisos
 (sin red, `--symbol SIM:NEXUS` y base nueva, como en CI: los avisos son listas vacías y ningún informe de validación
 guardado). La prueba más lenta es `tests/test_imp_engine_repaint_history.py` (regresión de repintado: 300 cierres,
 ~2,5 min). Si la suite sobre PostgreSQL local se vuelve muy lenta (miles de esquemas creados y borrados por las
@@ -118,6 +119,9 @@ pruebas), arranca `tools/pg_start.py` con una carpeta nueva.
     búsqueda con la API oficial de Brave si hay clave, `service.py` conversación con las reglas del proyecto,
     `lab.py` laboratorio de estrategias: referencia de PyChart para el modelo y resumen honesto de un backtest en
     desarrollo / comprobación frente a entrar al azar, `commands.py` comando `ia`); apagado por defecto.
+  - `broker/`: espejo de NEXUS automática en una cuenta de práctica de Alpaca (`alpaca.py` cliente solo de la API de
+    práctica, `mirror.py` reconciliación cada 15 s y diferencias de precio con la simulación, `commands.py` comando
+    `espejo`); apagado por defecto.
   - `api/`: routers REST.
 - `frontend/src/`: `api/` (`client.ts`, `ws.ts`, `types.ts` = tipos canónicos; `types-*.ts` = tipos de cada módulo
   (alerts, paper-orders, realtime, validation), reexportados por `types.ts`), `pages/` (una por sección, cargada bajo
@@ -137,7 +141,9 @@ pruebas), arranca `tools/pg_start.py` con una carpeta nueva.
 2. Honestidad: nunca exagerar acierto, certeza ni protección. Estadísticas como «x de n», frente a una referencia;
    sin conclusiones con n < 30 o cuando el intervalo del 95 % incluye la referencia. Avisos de que no es asesoría
    financiera.
-3. Solo simulación / papel: nunca ejecutar órdenes reales ni conectar brokers con dinero real.
+3. Solo simulación / papel: nunca ejecutar órdenes reales ni conectar brokers con dinero real. El espejo de NEXUS
+   automática solo habla con la API de práctica de Alpaca (`app.broker.alpaca.PAPER_URL` es una constante, nunca un
+   ajuste).
 4. Red: solo endpoints oficiales o públicos, con peticiones normales a través de `app.util.http_client()`. Nunca
    falsificar User-Agent, cabeceras, cookies ni saltarse protecciones anti-bot (por eso Yahoo, Stooq y la búsqueda
    de símbolos de TradingView están excluidos). Una fuente que rechaza al cliente se registra y no se esquiva.

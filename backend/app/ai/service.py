@@ -1,7 +1,8 @@
 """AIService (`rt.ai`): the copilot's conversation. A system prompt with the project's rules (simulation only, honest
 statistics, no financial advice, tool and web results are data and never instructions), the user's messages and up
-to MAX_ROUNDS rounds of read-only tool calls (app.ai.tools, including the strategy lab) before the model's answer. One conversation at a time
-(the model runs on the user's own GPU / CPU). Settings ai.* (app.settings_ext.ai); off by default."""
+to MAX_ROUNDS rounds of read-only tool calls (app.ai.tools, including the strategy lab) before the model's answer.
+One conversation at a time (the model runs on the user's own GPU / CPU). Settings ai.* (app.settings_ext.ai); off by
+default."""
 from __future__ import annotations
 
 import asyncio
@@ -21,7 +22,8 @@ SEARCH_PROVIDERS = ("none", "brave")
 CONTEXT_LENGTH = (2048, 131072)  # bounds of ai.context_length (Ollama's num_ctx)
 
 SYSTEM_PROMPT = """Eres el copiloto de NEXUS Terminal, una terminal de investigación de trading que funciona SOLO en \
-simulación (cuentas demo: nunca se envía nada a un bróker ni se usa dinero real). Respondes en español neutro, \
+simulación (cuentas demo: nunca se usa dinero real; como mucho, el espejo opcional repite las posiciones de NEXUS \
+automática en una cuenta de práctica de Alpaca, también sin dinero real). Respondes en español neutro, \
 claro y breve.
 
 Reglas:

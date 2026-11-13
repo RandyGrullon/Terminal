@@ -364,6 +364,8 @@ validation.warmup_bars 500 · validation.random_runs 1000
 ai.enabled false · ai.ollama_url "http://127.0.0.1:11434" · ai.model "" (empty = the first model Ollama has)
 ai.search_provider "none" (none|brave) · ai.brave_api_key "" (a secret) · ai.timeout_s 120 (10..600)
 ai.context_length 16384 (2048..131072: Ollama's num_ctx; its own default, often 4096, cuts long conversations)
+broker.alpaca_enabled false · broker.alpaca_key_id "" · broker.alpaca_secret_key "" (secrets: PAPER keys only)
+broker.mirror_stocks true · broker.mirror_crypto true
 ```
 **Feature settings** (`app/settings_ext/`): each feature module (alerts, paper_risk, realtime, scanner_model,
 validation) defines a plain `DEFAULTS` dict and must not import `app.config` (no cycles); `settings_ext/__init__.py`
@@ -2290,3 +2292,45 @@ questions about NEXUS in Spanish. Off by default (`ai.enabled`); while off, Olla
   backtests (the model may know what happened); web search needs the user's own key of an official API. The lab's
   random reference keeps each trade's duration but not its exits (stops and targets of a strategy end losing trades
   early); 5000 candles of 1 h are about 7 months: a strategy should be confirmed on other markets and timeframes.
+
+---------------------------------------------------------------------------------------------------------------------
+## 20. Practice-broker mirror — Alpaca paper (BROKER, `app.broker`)
+
+NEXUS automática (account 3) keeps deciding and simulating; the mirror only repeats its positions in the user's
+Alpaca PAPER (practice) account, to measure the price difference between the simulation and orders against real
+quotes. Never real money: `app.broker.alpaca.PAPER_URL` (`https://paper-api.alpaca.markets`) is a constant, not a
+setting, and Alpaca's live keys are not valid there. Off by default (`broker.alpaca_enabled`); nothing is sent
+without both keys, nor in `NEXUS_OFFLINE` mode.
+
+- `app.broker.alpaca.AlpacaClient(key_id, secret)`: `account()`, `clock()`, `positions()`, `submit_market(symbol,
+  side, qty, tif, client_order_id)` (market orders: `day` for stocks, `gtc` for crypto; qty as a string with ≤ 9
+  decimals), `order(id)`, `order_by_client_id(cid)`; through `app.util.http_client` (rule 4) with Alpaca's official
+  `APCA-API-KEY-ID` / `APCA-API-SECRET-KEY` headers, never following redirects; Spanish `AlpacaError(status)` (401:
+  «rechazó las claves: usa las de tu cuenta de práctica»). The keys never appear in errors, events or status.
+- `app.broker.mirror.MirrorService` (`rt.broker`): a reconcile pass every 15 s (background loop; `sync_now()` on
+  request). Each new position of account 3 that Alpaca can trade (`alpaca_symbol`: US stocks and ETFs → ticker;
+  crypto quoted in USD / USDT / USDC → `BASE/USD`) gets a market order with the same quantity and direction
+  (client_order_id `nexus-<position>-o<step>`); a partial target of NEXUS → a sell of the same share of what was
+  bought (`-r<step>`); NEXUS's close → a close of what the mirror holds (`-c<step>`; crypto: never more than Alpaca
+  holds, as it keeps its fee in coins). One working order per position; a restart finds it again by its id, and a
+  crash right after sending finds it by its client id (Alpaca refuses a duplicate with 422). Not mirrored, with its
+  reason recorded once: options (theoretical), futures, forex, indices and other classes, stocks of other countries
+  or OTC, derivatives, synthetic markets, crypto shorts, shorts under one share, orders under 1 $, a stock position
+  opened while the US market is closed (`/v2/clock`: a market order would fill at the next open) and positions older
+  than 120 s (opened before the mirror was on). Partials and closes of stocks wait for the market (`waiting`); a
+  failed close is retried 3 times, then `error` (close it by hand). A close long after NEXUS's (the mirror off or the
+  server stopped) is marked late and left out of the exit comparison.
+- Price difference in basis points, positive = worse than the simulation: entry `side × (fill − sim) / sim`, exit
+  `side × (sim − fill) / sim` (the final close only); the result % of both. Stats: «x de n» mirrored, means with their
+  counts and «muestra pequeña: sin conclusiones» below 30 closed.
+- State in `meta` (`broker.mirror`: the open entries and the last 100 finished ones), no schema change.
+- API: `GET /api/broker/status?refresh=` → `BrokerStatus {enabled, provider "alpaca", paper true, configured,
+  connected, account: BrokerAccount {equity, cash, buying_power, status, currency} | null, error, last_sync_ms,
+  mirror_stocks, mirror_crypto, entries: BrokerMirrorEntry[] (≤ 20: open first, then the latest finished), stats:
+  BrokerStats, note}` (the account is cached 30 s); `POST /api/broker/sync` → BrokerStatus after a pass; 400 {detail}
+  when it is off, has no keys or runs offline. The contract checker only reads the status.
+- Terminal `espejo` (aliases `alpaca`, `broker`; group Bróker): status, stats and the last positions; `espejo
+  sincroniza` reconciles now. UI: card «Espejo en Alpaca (práctica)» in NEXUS automática (`BrokerCard.tsx`, polls
+  every 30 s) and the Ajustes group «Bróker de práctica (Alpaca)» (`schema-broker.ts`; the keys are secret fields).
+- Limits: paper fills are Alpaca's own simulation against real quotes (no queue position, no market impact); a manual
+  trade on the same symbol in the same practice account mixes with the mirror (use a practice account for NEXUS only).

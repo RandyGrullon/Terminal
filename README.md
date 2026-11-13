@@ -15,7 +15,8 @@ operación, un semáforo de condiciones de mercado, escáner, simulador y backte
 >   IC 95 % por bloques −0,18R a +0,02R) y queda 0,13R por debajo de entradas al azar con las mismas reglas de riesgo;
 >   sin el filtro pierde −0,23R por operación (1.907 operaciones). El filtro reduce la pérdida sobre todo porque opera
 >   menos. Un «TOMAR» no significa que la operación tenga ventaja (sección 4 de ese documento).
-> - **Todo es simulado**: la cuenta demo nunca envía órdenes a un bróker ni mueve dinero real.
+> - **Todo es simulado**: la cuenta demo nunca envía órdenes a un bróker ni mueve dinero real (el espejo opcional
+>   de NEXUS automática solo usa una cuenta de práctica de Alpaca, también sin dinero real).
 > - Señales, probabilidades y estadísticas se calculan con datos históricos y **no garantizan resultados futuros**.
 >   No es asesoría financiera.
 
@@ -293,6 +294,13 @@ que la actives en «Cómo opera»:
 - **Avisos fuera de la app** (opcional, desactivado por defecto): con «Avisarme por Telegram o correo cuando opere»
   recibes sus aperturas, cierres y stops por los canales de *Ajustes → Alertas*; si no hay ningún canal activo, la
   vista te lo dice.
+- **Espejo en Alpaca (práctica)** (opcional, desactivado por defecto): si tienes una cuenta de práctica (paper
+  trading) de Alpaca, pon sus claves en *Ajustes → Bróker de práctica (Alpaca)* y NEXUS automática repetirá allí sus
+  posiciones de acciones y ETF de EE. UU. y de cripto en dólares, con la misma cantidad y dirección, sus salidas
+  parciales y sus cierres. Su tarjeta muestra la diferencia entre el precio simulado y el de la orden de práctica (en
+  puntos básicos; positivo = peor que la simulación) y por qué no replicó algo (opciones, futuros, cortos en cripto,
+  la bolsa cerrada…). Nunca usa dinero real: la app solo habla con la API de práctica de Alpaca. En la terminal:
+  `espejo` y `espejo sincroniza`.
 - **Desde la terminal** (alias `piloto`): `autopilot` muestra su estado; `autopilot on btc eth --tf 4h --max 3 --risk
   0,5` la activa con una lista fija; `autopilot escaner 10` usa el escáner; `autopilot off` la pausa; `autopilot pos`
   y `autopilot log` muestran sus posiciones y sus decisiones; `autopilot azar` la compara con entrar al azar;

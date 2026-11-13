@@ -512,7 +512,7 @@ test('view: honest explanation, the backend note verbatim and the state badge', 
   const html = render(M.AutopilotView, { initial: snapshot() })
   assert.ok(html.includes(NOTE), 'the note is shown verbatim')
   assert.match(html, /class="notice ap-note" role="note"/)
-  for (const part of ['100 % simulada', 'opera sola', 'COMPRAR o', 'VENDER y el filtro dice TOMAR', 'reglas de salida', 'límites de', 'servidor de NEXUS está en marcha', 'nunca envía nada a un bróker']) {
+  for (const part of ['100 % simulada', 'opera sola', 'COMPRAR o', 'VENDER y el filtro dice TOMAR', 'reglas de salida', 'límites de', 'servidor de NEXUS está en marcha', 'nunca usa dinero real', 'cuenta de práctica de Alpaca']) {
     assert.ok(html.includes(part), `explanation: ${part}`)
   }
   assert.match(html, /class="badge badge-pos ?">Activa</)

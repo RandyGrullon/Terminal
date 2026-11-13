@@ -31,7 +31,8 @@ has no signal yet; a new candidate is decided at once on its last closed bar; pa
 the dollar are never traded: its account is in USD), at most autopilot.max_positions
 positions, autopilot.risk_pct per trade and the portfolio risk rules of its own account. It keeps a short decision
 log (opened / discarded and why / closed); paused, its open positions keep their stop and targets. WS message
-{type 'paper_autopilot'} on topic 'paper'. Simulation only: nothing is ever sent to a broker.
+{type 'paper_autopilot'} on topic 'paper'. Simulation only: this engine never sends anything to a broker (app.broker
+can mirror account 3 in the user's Alpaca PAPER account when the user turns it on: never real money).
 It may trade stocks and funds with THEORETICAL options (app.engine.options, autopilot.stock_instrument): an option
 position (symbol OPT:…, side long: it only buys calls and puts, qty = contracts × 100, levels on the premium) is
 priced with Black-Scholes from its underlying's live price, follows the underlying's bars and NEXUS's exit signals on
@@ -129,7 +130,8 @@ DOWNTIME_SHOW_S = 86400  # a detected stop stays in its status for a day
 WEEK_S = 7 * 86400
 GUARD_WINDOW_S = 90 * 86400  # what it learns from its losses only looks at the trades of the last 90 days
 AUTOPILOT_NOTE = (
-    "Cuenta 100 % simulada que opera sola con las señales de NEXUS y el filtro; nunca se envía nada a un bróker. "
+    "Cuenta 100 % simulada que opera sola con las señales de NEXUS y el filtro; nunca usa dinero real ni un bróker "
+    "real (el espejo opcional solo repite sus posiciones en tu cuenta de práctica de Alpaca). "
     "La validación publicada (docs/VALIDATION.md) no encontró ventaja: lo esperable son resultados parecidos a "
     "entrar al azar, menos las comisiones."
 )

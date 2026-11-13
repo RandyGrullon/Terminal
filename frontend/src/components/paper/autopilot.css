@@ -194,3 +194,19 @@
   gap: 6px;
   white-space: nowrap;
 }
+
+/* Espejo en Alpaca (BrokerCard) */
+.ap-broker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ap-broker-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}

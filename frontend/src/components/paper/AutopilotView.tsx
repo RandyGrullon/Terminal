@@ -1,7 +1,7 @@
 // "NEXUS automática": NEXUS's own demo account (account 3), which trades on its own with NEXUS's closed-bar signals and
 // the Trade Gate. The view shows what it is doing (watched symbols, latest scan, decision log), its open positions and
 // history, its stats (winners as "x de n", never a bare percentage), how it trades (on/off, source, timeframe, limits)
-// and a reset. Simulated only: nothing is ever sent to a broker. Live updates come from the default WS 'paper' topic as
+// and a reset. Simulated only: never real money (BrokerCard: the optional mirror in an Alpaca PAPER account). Live updates come from the default WS 'paper' topic as
 // {type: 'paper_autopilot'} (the user's {type: 'paper'} messages are account 1 and never feed this view); a GET every
 // 30 s while the page is visible is the fallback.
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
@@ -38,6 +38,7 @@ import { useApp } from '../../store'
 import { Badge, Button, Card, Disclaimer, Empty, ErrorBox, Field, Loading, Modal, NumberInput, Select, Spinner, Toggle } from '../ui'
 import SymbolSearch from '../SymbolSearch'
 import { asTimeframe, fmtMoney, isNum, useInterval } from '../markets/opsUtils'
+import BrokerCard from './BrokerCard'
 import PaperStats from './PaperStats'
 import PositionsTable from './PositionsTable'
 import HistoryTable from './HistoryTable'
@@ -1530,7 +1531,8 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
         <p className="ap-explain">
           Cuenta 100 % simulada que <b>opera sola</b>: NEXUS abre una posición solo cuando su señal al cierre de una vela es COMPRAR o
           VENDER y el filtro dice TOMAR, y la cierra con sus reglas de salida. Usa los mismos stops «hasta aquí», objetivos y límites de
-          riesgo de cartera que tu cuenta demo. Solo opera mientras el servidor de NEXUS está en marcha y nunca envía nada a un bróker.
+          riesgo de cartera que tu cuenta demo. Solo opera mientras el servidor de NEXUS está en marcha y nunca usa dinero real: si
+          activas el espejo, repite sus posiciones en tu cuenta de práctica de Alpaca, también sin dinero real.
         </p>
         {status?.note ? (
           <div className="notice ap-note" role="note">
@@ -1566,6 +1568,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
                 {controls}
                 {moneyCard}
                 {weeklyCard}
+                <BrokerCard />
                 {watchCard}
                 <RiskPanel risk={snap.risk} />
               </div>
@@ -1580,6 +1583,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
                   {controls}
                   {moneyCard}
                   {weeklyCard}
+                  <BrokerCard />
                 </div>
                 <div className="ap-col">
                   {watchCard}

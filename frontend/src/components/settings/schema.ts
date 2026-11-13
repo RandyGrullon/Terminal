@@ -2,6 +2,7 @@
 import { Brain, Eye, FlaskConical, HardDrive, Radar, Satellite, Scale, ShieldCheck, Wallet, type LucideIcon } from 'lucide-react'
 import { GROUPS_EXT as AI_GROUPS } from './schema-ai'
 import { GROUPS_EXT as ALERT_GROUPS } from './schema-alerts'
+import { GROUPS_EXT as BROKER_GROUPS } from './schema-broker'
 import { GROUPS_EXT as PAPER_RISK_GROUPS } from './schema-paper-risk'
 import { GROUPS_EXT as REALTIME_GROUPS } from './schema-realtime'
 import { GROUPS_EXT as VALIDATION_GROUPS } from './schema-validation'
@@ -495,6 +496,6 @@ const BASE_GROUPS: GroupDef[] = [
 
 /** Every settings group: the base ones plus those contributed by feature modules (alerts, paper risk, data,
  *  validation). */
-export const GROUPS: GroupDef[] = [...BASE_GROUPS, ...ALERT_GROUPS, ...PAPER_RISK_GROUPS, ...REALTIME_GROUPS, ...AI_GROUPS, ...VALIDATION_GROUPS]
+export const GROUPS: GroupDef[] = [...BASE_GROUPS, ...ALERT_GROUPS, ...PAPER_RISK_GROUPS, ...REALTIME_GROUPS, ...BROKER_GROUPS, ...AI_GROUPS, ...VALIDATION_GROUPS]
 
 export const FIELD_BY_KEY: Record<string, FieldDef> = Object.fromEntries(GROUPS.flatMap((g) => g.fields.map((f) => [f.key, f])))

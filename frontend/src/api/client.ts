@@ -9,6 +9,7 @@ import type {
   AIChatReply,
   AIStatus,
   AutopilotComparison,
+  BrokerStatus,
   AutopilotJournal,
   AutopilotSnapshot,
   AutopilotUpdate,
@@ -263,6 +264,12 @@ export const api = {
   ai: {
     status: () => get<AIStatus>('/api/ai/status'),
     chat: (messages: AIChatMessage[]) => post<AIChatReply>('/api/ai/chat', { messages }),
+  },
+
+  // ------------------------------------------------------------------ practice-broker mirror (Alpaca paper)
+  broker: {
+    status: (refresh = false) => get<BrokerStatus>('/api/broker/status', refresh ? { refresh: true } : undefined),
+    sync: () => post<BrokerStatus>('/api/broker/sync'),
   },
 
   // ------------------------------------------------------------------ paper trading
