@@ -575,6 +575,7 @@ _AP_ALERTS = ("avisos", "alertas", "alerts")
 _AP_COMPARE = ("azar", "comparar", "referencia")
 _AP_JOURNAL = ("diario", "errores", "patrones", "journal")
 _AP_WEEKLY = ("semana", "informe", "semanal")
+_AP_LEARN = ("aprender", "aprendizaje")
 _AP_KIND = {"open": ("Abre", "success"), "close": ("Cierra", "info"), "skip": ("Descarta", "muted"),
             "info": ("Nota", "info")}
 # --instrumento: how it trades stocks and funds (autopilot.stock_instrument)
@@ -583,7 +584,8 @@ _AP_INSTRUMENTS = {"auto": "auto", "nexus": "auto", "acciones": "shares", "share
 AUTOPILOT_USAGE = ("autopilot [on|off] [lista <símbolos…> | escaner [N] | ambos [N]] [--tf 1h] [--max 5] [--risk 1] "
                    "[--top 10] [--expo 100] [--freno 20] [--margen 50] [--instrumento auto|acciones|opciones] "
                    "[--prima 10] · "
-                   "autopilot pos | log | azar | diario | semana | avisos on|off | close <id|símbolo|all> | "
+                   "autopilot pos | log | azar | diario | semana | aprender on|off | avisos on|off | "
+                   "close <id|símbolo|all> | "
                    "reset [saldo] --yes")
 
 
@@ -621,6 +623,22 @@ def _ap_stocks_line(st: dict) -> str:
         return f"Acciones: solo opciones, un call para apostar al alza y un put a la baja; {opts}"
     return (f"Acciones: NEXUS elige, acciones para apostar al alza y un put a la baja (una cuenta de efectivo no vende "
             f"en corto); {opts}")
+
+
+def _print_learned(ctx: CommandContext, st: dict) -> None:
+    """What it learned from its losses: the contexts where it does not open, or that it learns nothing."""
+    if not st.get("learn_guard"):
+        ctx.print("Aprender de sus pérdidas: desactivado (autopilot aprender on)", "muted")
+        return
+    paused = st.get("paused_contexts") or []
+    if not paused:
+        ctx.print("Aprender de sus pérdidas: activado; todavía no hay ningún contexto donde pierda con evidencia fuerte "
+                  "(30 operaciones o más en 90 días e intervalo del 99 % bajo cero)", "muted")
+        return
+    for p in paused:
+        lo, hi = p["ci"]
+        ctx.print(f"⛔ No opera en «{p['label']}: {p['bucket_label']}»: {p['wins']} de {p['n']} ganadoras en 90 días, "
+                  f"R medio {fmt_r(p['mean_r'], 2)} (IC 99 % {fmt_r(lo, 2)} a {fmt_r(hi, 2)})", "warn")
 
 
 def _ap_cells(p: dict) -> tuple[str, str, str]:
@@ -673,6 +691,7 @@ def _print_autopilot(ctx: CommandContext, snap: dict) -> None:
     ctx.print(("Futuros: contratos enteros, con hasta el " + fmt_pct(fm, 0, False) + " del capital como margen aproximado"
                if fm else "No opera futuros (--margen 0)"), "muted")
     ctx.print(_ap_stocks_line(st), "muted")
+    _print_learned(ctx, st)
     health = st.get("health") or {}
     if health.get("text"):
         ctx.print(("✔ " if health.get("ok") else "⚠ ") + health["text"], "info" if health.get("ok") else "warn")
@@ -790,6 +809,18 @@ async def _autopilot(ctx: CommandContext) -> None:
                       + ("día" if c["days"] == 1 else "días"), "info")
         ctx.print(c["note"], "muted")
         ctx.data = c
+        return
+
+    if sub in _AP_LEARN:
+        word = args[1].lower() if len(args) > 1 else ""
+        if word not in _ON and word not in _OFF:
+            ctx.fail("Indica on u off. Ejemplo: autopilot aprender on")
+        try:
+            snap = await paper.set_autopilot(learn_guard=word in _ON)
+        except PaperError as exc:
+            ctx.fail(str(exc))
+        _print_learned(ctx, snap["autopilot"])
+        ctx.data = snap
         return
 
     if sub in _AP_WEEKLY:

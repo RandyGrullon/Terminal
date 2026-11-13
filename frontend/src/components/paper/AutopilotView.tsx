@@ -16,6 +16,7 @@ import type {
   AutopilotJournalVerdict,
   AutopilotLast,
   AutopilotLogEntry,
+  AutopilotPausedContext,
   AutopilotScan,
   AutopilotSnapshot,
   AutopilotSource,
@@ -153,6 +154,8 @@ export function normalizeStatus(raw: unknown): AutopilotStatus | null {
     futures_margin_pct: numOr(o.futures_margin_pct, 50),
     stock_instrument: o.stock_instrument === 'shares' || o.stock_instrument === 'options' ? o.stock_instrument : 'auto',
     options_premium_pct: numOr(o.options_premium_pct, 10),
+    learn_guard: o.learn_guard !== false,
+    paused_contexts: normalizePaused(o.paused_contexts),
     health: normalizeHealth(o.health),
     weekly: normalizeWeekly(o.weekly),
     brake: normalizeBrake(o.brake),
@@ -174,6 +177,37 @@ export function normalizeAutopilot(raw: unknown): AutopilotSnapshot | null {
     risk: normalizeRisk(o.risk),
     autopilot,
   }
+}
+
+function normalizePaused(raw: unknown): AutopilotPausedContext[] {
+  if (!Array.isArray(raw)) return []
+  const out: AutopilotPausedContext[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    const ci = Array.isArray(o.ci) && o.ci.length === 2 && isNum(o.ci[0]) && isNum(o.ci[1]) ? ([o.ci[0], o.ci[1]] as [number, number]) : null
+    if (!isStr(o.dimension) || !isStr(o.label) || !isStr(o.key) || !isStr(o.bucket_label) || !isNum(o.mean_r) || !ci) continue
+    out.push({ dimension: o.dimension, label: o.label, key: o.key, bucket_label: o.bucket_label, n: Math.max(0, Math.round(numOr(o.n, 0))),
+      wins: Math.max(0, Math.round(numOr(o.wins, 0))), mean_r: o.mean_r, ci })
+  }
+  return out
+}
+
+/** «Aprendió de sus pérdidas»: the contexts where it does not open now, with their evidence. */
+export function LearnedNotice({ contexts, enabled }: { contexts: AutopilotPausedContext[]; enabled: boolean }) {
+  if (!enabled || contexts.length === 0) return null
+  return (
+    <div className="notice ap-note" role="note">
+      <Info size={15} style={{ flex: 'none', marginTop: 1 }} />
+      <span>
+        Aprendió de sus pérdidas y no opera en:{' '}
+        {contexts
+          .map((c) => `«${c.label}: ${c.bucket_label}» (${fmtInt(c.wins)} de ${fmtInt(c.n)} ganadoras en 90 días, R medio ${fmtR(c.mean_r)}, IC 99 % ${fmtR(c.ci[0])} a ${fmtR(c.ci[1])})`)
+          .join('; ')}
+        . Lo vuelve a probar cuando esas operaciones tengan más de 90 días.
+      </span>
+    </div>
+  )
 }
 
 /** Its health (all clear when missing: an older server). */
@@ -377,6 +411,9 @@ export function MoneyCard({ status, dailyLossPct }: { status: AutopilotStatus; d
       ? `Futuros de índices (micro o mini): contratos enteros, solo si uno cabe en su riesgo por operación y su margen aproximado en el ${pct(status.futures_margin_pct, 0)} del capital; con una cuenta pequeña casi nunca caben.`
       : 'No opera futuros (margen máximo en futuros: 0 %).',
     stocksRule(status, pct),
+    status.learn_guard
+      ? 'Aprende de sus pérdidas: deja de operar en un contexto (sesión, régimen, noticias, puntuación del filtro, dirección o mercado) donde sus operaciones de los últimos 90 días pierden con evidencia fuerte (30 o más y el intervalo del 99 % bajo cero).'
+      : 'No aprende de sus pérdidas: «Aprender de sus pérdidas» está desactivado.',
     status.max_drawdown_pct > 0
       ? `Se frena si pierde un ${pct(status.max_drawdown_pct, 0)} desde su saldo inicial${dailyLossPct ? ` o un ${pct(dailyLossPct)} en el día` : ''}.`
       : `Sin freno de pérdidas acumuladas${dailyLossPct ? `; sí se frena si pierde un ${pct(dailyLossPct)} en el día` : ''}.`,
@@ -688,6 +725,7 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
   const [draft, setDraft] = useState<AutopilotDraft>(saved)
   const [turning, setTurning] = useState<boolean | null>(null) // on / off being saved, shown at once
   const [alerting, setAlerting] = useState<boolean | null>(null) // its alerts switch being saved
+  const [learning, setLearning] = useState<boolean | null>(null) // its learn-from-losses switch being saved
   const [submitting, setSubmitting] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
   const prevSaved = useRef(saved)
@@ -705,6 +743,7 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
   const problem = validateDraft(draft)
   const enabled = turning ?? status.enabled
   const alertsOn = alerting ?? status.alerts
+  const learnOn = learning ?? status.learn_guard
   const shownError = localError ?? error
 
   const patch = (p: Partial<AutopilotDraft>) => {
@@ -729,6 +768,16 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
       await onSave({ alerts: next })
     } finally {
       setAlerting(null)
+    }
+  }
+
+  const turnLearning = async (next: boolean) => {
+    setLocalError(null)
+    setLearning(next)
+    try {
+      await onSave({ learn_guard: next })
+    } finally {
+      setLearning(null)
     }
   }
 
@@ -783,6 +832,17 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
             : status.alert_channels > 0
               ? 'Avisa de sus aperturas, cierres y stops (operaciones simuladas), según el nivel de avisos de Ajustes › Alertas.'
               : 'Ningún canal de avisos está activo: configura Telegram o correo en Ajustes › Alertas.'}
+        </div>
+
+        <Toggle
+          checked={learnOn}
+          onChange={(v) => void turnLearning(v)}
+          label={<span className={learnOn ? 'bold' : 'text-2'}>Aprender de sus pérdidas</span>}
+        />
+        <div className="tiny muted">
+          {learnOn
+            ? 'Deja de operar donde sus operaciones de los últimos 90 días pierden con evidencia fuerte (30 o más, intervalo del 99 % bajo cero).'
+            : 'Desactivado: opera en todos los contextos aunque pierda en alguno.'}
         </div>
 
         <div className="field">
@@ -1491,6 +1551,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
           {error && <ErrorBox error={`${error} · mostrando los últimos datos conocidos`} onRetry={() => void load()} />}
           <BrakeNotice brake={status?.brake ?? null} />
           {status && <HealthNotice health={status.health} enabled={status.enabled} />}
+          {status && <LearnedNotice contexts={status.paused_contexts} enabled={status.learn_guard} />}
           <PaperStats account={snap.account} winTally />
           {wide ? (
             <div className="pp-layout">

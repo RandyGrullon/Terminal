@@ -354,6 +354,7 @@ autopilot.initial_balance 1000 · autopilot.max_exposure_pct 100 (0..500; 0 = of
 (0..90; 0 = off) · autopilot.source "both" = the list plus the scanner's candidates
 autopilot.futures_margin_pct 50 (0..100; 0 = it trades no futures)
 autopilot.stock_instrument "auto" (auto|shares|options) · autopilot.options_premium_pct 10 (0..50; 0 = no options)
+autopilot.learn_guard true (it learns from its losses)
 realtime.enabled true · realtime.twelvedata_credits_min 8 · realtime.twelvedata_credits_day 800 (0 = no daily cap)
 realtime.polygon_calls_min 5 · realtime.reserve_pct 25 · realtime.max_symbols 4 · realtime.min_interval_s 15
 scanner.replay_days 7                     (int days, clamped 0..30 by the evaluator; 0 = vectors dropped at resolution)
@@ -674,7 +675,7 @@ GET  /api/paper/autopilot/compare?fresh=     -> AutopilotComparison (vs random e
 GET  /api/paper/autopilot/journal?fresh=     -> AutopilotJournal (its trade journal; cached, fresh = recompute)
 POST /api/paper/autopilot {enabled?, source?: scanner|list|both, symbols?, tf?, max_positions?, risk_pct?,
                            scanner_top?, alerts?, max_exposure_pct?, max_drawdown_pct?, futures_margin_pct?,
-                           stock_instrument?: auto|shares|options, options_premium_pct?}
+                           stock_instrument?: auto|shares|options, options_premium_pct?, learn_guard?}
      -> AutopilotSnapshot (only the given fields change; 400 {detail} in Spanish on a bad value)
 POST /api/paper/autopilot/reset {initial_balance?}     -> AutopilotSnapshot (account 3 only)
 POST /api/paper/autopilot/close {position_id? | all?}  -> AutopilotSnapshot (400 when neither; 404 unknown id)
@@ -704,6 +705,7 @@ GET  /api/learning/replay?days=&model_key=                       -> scanner repl
   `autopilot.state`), alerts (setting `alerts.autopilot`: its trades as alerts, opt-in), alert_channels (alert
   channels on and complete now, `AlertService.active_channels()`; 0 = they would reach nobody), initial_balance,
   max_exposure_pct, max_drawdown_pct, futures_margin_pct, stock_instrument: auto|shares|options, options_premium_pct,
+  learn_guard, paused_contexts: AutopilotPausedContext[] {dimension, label, key, bucket_label, n, wins, mean_r, ci},
   health: AutopilotHealth {ok, last_decision (ms), stale: string[], downtime: AutopilotDowntime {from, to} | null,
   text}, weekly: AutopilotWeekly {week_start, week_end, trades, wins, total_r, mean_r, pnl, text, generated_at} |
   null, brake: AutopilotBrake {limit_pct, drawdown_pct, active} | null, note}`. 400 texts: 'Fuente no válida: usa
@@ -1226,6 +1228,16 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     days before its expiry with a live price of the stock, or settles it at its intrinsic value with the last known
     price once the expiry passed (reason `EXPIRY`). Its gate decision goes to gate_log on the underlying with the
     gate's own levels. The comparison with random entries leaves options out (their R is on a theoretical premium).
+  - **What NEXUS automática learns from its losses** (`autopilot.learn_guard`, on by default; `_learned_pauses`,
+    `app.sim.journal.losing_contexts` / `context_keys`): before an entry (after the gate's TOMAR), its trader looks
+    at its closed trades of the last 90 days grouped by the pre-trade dimensions of its journal — regime, entry
+    session, news nearby, gate score, direction (an option: its bet) and market — and opens nothing when the
+    decision falls in a group with at least 30 trades whose whole 99 % interval of the mean R (block bootstrap by
+    UTC day) is below zero: a stricter level than the journal's 95 % because many groups are looked at at once. The
+    skip is noted in its log with the evidence («x de n», mean R, the interval). Cached by the trades and the hour:
+    once those losses are older than 90 days the context is tried again. `status.paused_contexts` lists them (filled
+    by `autopilot_snapshot`); `set_autopilot(learn_guard=)`, terminal `autopilot aprender on|off`, UI switch
+    «Aprender de sus pérdidas». It never makes trades it would not take otherwise: it only removes entries.
   - **Health and weekly report of NEXUS automática** (`_autopilot_watchdog`, every pass of the monitor while it is
     on): its heartbeat is kept in memory and saved in meta `autopilot.heartbeat` every 5 min; a gap of more than two
     bars of its tf (and over 11 min) between two passes, or between the last saved heartbeat and a start, means the

@@ -266,6 +266,12 @@ que la actives en «Cómo opera»:
   en la que las abrió, y no abre una segunda posición en esos símbolos.
 - Puedes **pausarla** (no abre nada nuevo; sus posiciones siguen con su stop y sus objetivos), cerrar sus posiciones
   a mano o **reiniciarla** con otro saldo.
+- **Aprende de sus pérdidas** (activado por defecto): antes de entrar mira sus operaciones de los últimos 90 días
+  agrupadas como en su diario (régimen, sesión, noticias cerca, puntuación del filtro, dirección y mercado) y no entra
+  donde pierde de forma consistente: al menos 30 operaciones y todo el intervalo del 99 % del R medio por debajo de
+  cero (más exigente que el 95 % porque mira muchos grupos a la vez). El registro dice por qué descartó y con qué
+  evidencia, y su vista lista los contextos pausados. Cuando esas pérdidas tienen más de 90 días lo vuelve a probar.
+  Solo quita entradas, nunca añade. Se apaga con «Aprender de sus pérdidas» o `autopilot aprender off`.
 - **Vigilancia**: si en un mercado de 24 h (BTC, ETH…) pasan más de tres velas sin que decida (no llegan sus velas)
   o si detecta que el servidor o el PC estuvieron detenidos, te lo dice en su vista y en su registro, y por Telegram o
   correo si activaste sus avisos. Para que opere sola, deja el servidor en marcha y el PC sin suspenderse.

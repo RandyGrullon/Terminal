@@ -405,6 +405,8 @@ def main() -> int:
                     check_obj(rep, ifaces, "AutopilotDowntime", st["health"]["downtime"], "paper.autopilot.downtime")
             if st.get("weekly"):
                 check_obj(rep, ifaces, "AutopilotWeekly", st["weekly"], "paper.autopilot.weekly")
+            if st.get("paused_contexts"):
+                check_list(rep, ifaces, "AutopilotPausedContext", st["paused_contexts"], "paper.autopilot.paused", 2)
     d = call("GET", "/api/paper/autopilot/compare")  # against random entries (a computation, read-only)
     if d:
         check_obj(rep, ifaces, "AutopilotComparison", d, "paper.autopilot.compare")

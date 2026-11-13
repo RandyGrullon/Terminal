@@ -30,4 +30,7 @@ DEFAULTS: dict = {
     "autopilot.stock_instrument": "auto",
     # options: the most premium it pays per trade, % of its equity (0 = it buys no options)
     "autopilot.options_premium_pct": 10.0,
+    # it learns from its losses: no entries in a context (session, regime, news, filter score, direction, market) where
+    # its trades of the last 90 days lose with strong evidence (30+ trades, the whole 99 % interval below zero)
+    "autopilot.learn_guard": True,
 }

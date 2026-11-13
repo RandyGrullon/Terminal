@@ -127,6 +127,7 @@ WEEKLY_WEEK_KEY = "autopilot.weekly_week"  # meta: Monday (unix s) of the last w
 HEALTH_GRACE_S = 300  # a 24/7 market with no decision 3 bars after its last one has «sin decisiones recientes»
 DOWNTIME_SHOW_S = 86400  # a detected stop stays in its status for a day
 WEEK_S = 7 * 86400
+GUARD_WINDOW_S = 90 * 86400  # what it learns from its losses only looks at the trades of the last 90 days
 AUTOPILOT_NOTE = (
     "Cuenta 100 % simulada que opera sola con las señales de NEXUS y el filtro; nunca se envía nada a un bróker. "
     "La validación publicada (docs/VALIDATION.md) no encontró ventaja: lo esperable son resultados parecidos a "
@@ -637,6 +638,8 @@ class PaperEngine:
         self._ap_stale_warned = False
         self._ap_weekly: dict[str, Any] | None = None
         self._ap_weekly_week: int | None = None
+        # what it learned from its losses: contexts where its recent trades lose with strong evidence (cached)
+        self._guard_cache: tuple[tuple[int, int, int], list[dict[str, Any]]] | None = None
         self._stale_warned: set[str] = set()  # symbols whose "sin precio en vivo" warning was already emitted
         # pending orders (account 1): id -> order dict; ids whose fill is being decided (gate at the fill price)
         self._orders: dict[int, dict] = {}
@@ -840,6 +843,7 @@ class PaperEngine:
             "futures_margin_pct": float(num("autopilot.futures_margin_pct", 50.0, 0.0, 100.0)),
             "stock_instrument": instr if instr in STOCK_INSTRUMENTS else "auto",
             "options_premium_pct": float(num("autopilot.options_premium_pct", 10.0, 0.0, 50.0)),
+            "learn_guard": bool(self._setting("autopilot.learn_guard", True)),
         }
 
     def _autopilot_held(self) -> dict[str, set[str]]:
@@ -2678,6 +2682,14 @@ class PaperEngine:
                            "win_prob": safe_float(gate.get("win_prob"))} if own else None
                 if cfg is not None and self._uses_options(cfg, symbol, side):
                     what = "Call" if side == "long" else "Put"
+                if cfg is not None and cfg["learn_guard"]:  # what it learned from its losses
+                    keys = J.context_keys(regime=current.get("regime"), ts=now_s(), gate_score=gate.get("score"),
+                                          bet=side, symbol=symbol)
+                    hit = next((p for p in await self._learned_pauses() if keys.get(p["dimension"]) == p["key"]), None)
+                    if hit is not None:
+                        if self._log.should_log(f"ap-guard:{symbol}:{hit['dimension']}:{hit['key']}", 6 * 3600):
+                            self._autopilot_note(symbol, "skip", f"{what} descartado: {self._guard_text(hit)}")
+                        return
                 try:
                     if cfg is not None and what in ("Call", "Put"):
                         plan = await self._option_plan(symbol, side, cfg)
@@ -2919,6 +2931,8 @@ class PaperEngine:
             "max_exposure_pct": cfg["max_exposure_pct"],
             "max_drawdown_pct": cfg["max_drawdown_pct"],
             "futures_margin_pct": cfg["futures_margin_pct"],
+            "learn_guard": cfg["learn_guard"],
+            "paused_contexts": [dict(p) for p in self._guard_cache[1]] if self._guard_cache and cfg["learn_guard"] else [],
             "health": self._autopilot_health(cfg),
             "weekly": dict(self._ap_weekly) if self._ap_weekly else None,
             "stock_instrument": cfg["stock_instrument"],
@@ -3099,6 +3113,11 @@ class PaperEngine:
             risk = None
         status = self.autopilot_status()
         status["brake"] = self._brake(account, status["max_drawdown_pct"])
+        if status["learn_guard"]:
+            try:
+                status["paused_contexts"] = await self._learned_pauses()
+            except Exception:
+                pass
         return {
             "account": account,
             "positions": self.open_positions(AUTOPILOT_ACCOUNT),
@@ -3282,7 +3301,8 @@ class PaperEngine:
                             max_positions: Any = None, risk_pct: Any = None, scanner_top: Any = None,
                             alerts: Any = None, max_exposure_pct: Any = None,
                             max_drawdown_pct: Any = None, futures_margin_pct: Any = None,
-                            stock_instrument: Any = None, options_premium_pct: Any = None) -> dict[str, Any]:
+                            stock_instrument: Any = None, options_premium_pct: Any = None,
+                            learn_guard: Any = None) -> dict[str, Any]:
         """Change the settings of NEXUS's own account (only the given fields); Spanish PaperError on a bad value.
         `alerts`: its trades as alerts through the user's channels (setting alerts.autopilot, opt-in)."""
         values: dict[str, Any] = {}
@@ -3290,6 +3310,8 @@ class PaperEngine:
             values["autopilot.enabled"] = bool(enabled)
         if alerts is not None:
             values["alerts.autopilot"] = bool(alerts)
+        if learn_guard is not None:
+            values["autopilot.learn_guard"] = bool(learn_guard)
         if source is not None:
             src = str(source).strip().lower()
             if src not in AUTOPILOT_SOURCES:
@@ -3378,12 +3400,22 @@ class PaperEngine:
         c = self._journal_cache
         if not fresh and c is not None and c[0] == key and time.monotonic() - c[1] < COMPARE_TTL_S:
             return c[2]
+        trades = self._journal_trades(rows)
+        result = await asyncio.to_thread(J.analyze, trades, seed=S_seed("journal", len(trades)))
+        result["generated_at"] = now_ms()
+        self._journal_cache = (key, time.monotonic(), result)
+        return result
+
+    def _journal_trades(self, rows: list[dict]) -> list[dict[str, Any]]:
+        """Closed-trade rows (id, symbol, side, entry_price, entry_time, exit_price, exit_time, exit_reason, r_multiple,
+        gate_score, meta) as the trades of app.sim.journal; trades closed before the journal get theirs from their
+        water marks."""
         trades = []
         for row in rows:
             meta = json_loads(row.get("meta"), {}) or {}
             meta = meta if isinstance(meta, dict) else {}
             journal = meta.get("journal")
-            if not isinstance(journal, dict):  # closed before the journal existed: from its water marks
+            if not isinstance(journal, dict):
                 journal = J.close_entry(
                     side=row["side"], entry=row["entry_price"], risk_unit=meta.get("risk_unit"),
                     high_water=meta.get("high_water"), low_water=meta.get("low_water"), exit_price=row["exit_price"],
@@ -3394,10 +3426,33 @@ class PaperEngine:
                            "exit_reason": row["exit_reason"], "gate_score": row.get("gate_score"),
                            "context": meta.get("context") if isinstance(meta.get("context"), dict) else None,
                            "journal": journal, "instrument": meta.get("instrument")})
-        result = await asyncio.to_thread(J.analyze, trades, seed=S_seed("journal", len(trades)))
-        result["generated_at"] = now_ms()
-        self._journal_cache = (key, time.monotonic(), result)
-        return result
+        return trades
+
+    async def _learned_pauses(self) -> list[dict[str, Any]]:
+        """Contexts where its trades of the last 90 days lose with strong evidence (app.sim.journal.losing_contexts):
+        its trader opens nothing there. Recomputed when a trade closes and every hour (old trades leave the window,
+        so a paused context is tried again once its losses are older than 90 days)."""
+        since = now_s() - GUARD_WINDOW_S
+        rows = await self.rt.db.fetchall(
+            "SELECT id, symbol, side, entry_price, entry_time, exit_price, exit_time, exit_reason, r_multiple, "
+            "gate_score, meta FROM paper_positions WHERE account_id=? AND status='closed' AND origin='autopilot' "
+            "AND r_multiple IS NOT NULL AND exit_time >= ? ORDER BY id DESC LIMIT ?",
+            (AUTOPILOT_ACCOUNT, since, JOURNAL_LIMIT))
+        key = (len(rows), max((int(r["id"]) for r in rows), default=0), now_s() // 3600)
+        if self._guard_cache is not None and self._guard_cache[0] == key:
+            return self._guard_cache[1]
+        trades = self._journal_trades(rows)
+        pauses = await asyncio.to_thread(J.losing_contexts, trades, seed=S_seed("guard", len(trades)))
+        self._guard_cache = (key, pauses)
+        return pauses
+
+    @staticmethod
+    def _guard_text(hit: dict[str, Any]) -> str:
+        lo, hi = hit["ci"]
+        return (f"aprendió de sus pérdidas que en «{hit['label']}: {hit['bucket_label']}» pierde de forma consistente "
+                f"({hit['wins']} de {hit['n']} ganadoras en 90 días, R medio {fmt_r(hit['mean_r'], 2)}, IC 99 % "
+                f"{fmt_r(lo, 2)} a {fmt_r(hi, 2)}). Vuelve a probar cuando esas operaciones tengan más de 90 días, o "
+                "desactiva «Aprender de sus pérdidas».")
 
     async def close_autopilot(self, position_id: int | None = None, all: bool = False, *,
                               symbol: str | None = None) -> list[dict]:

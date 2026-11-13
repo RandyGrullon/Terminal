@@ -453,6 +453,7 @@ class AutopilotRequest(BaseModel):
     futures_margin_pct: float | None = None  # index futures: equity tied up as margin at most (0 = no futures)
     stock_instrument: str | None = None  # stocks / funds: auto (shares; a put to bet on a fall) | shares | options
     options_premium_pct: float | None = None  # options: the most premium per trade, % of equity (0 = no options)
+    learn_guard: bool | None = None  # it learns from its losses (no entries where its recent trades lose with evidence)
 
 
 @router.get("/api/paper/autopilot")
@@ -475,7 +476,8 @@ async def paper_autopilot_update(req: AutopilotRequest) -> dict:
                                          max_exposure_pct=req.max_exposure_pct, max_drawdown_pct=req.max_drawdown_pct,
                                          futures_margin_pct=req.futures_margin_pct,
                                          stock_instrument=req.stock_instrument,
-                                         options_premium_pct=req.options_premium_pct)
+                                         options_premium_pct=req.options_premium_pct,
+                                         learn_guard=req.learn_guard)
     except (PaperError, ValueError, KeyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc).strip("'\"")) from None
     return clean_json(snap)

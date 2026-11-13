@@ -30,6 +30,10 @@ from app.validation.verdict import MIN_TRADES, ci_text, r2
 NEWS_NEAR_MIN = 60  # an entry within ±60 minutes of a principal US release counts as «near news»
 BOOTSTRAP_RUNS = 2000
 MAX_INSIGHTS = 6
+# what it learns from its losses: the pre-trade dimensions, a stricter interval (many groups are looked at at once: at
+# 95 % one of them would come out negative by chance) and at least MIN_TRADES trades in the group
+GUARD_DIMS = ("regime", "session", "news", "gate", "side", "market")
+GUARD_LEVEL = 0.99
 NEXUS_EXITS = ("EARLY", "REVERSE", "SIGNAL", "TIME")
 
 SESSION_LABEL = {
@@ -282,6 +286,49 @@ def _insights(trades: list[dict], groups: list[dict]) -> list[str]:
                 out.append(f"{g['label']} «{b['label']}»: R medio {r2(b['mean_r'])}, IC 95 % {ci_text(b['ci95'])} "
                            f"({side}) en {b['n']} operaciones.")
     return out[:MAX_INSIGHTS]
+
+
+def context_keys(*, regime: Any, ts: int, gate_score: Any, bet: str, symbol: str) -> dict[str, str | None]:
+    """The group keys of a decision about to open, per pre-trade dimension (the keys `analyze` groups trades by)."""
+    m = news_minutes(int(ts))
+    g = safe_float(gate_score)
+    return {
+        "regime": str(regime) if isinstance(regime, str) and regime and regime != "unknown" else None,
+        "session": session_of(int(ts)),
+        "news": None if m is None else ("cerca" if abs(m) <= NEWS_NEAR_MIN else "lejos"),
+        "gate": None if g is None else ("80" if g >= 80 else "70" if g >= 70 else "bajo"),
+        "side": "short" if bet == "short" else "long",
+        "market": asset_class(symbol),
+    }
+
+
+def losing_contexts(trades: Iterable[dict], *, level: float = GUARD_LEVEL, min_n: int = MIN_TRADES,
+                    seed: int = 0) -> list[dict[str, Any]]:
+    """Pre-trade contexts where these trades lose with strong evidence: at least `min_n` trades and the whole `level`
+    interval of their mean R (block bootstrap by UTC day of the exit) below zero. [{dimension, label, key,
+    bucket_label, n, wins, mean_r, ci}]."""
+    rows = [t for t in trades if safe_float(t.get("r")) is not None and safe_float(t.get("exit_time")) is not None
+            and safe_float(t.get("entry_time")) is not None]
+    out: list[dict[str, Any]] = []
+    for dim, title, key_of, label_of in DIMENSIONS:
+        if dim not in GUARD_DIMS:
+            continue
+        groups: dict[str, list[dict]] = {}
+        for t in rows:
+            key = key_of(t)
+            if key:
+                groups.setdefault(key, []).append(t)
+        for key, ts in sorted(groups.items()):
+            if len(ts) < int(min_n):
+                continue
+            r = np.array([float(t["r"]) for t in ts], dtype=float)
+            days = np.array([int(t["exit_time"]) // 86400 for t in ts])
+            ci = S.block_bootstrap_mean_ci(r, days, runs=BOOTSTRAP_RUNS, seed=S.seed_for(seed, "guard", dim, key),
+                                           level=level)
+            if ci is not None and ci[1] < 0:
+                out.append({"dimension": dim, "label": title, "key": key, "bucket_label": label_of(key), "n": len(ts),
+                            "wins": int((r > 0).sum()), "mean_r": float(r.mean()), "ci": [float(ci[0]), float(ci[1])]})
+    return out
 
 
 def analyze(trades: Iterable[dict], *, seed: int = 0) -> dict[str, Any]:

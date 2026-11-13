@@ -67,6 +67,8 @@ export interface AutopilotStatus {
   futures_margin_pct: number // index futures: equity tied up as approximate margin at most (0 = no futures)
   stock_instrument: AutopilotStockInstrument // stocks and funds: shares, options or NEXUS's choice
   options_premium_pct: number // options: the most premium paid per trade, % of equity (0 = no options)
+  learn_guard: boolean // it learns from its losses: no entries where its recent trades lose with strong evidence
+  paused_contexts: AutopilotPausedContext[] // where it does not open now (learn_guard), [] when off or none
   health: AutopilotHealth // its health: decisions arriving, stops of the server / PC detected
   weekly: AutopilotWeekly | null // its last weekly report (Mondays), null until the first one
   brake: AutopilotBrake | null // null outside a snapshot
@@ -104,6 +106,19 @@ export interface AutopilotCompareRandom {
   entries: number // random entries with a known outcome
   wins: number // of them with R > 0
   mean_r: number | null // mean of the per-trade references (R)
+}
+
+/** A context where its trades of the last 90 days lose with strong evidence (30 or more, the whole 99 % interval of
+ *  the mean R below zero): its trader opens nothing there while learn_guard is on. */
+export interface AutopilotPausedContext {
+  dimension: string // regime | session | news | gate | side | market
+  label: string // the dimension, e.g. «Sesión de entrada»
+  key: string
+  bucket_label: string // e.g. «Londres (3–8 h)»
+  n: number
+  wins: number
+  mean_r: number
+  ci: [number, number] // 99 % interval of the mean R (block bootstrap by day)
 }
 
 /** Its health: the newest decision and the 24/7 markets without a recent one (their candles stopped arriving). */
@@ -208,4 +223,5 @@ export interface AutopilotUpdate {
   futures_margin_pct?: number
   stock_instrument?: AutopilotStockInstrument
   options_premium_pct?: number
+  learn_guard?: boolean
 }

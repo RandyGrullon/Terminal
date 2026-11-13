@@ -38,6 +38,7 @@ export {
   BrakeNotice,
   DecisionLog,
   HealthNotice,
+  LearnedNotice,
   WeeklyCard,
   normalizeHealth,
   MoneyCard,
@@ -123,7 +124,7 @@ function status(over = {}) {
   return {
     enabled: true, account_id: 3, source: 'scanner', tf: '1h', symbols: [], max_positions: 5, risk_pct: 1, scanner_top: 10,
     alerts: false, alert_channels: 0, initial_balance: 1000, max_exposure_pct: 100, max_drawdown_pct: 20, futures_margin_pct: 50,
-    stock_instrument: 'auto', options_premium_pct: 10,
+    stock_instrument: 'auto', options_premium_pct: 10, learn_guard: true, paused_contexts: [],
     health: { ok: true, last_decision: NOW - 600_000, stale: [], downtime: null, text: 'Funciona: decide al cierre de cada vela de 1h.' },
     weekly: null,
     brake: { limit_pct: 20, drawdown_pct: 1.2, active: false },
@@ -177,8 +178,9 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
   assert.deepEqual(t.AutopilotStatus, [
     'enabled', 'account_id', 'source', 'tf', 'symbols', 'max_positions', 'risk_pct', 'scanner_top', 'watching', 'scan', 'log',
     'alerts', 'alert_channels', 'initial_balance', 'max_exposure_pct', 'max_drawdown_pct', 'futures_margin_pct',
-    'stock_instrument', 'options_premium_pct', 'health', 'weekly', 'brake', 'note',
+    'stock_instrument', 'options_premium_pct', 'learn_guard', 'paused_contexts', 'health', 'weekly', 'brake', 'note',
   ])
+  assert.deepEqual(t.AutopilotPausedContext, ['dimension', 'label', 'key', 'bucket_label', 'n', 'wins', 'mean_r', 'ci'])
   assert.deepEqual(t.AutopilotHealth, ['ok', 'last_decision', 'stale', 'downtime', 'text'])
   assert.deepEqual(t.AutopilotDowntime, ['from', 'to'])
   assert.deepEqual(t.AutopilotWeekly, ['week_start', 'week_end', 'trades', 'wins', 'total_r', 'mean_r', 'pnl', 'text', 'generated_at'])
@@ -203,7 +205,7 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
   assert.deepEqual(t.AutopilotScan, ['id', 'finished_at', 'opportunities'])
   assert.deepEqual(t.AutopilotUpdate, [
     'enabled?', 'source?', 'symbols?', 'tf?', 'max_positions?', 'risk_pct?', 'scanner_top?', 'alerts?', 'max_exposure_pct?',
-    'max_drawdown_pct?', 'futures_margin_pct?', 'stock_instrument?', 'options_premium_pct?',
+    'max_drawdown_pct?', 'futures_margin_pct?', 'stock_instrument?', 'options_premium_pct?', 'learn_guard?',
   ])
   assert.match(src, /export type AutopilotStockInstrument = 'auto' \| 'shares' \| 'options'/)
   assert.deepEqual(t.AutopilotBrake, ['limit_pct', 'drawdown_pct', 'active'])
@@ -321,6 +323,27 @@ test('money management: its own rules and numbers, never a promise; the brake no
   assert.equal(render(M.BrakeNotice, { brake: { limit_pct: 20, drawdown_pct: 5, active: false } }), '')
   const on = render(M.BrakeNotice, { brake: { limit_pct: 20, drawdown_pct: 24.5, active: true } })
   assert.ok(on.includes('Freno de pérdidas activo') && on.includes('24,5 %') && on.includes('Reiníciala o cambia el freno'), on)
+})
+
+test('learning from its losses: the switch, its rule and the contexts where it does not open, with their evidence', () => {
+  const paused = [{ dimension: 'session', label: 'Sesión de entrada', key: 'londres', bucket_label: 'Londres (3–8 h)', n: 35,
+    wins: 4, mean_r: -0.82, ci: [-1.05, -0.6] }]
+  const st = M.normalizeAutopilot(snapshot({ paused_contexts: paused })).autopilot
+  assert.equal(st.paused_contexts.length, 1)
+  const notice = render(M.LearnedNotice, { contexts: st.paused_contexts, enabled: true })
+  assert.ok(notice.includes('Aprendió de sus pérdidas y no opera en') && notice.includes('«Sesión de entrada: Londres (3–8 h)»'), notice)
+  assert.ok(notice.includes('4 de 35 ganadoras en 90 días') && notice.includes('IC 99 % -1,05R a -0,60R'), notice)
+  assert.equal(render(M.LearnedNotice, { contexts: st.paused_contexts, enabled: false }), '')
+  assert.equal(render(M.LearnedNotice, { contexts: [], enabled: true }), '')
+  assert.equal(M.normalizeAutopilot(snapshot({ paused_contexts: [{ dimension: 'session' }] })).autopilot.paused_contexts.length, 0)
+  const on = controls()
+  assert.ok(on.includes('Aprender de sus pérdidas') && on.includes('intervalo del 99 % bajo cero'), on)
+  const off = controls({ learn_guard: false })
+  assert.ok(off.includes('opera en todos los contextos aunque pierda en alguno'), off)
+  const money = render(M.MoneyCard, { status: st, dailyLossPct: null })
+  assert.ok(money.includes('Aprende de sus pérdidas: deja de operar en un contexto'), money)
+  const noLearn = render(M.MoneyCard, { status: { ...st, learn_guard: false }, dailyLossPct: null })
+  assert.ok(noLearn.includes('No aprende de sus pérdidas'), noLearn)
 })
 
 test('health: stale markets and a detected stop are told, with what to do; the weekly report verbatim', () => {
