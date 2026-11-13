@@ -23,6 +23,7 @@ class Runtime:
         self.maintenance: Any = None  # app.maintenance.Maintenance
         self.alerts: Any = None  # app.alerts.service.AlertService (Telegram / email)
         self.validation: Any = None  # app.validation.service.ValidationService (walk-forward reports)
+        self.ai: Any = None  # app.ai.service.AIService (local copilot with Ollama, read-only tools)
         self.auth: Any = None  # app.auth.SupabaseVerifier (cloud mode only)
         # "single": the only instance (SQLite or no background work) · "leader": holds the PostgreSQL leader lock and
         # runs the services · "standby": another instance holds it; only /api/health answers (see app.main.Leadership)

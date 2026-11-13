@@ -5,6 +5,9 @@
 import { authEnabled, currentSession, ensureFreshSession, getAccessToken, refreshSession, signOut, type Session } from '../auth/session'
 import { apiUrl } from '../lib/config'
 import type {
+  AIChatMessage,
+  AIChatReply,
+  AIStatus,
   AutopilotComparison,
   AutopilotJournal,
   AutopilotSnapshot,
@@ -254,6 +257,12 @@ export const api = {
     config: (body: { speed?: number; regime?: string; paused?: boolean; auto_trade?: boolean }) =>
       post<{ state: SimState }>('/api/sim/config', body),
     state: () => get<SimSnapshot>('/api/sim/state'),
+  },
+
+  // ------------------------------------------------------------------ local AI copilot (Ollama)
+  ai: {
+    status: () => get<AIStatus>('/api/ai/status'),
+    chat: (messages: AIChatMessage[]) => post<AIChatReply>('/api/ai/chat', { messages }),
   },
 
   // ------------------------------------------------------------------ paper trading

@@ -11,7 +11,7 @@ import type { PaperOrder, PaperRisk } from './types-paper-orders'
 export type Timeframe = '1m' | '3m' | '5m' | '15m' | '30m' | '1h' | '2h' | '4h' | '6h' | '12h' | '1d' | '1w'
 export const TIMEFRAMES: Timeframe[] = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d', '1w']
 
-export type Page = 'chart' | 'markets' | 'scanner' | 'sim' | 'paper' | 'studio' | 'brain' | 'settings'
+export type Page = 'chart' | 'markets' | 'scanner' | 'sim' | 'paper' | 'studio' | 'brain' | 'copilot' | 'settings'
 
 export type Level =
   | 'debug' | 'info' | 'success' | 'warn' | 'error'
@@ -1043,3 +1043,4 @@ export * from './types-validation'
 export * from './types-paper-orders'
 export * from './types-realtime'
 export * from './types-autopilot'
+export * from './types-ai'

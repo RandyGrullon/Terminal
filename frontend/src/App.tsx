@@ -19,6 +19,7 @@ import {
   LogOut,
   Radar,
   Settings as SettingsIcon,
+  Sparkles,
   SquareTerminal,
   TriangleAlert,
   Wallet,
@@ -58,6 +59,7 @@ const NAV: { page: Page; label: string; icon: LucideIcon }[] = [
   { page: 'paper', label: 'Cuenta demo', icon: Wallet },
   { page: 'studio', label: 'PyChart', icon: Code },
   { page: 'brain', label: 'Aprendizaje', icon: Brain },
+  { page: 'copilot', label: 'Copiloto', icon: Sparkles },
   { page: 'settings', label: 'Ajustes', icon: SettingsIcon },
 ]
 
@@ -107,6 +109,7 @@ const PAGES: Record<Page, LazyPage> = {
   paper: lazyPage('paper', () => import('./pages/PaperPage')),
   studio: lazyPage('studio', () => import('./pages/StudioPage')),
   brain: lazyPage('brain', () => import('./pages/BrainPage')),
+  copilot: lazyPage('copilot', () => import('./pages/CopilotPage')),
   settings: lazyPage('settings', () => import('./pages/SettingsPage')),
 }
 

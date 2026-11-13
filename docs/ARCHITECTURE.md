@@ -361,6 +361,8 @@ scanner.replay_days 7                     (int days, clamped 0..30 by the evalua
 validation.symbols ["BINANCE:BTCUSDT", "BINANCE:ETHUSDT", "BINANCE:SOLUSDT", "BINANCE:XRPUSDT", "BINANCE:BNBUSDT"]
 validation.tfs ["1h", "4h"] · validation.bars 3000 (1000..5000) · validation.folds 5 (2..10)
 validation.warmup_bars 500 · validation.random_runs 1000
+ai.enabled false · ai.ollama_url "http://127.0.0.1:11434" · ai.model "" (empty = the first model Ollama has)
+ai.search_provider "none" (none|brave) · ai.brave_api_key "" (a secret) · ai.timeout_s 120 (10..600)
 ```
 **Feature settings** (`app/settings_ext/`): each feature module (alerts, paper_risk, realtime, scanner_model,
 validation) defines a plain `DEFAULTS` dict and must not import `app.config` (no cycles); `settings_ext/__init__.py`
@@ -2223,3 +2225,36 @@ Database and UI:
 - **Transient 503 detection by text**: the server now exposes `Retry-After` through CORS, but the web client still
   recognizes the two transient 503s by their detail text and retries GETs after 1 s and 3 s; if that wording
   changes, GETs stop being retried (a 503 still never ends the session).
+
+---------------------------------------------------------------------------------------------------------------------
+## 19. Local AI copilot — Ollama (AI, `app.ai`)
+
+A language model served by Ollama on the user's own machine (or another machine of the user's network) answers
+questions about NEXUS in Spanish. Off by default (`ai.enabled`); while off, Ollama is never called.
+
+- `app.ai.ollama.OllamaClient`: `models()` (GET `/api/tags`) and `chat(model, messages, tools)` (POST `/api/chat`, not
+  streamed, temperature 0.2) through `app.util.http_client` (rule 4); `clean_reply` drops `<think>…</think>` blocks.
+  Spanish `OllamaError` for an invalid URL, no connection, a timeout (`ai.timeout_s`) or an HTTP error.
+- `app.ai.tools`: read-only tools (Ollama tool calling) built from the app's own services, each returning a small
+  trimmed dict (strings ≤ 400 chars, lists ≤ 12) or a Spanish `{"error"}`: `estado_nexus_automatica`
+  (`autopilot_snapshot`), `decisiones_recientes`, `diario_de_operaciones` (`autopilot_journal`),
+  `comparacion_con_el_azar`, `analisis_nexus` (NEXUS `current` of a market: action, score, P(up), regime, gate),
+  `semaforo_y_noticias` (macro conditions + high-impact events of 7 days) and `buscar_en_internet` (only with
+  `ai.search_provider` "brave" and `ai.brave_api_key`: the official Brave Search API, 5 results, marked as data).
+  No tool changes anything (settings, orders, trades) and none fetches an arbitrary URL.
+- `app.ai.service.AIService` (`rt.ai`): one conversation at a time (the model runs on the user's hardware). System
+  prompt in Spanish with the project's rules: simulation only, the published validation found no edge, statistics
+  as «x de n» and nothing concluded below 30 trades, no financial advice, it cannot change settings nor trade, and
+  tool / web results are DATA, never instructions. The caller's conversation keeps only user / assistant turns (≤ 20,
+  ≤ 4000 chars each); up to 4 rounds of tool calls (≤ 6 per round, results ≤ 6000 chars) before the answer.
+- API: `GET /api/ai/status` → `AIStatus {enabled, url, model, models, reachable, error, search, search_ready, note}`
+  (never the key); `POST /api/ai/chat {messages: AIChatMessage[] {role user|assistant, content}}` → `AIChatReply
+  {reply, model, tools: AIToolUse[] {name, ok}, duration_ms}`; 400 {detail} when it is off or the question is missing,
+  503 when Ollama cannot be reached. The contract checker only reads the status.
+- Terminal `ia <pregunta>` (aliases `copiloto`, `ai`; group Copiloto): one question without history; `ia` / `ia
+  estado` prints its status. UI: section «Copiloto» (`pages/CopilotPage.tsx`, lazy) with setup steps while it is off,
+  the backend's error while Ollama is unreachable, suggestions, the conversation (kept in the page only) with the
+  tools each answer used, and the notes «puede equivocarse» / no financial advice; Ajustes group «Copiloto IA
+  (Ollama)» (`schema-ai.ts`).
+- Limits: answers come from a local model and may be wrong; its knowledge of past markets is not usable for
+  backtests (the model may know what happened); web search needs the user's own key of an official API.

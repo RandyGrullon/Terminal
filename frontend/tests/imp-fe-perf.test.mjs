@@ -50,7 +50,7 @@ globalThis.__impPagesLoaded = []
 
 const CODEMIRROR = /^node_modules\/(?:@codemirror|@lezer|@uiw|@marijn|codemirror|crelt|style-mod|w3c-keyname)\//
 const CHARTS = /^node_modules\/(?:lightweight-charts|fancy-canvas)\//
-const PAGE_FILES = ['BrainPage', 'ChartPage', 'MarketsPage', 'PaperPage', 'ScannerPage', 'SettingsPage', 'SimulationPage', 'StudioPage'].map(
+const PAGE_FILES = ['BrainPage', 'ChartPage', 'CopilotPage', 'MarketsPage', 'PaperPage', 'ScannerPage', 'SettingsPage', 'SimulationPage', 'StudioPage'].map(
   (p) => `src/pages/${p}.tsx`,
 )
 
@@ -286,6 +286,7 @@ const ALL_PAGES = {
   paper: 'PaperPage',
   studio: 'StudioPage',
   brain: 'BrainPage',
+  copilot: 'CopilotPage',
   settings: 'SettingsPage',
 }
 

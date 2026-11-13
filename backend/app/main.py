@@ -44,6 +44,7 @@ SERVICES: list[tuple[str, str, str]] = [
     ("maintenance", "app.maintenance", "Maintenance"),
     ("alerts", "app.alerts.service", "AlertService"),
     ("validation", "app.validation.service", "ValidationService"),
+    ("ai", "app.ai.service", "AIService"),
 ]
 ROUTERS = [
     "app.api.system",
@@ -54,6 +55,7 @@ ROUTERS = [
     "app.api.macro",
     "app.api.alerts",
     "app.api.validation",
+    "app.api.ai",
 ]
 COMMAND_MODULES = [
     "app.terminal",
@@ -64,6 +66,7 @@ COMMAND_MODULES = [
     "app.macro.commands",
     "app.alerts.commands",
     "app.validation.commands",
+    "app.ai.commands",
 ]
 
 # Single active instance on a shared PostgreSQL database (see Leadership)

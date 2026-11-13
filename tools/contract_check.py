@@ -412,6 +412,9 @@ def main() -> int:
         check_obj(rep, ifaces, "AutopilotComparison", d, "paper.autopilot.compare")
         check_obj(rep, ifaces, "AutopilotCompareNexus", d.get("nexus"), "paper.autopilot.compare.nexus")
         check_obj(rep, ifaces, "AutopilotCompareRandom", d.get("random"), "paper.autopilot.compare.random")
+    d = call("GET", "/api/ai/status")  # the local copilot (off by default: Ollama is not called; chat never is)
+    if d:
+        check_obj(rep, ifaces, "AIStatus", d, "ai.status")
     d = call("GET", "/api/paper/autopilot/journal")  # its trade journal (a computation, read-only)
     if d:
         check_obj(rep, ifaces, "AutopilotJournal", d, "paper.autopilot.journal")

@@ -13,7 +13,7 @@ export interface Toast {
   ts: number
 }
 
-const PAGES: Page[] = ['chart', 'markets', 'scanner', 'sim', 'paper', 'studio', 'brain', 'settings']
+const PAGES: Page[] = ['chart', 'markets', 'scanner', 'sim', 'paper', 'studio', 'brain', 'copilot', 'settings']
 const STORAGE_KEY = 'nexus.ui.v1'
 
 interface Persisted {

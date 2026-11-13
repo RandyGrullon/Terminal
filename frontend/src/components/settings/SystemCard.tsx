@@ -23,6 +23,7 @@ export const SERVICE_LABEL: Record<string, string> = {
   maintenance: 'Mantenimiento',
   alerts: 'Alertas externas',
   validation: 'Validación walk-forward',
+  ai: 'Copiloto IA (Ollama)',
   auth: 'Autenticación',
 }
 

@@ -1,5 +1,6 @@
 // Settings form schema: every key of ARCHITECTURE §4 with a Spanish label, help text, control type and limits.
 import { Brain, Eye, FlaskConical, HardDrive, Radar, Satellite, Scale, ShieldCheck, Wallet, type LucideIcon } from 'lucide-react'
+import { GROUPS_EXT as AI_GROUPS } from './schema-ai'
 import { GROUPS_EXT as ALERT_GROUPS } from './schema-alerts'
 import { GROUPS_EXT as PAPER_RISK_GROUPS } from './schema-paper-risk'
 import { GROUPS_EXT as REALTIME_GROUPS } from './schema-realtime'
@@ -494,6 +495,6 @@ const BASE_GROUPS: GroupDef[] = [
 
 /** Every settings group: the base ones plus those contributed by feature modules (alerts, paper risk, data,
  *  validation). */
-export const GROUPS: GroupDef[] = [...BASE_GROUPS, ...ALERT_GROUPS, ...PAPER_RISK_GROUPS, ...REALTIME_GROUPS, ...VALIDATION_GROUPS]
+export const GROUPS: GroupDef[] = [...BASE_GROUPS, ...ALERT_GROUPS, ...PAPER_RISK_GROUPS, ...REALTIME_GROUPS, ...AI_GROUPS, ...VALIDATION_GROUPS]
 
 export const FIELD_BY_KEY: Record<string, FieldDef> = Object.fromEntries(GROUPS.flatMap((g) => g.fields.map((f) => [f.key, f])))

@@ -389,7 +389,20 @@ símbolo, un precio cada 35–40 s en sesión; más lento con varios). *Ajustes 
 solo tiene tiempo real en planes de pago y Alpha Vantage gratis, solo cierres diarios. «Tiempo real» significa que cada
 precio lo era al consultarlo, no tick a tick. Terminal: `realtime`, `providers`, `quote aapl`.
 
-### 11. Terminal
+### 11. Copiloto (IA en tu PC)
+
+Una IA que corre en tu propio PC con **Ollama** y entiende los datos de NEXUS: le preguntas «¿cómo va NEXUS
+automática?», «¿por qué no ha operado hoy?», «¿qué dice su diario?», «¿qué ve NEXUS en BTC?» o «¿qué noticias hay esta
+semana?» y consulta la app para responder. Si añades una clave de **Brave Search API** también busca en internet.
+Solo lee: no cambia ajustes ni abre o cierra operaciones, y lo que encuentra en internet lo trata como información,
+nunca como órdenes. Puede equivocarse y no es asesoría financiera.
+
+1. Instala Ollama (ollama.com) y descarga un modelo: `ollama pull qwen3:8b` (con una GPU de 12 GB caben modelos de
+   hasta unos 14B, p. ej. `qwen3:14b`).
+2. En *Ajustes → Copiloto IA (Ollama)* actívalo; si Ollama corre en otro equipo, pon su dirección.
+3. Abre la sección **Copiloto** o escribe en la terminal `ia ¿cómo va NEXUS automática?`.
+
+### 12. Terminal
 
 Ábrela con el botón de la cabecera o ``Ctrl+` ``. Muestra en vivo todo lo que pasa (señales, operaciones, escaneos,
 aprendizaje, errores) y acepta comandos: `help` los lista por grupos y `help <comando>` explica uno. Muchos tienen

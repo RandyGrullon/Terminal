@@ -73,9 +73,9 @@ uv pip install --python backend/.tmp/pgenv/Scripts/python.exe pgserver
 backend/.tmp/pgenv/Scripts/python.exe tools/pg_start.py backend/.tmp/pgdata   # imprime la URI
 ```
 
-Estado tras «Aprender de sus pérdidas» en NEXUS automática (13/11/2026, en Windows): backend 2011 passed / 27 skipped
-sobre SQLite y 2022 passed / 16 skipped sobre PostgreSQL (las omisiones son las de PostgreSQL, red, solo Linux / POSIX
-y el lock exacto); UI 253 pruebas en 9 suites; `tsc` sin errores; contrato 134 comprobaciones · 0 fallos · 6 avisos
+Estado tras el copiloto con Ollama (13/11/2026, en Windows): backend 2017 passed / 27 skipped
+sobre SQLite y 2028 passed / 16 skipped sobre PostgreSQL (las omisiones son las de PostgreSQL, red, solo Linux / POSIX
+y el lock exacto); UI 259 pruebas en 9 suites; `tsc` sin errores; contrato 135 comprobaciones · 0 fallos · 6 avisos
 (sin red, `--symbol SIM:NEXUS` y base nueva, como en CI: los avisos son listas vacías y ningún informe de validación
 guardado). La prueba más lenta es `tests/test_imp_engine_repaint_history.py` (regresión de repintado: 300 cierres,
 ~2,5 min). Si la suite sobre PostgreSQL local se vuelve muy lenta (miles de esquemas creados y borrados por las
@@ -114,6 +114,9 @@ pruebas), arranca `tools/pg_start.py` con una carpeta nueva.
     `channels.py` (Telegram y SMTP).
   - `validation/`: validación walk-forward (`walkforward.py`, `mechanics.py`, `stats.py`, `verdict.py`,
     `aggregate.py`, `service.py`, `cli.py`, `markdown.py`…).
+  - `ai/`: copiloto local con Ollama (`ollama.py` cliente, `tools.py` herramientas de solo lectura sobre la app y
+    búsqueda con la API oficial de Brave si hay clave, `service.py` conversación con las reglas del proyecto,
+    `commands.py` comando `ia`); apagado por defecto.
   - `api/`: routers REST.
 - `frontend/src/`: `api/` (`client.ts`, `ws.ts`, `types.ts` = tipos canónicos; `types-*.ts` = tipos de cada módulo
   (alerts, paper-orders, realtime, validation), reexportados por `types.ts`), `pages/` (una por sección, cargada bajo
