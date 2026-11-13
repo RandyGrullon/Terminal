@@ -37,6 +37,9 @@ export {
   AutopilotResetModal,
   BrakeNotice,
   DecisionLog,
+  HealthNotice,
+  WeeklyCard,
+  normalizeHealth,
   MoneyCard,
   KIND_INFO,
   WatchCard,
@@ -121,6 +124,8 @@ function status(over = {}) {
     enabled: true, account_id: 3, source: 'scanner', tf: '1h', symbols: [], max_positions: 5, risk_pct: 1, scanner_top: 10,
     alerts: false, alert_channels: 0, initial_balance: 1000, max_exposure_pct: 100, max_drawdown_pct: 20, futures_margin_pct: 50,
     stock_instrument: 'auto', options_premium_pct: 10,
+    health: { ok: true, last_decision: NOW - 600_000, stale: [], downtime: null, text: 'Funciona: decide al cierre de cada vela de 1h.' },
+    weekly: null,
     brake: { limit_pct: 20, drawdown_pct: 1.2, active: false },
     watching: [
       { symbol: 'BINANCE:SOLUSDT', why: 'escáner', direction: 'short' },
@@ -172,8 +177,11 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
   assert.deepEqual(t.AutopilotStatus, [
     'enabled', 'account_id', 'source', 'tf', 'symbols', 'max_positions', 'risk_pct', 'scanner_top', 'watching', 'scan', 'log',
     'alerts', 'alert_channels', 'initial_balance', 'max_exposure_pct', 'max_drawdown_pct', 'futures_margin_pct',
-    'stock_instrument', 'options_premium_pct', 'brake', 'note',
+    'stock_instrument', 'options_premium_pct', 'health', 'weekly', 'brake', 'note',
   ])
+  assert.deepEqual(t.AutopilotHealth, ['ok', 'last_decision', 'stale', 'downtime', 'text'])
+  assert.deepEqual(t.AutopilotDowntime, ['from', 'to'])
+  assert.deepEqual(t.AutopilotWeekly, ['week_start', 'week_end', 'trades', 'wins', 'total_r', 'mean_r', 'pnl', 'text', 'generated_at'])
   assert.deepEqual(t.AutopilotSnapshot, ['account', 'positions', 'history', 'risk', 'autopilot'])
   assert.deepEqual(t.AutopilotWatch, ['symbol', 'why', 'direction?', 'last?'])
   assert.deepEqual(t.AutopilotLast, ['bar_time', 'tf', 'action', 'label'])
@@ -313,6 +321,28 @@ test('money management: its own rules and numbers, never a promise; the brake no
   assert.equal(render(M.BrakeNotice, { brake: { limit_pct: 20, drawdown_pct: 5, active: false } }), '')
   const on = render(M.BrakeNotice, { brake: { limit_pct: 20, drawdown_pct: 24.5, active: true } })
   assert.ok(on.includes('Freno de pérdidas activo') && on.includes('24,5 %') && on.includes('Reiníciala o cambia el freno'), on)
+})
+
+test('health: stale markets and a detected stop are told, with what to do; the weekly report verbatim', () => {
+  const ok = M.normalizeHealth({ ok: true, stale: [], downtime: null, text: 'Funciona' })
+  assert.equal(render(M.HealthNotice, { health: ok, enabled: true }), '')
+  const stale = M.normalizeHealth({ ok: false, stale: ['BINANCE:BTCUSDT'], downtime: null,
+    text: 'Sin decisiones recientes en BTCUSDT: sus velas no llegan (feed de precios caído, sin conexión o el servidor estuvo detenido).' })
+  const html = render(M.HealthNotice, { health: stale, enabled: true })
+  assert.ok(html.includes('Sin decisiones recientes en BTCUSDT') && html.includes('role="alert"'), html)
+  assert.equal(render(M.HealthNotice, { health: stale, enabled: false }), '', 'nothing while it is paused')
+  const down = M.normalizeHealth({ ok: true, stale: [], downtime: { from: NOW - 7_200_000, to: NOW - 600_000 }, text: 'Funciona' })
+  const d = render(M.HealthNotice, { health: down, enabled: true })
+  assert.ok(d.includes('Estuvo detenida de') && d.includes('servidor apagado o PC suspendido') && d.includes('el PC sin suspenderse'), d)
+  assert.deepEqual(M.normalizeHealth(undefined), { ok: true, last_decision: null, stale: [], downtime: null, text: '' })
+  const week = { week_start: NOW - 8 * 86_400_000, week_end: NOW - 86_400_000, trades: 5, wins: 2, total_r: -0.8, mean_r: -0.16,
+    pnl: -12.4, text: 'Semana del 02/11 al 08/11: 5 operaciones cerradas, 2 de 5 ganadoras, R total -0,80R (-12,40 $). Operaciones simuladas; no es asesoría financiera.',
+    generated_at: NOW }
+  const card = render(M.WeeklyCard, { weekly: M.normalizeAutopilot(snapshot({ weekly: week })).autopilot.weekly })
+  assert.ok(card.includes('Informe semanal') && card.includes('2 de 5 ganadoras') && card.includes('no es asesoría financiera'), card)
+  assert.ok(render(M.WeeklyCard, { weekly: null }).includes('Todavía no hay informe'))
+  const view = render(M.AutopilotView, { initial: snapshot({ health: { ...stale } }) })
+  assert.ok(view.includes('Sin decisiones recientes en BTCUSDT'), 'the view shows its health notice')
 })
 
 test('journal: «x de n» per cause and session, the backend verdicts and findings verbatim, empty groups hidden', () => {

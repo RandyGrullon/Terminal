@@ -574,6 +574,7 @@ _AP_RESET = ("reset", "reiniciar")
 _AP_ALERTS = ("avisos", "alertas", "alerts")
 _AP_COMPARE = ("azar", "comparar", "referencia")
 _AP_JOURNAL = ("diario", "errores", "patrones", "journal")
+_AP_WEEKLY = ("semana", "informe", "semanal")
 _AP_KIND = {"open": ("Abre", "success"), "close": ("Cierra", "info"), "skip": ("Descarta", "muted"),
             "info": ("Nota", "info")}
 # --instrumento: how it trades stocks and funds (autopilot.stock_instrument)
@@ -582,7 +583,8 @@ _AP_INSTRUMENTS = {"auto": "auto", "nexus": "auto", "acciones": "shares", "share
 AUTOPILOT_USAGE = ("autopilot [on|off] [lista <símbolos…> | escaner [N] | ambos [N]] [--tf 1h] [--max 5] [--risk 1] "
                    "[--top 10] [--expo 100] [--freno 20] [--margen 50] [--instrumento auto|acciones|opciones] "
                    "[--prima 10] · "
-                   "autopilot pos | log | azar | diario | avisos on|off | close <id|símbolo|all> | reset [saldo] --yes")
+                   "autopilot pos | log | azar | diario | semana | avisos on|off | close <id|símbolo|all> | "
+                   "reset [saldo] --yes")
 
 
 def _ap_when(ctx: CommandContext, ms: Any) -> str:
@@ -671,6 +673,13 @@ def _print_autopilot(ctx: CommandContext, snap: dict) -> None:
     ctx.print(("Futuros: contratos enteros, con hasta el " + fmt_pct(fm, 0, False) + " del capital como margen aproximado"
                if fm else "No opera futuros (--margen 0)"), "muted")
     ctx.print(_ap_stocks_line(st), "muted")
+    health = st.get("health") or {}
+    if health.get("text"):
+        ctx.print(("✔ " if health.get("ok") else "⚠ ") + health["text"], "info" if health.get("ok") else "warn")
+    down = health.get("downtime")
+    if down:
+        ctx.print(f"Estuvo detenida de {_ap_when(ctx, down['from'])} a {_ap_when(ctx, down['to'])} (servidor apagado o PC "
+                  "suspendido)", "warn")
     brake = st.get("brake") or {}
     if brake.get("active"):
         ctx.print(f"⛔ Freno de pérdidas activo: la cuenta está un {fmt_pct(brake.get('drawdown_pct'), 1, False)} por debajo "
@@ -781,6 +790,18 @@ async def _autopilot(ctx: CommandContext) -> None:
                       + ("día" if c["days"] == 1 else "días"), "info")
         ctx.print(c["note"], "muted")
         ctx.data = c
+        return
+
+    if sub in _AP_WEEKLY:
+        st = paper.autopilot_status()
+        weekly = st.get("weekly")
+        if weekly:
+            ctx.print("Informe semanal de NEXUS automática", "system")
+            ctx.print(weekly["text"], "info")
+        else:
+            ctx.print("Todavía no hay informe semanal: se hace los lunes (00:00 UTC) con la semana que terminó, si "
+                      "NEXUS automática estuvo activa.", "muted")
+        ctx.data = weekly
         return
 
     if sub in _AP_JOURNAL:

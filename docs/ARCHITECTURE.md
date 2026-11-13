@@ -704,13 +704,15 @@ GET  /api/learning/replay?days=&model_key=                       -> scanner repl
   `autopilot.state`), alerts (setting `alerts.autopilot`: its trades as alerts, opt-in), alert_channels (alert
   channels on and complete now, `AlertService.active_channels()`; 0 = they would reach nobody), initial_balance,
   max_exposure_pct, max_drawdown_pct, futures_margin_pct, stock_instrument: auto|shares|options, options_premium_pct,
-  brake: AutopilotBrake {limit_pct, drawdown_pct, active} | null, note}`. 400 texts: 'Fuente no válida: usa «scanner»
-  (escáner), «list» (lista fija) o «both» (las dos)', 'El máximo de posiciones debe ser un número entero entre 1 y
-  20', 'El riesgo por operación (%) debe ser un número entre 0,1 y 5,0', 'El número de candidatos del escáner debe ser
-  un número entero entre 1 y 30', 'Como máximo 30 símbolos en la lista', 'Instrumento no válido para acciones: usa
-  «auto» (NEXUS elige), «shares» (acciones) u «options» (opciones)', 'La prima máxima por operación (%) debe ser un
-  número entre 0,0 y 50,0', an invalid tf. `Position.origin` gains 'autopilot'. The user can only switch it on/off,
-  configure it, close its positions and reset it: no orders are placed by hand in account 3.
+  health: AutopilotHealth {ok, last_decision (ms), stale: string[], downtime: AutopilotDowntime {from, to} | null,
+  text}, weekly: AutopilotWeekly {week_start, week_end, trades, wins, total_r, mean_r, pnl, text, generated_at} |
+  null, brake: AutopilotBrake {limit_pct, drawdown_pct, active} | null, note}`. 400 texts: 'Fuente no válida: usa
+  «scanner» (escáner), «list» (lista fija) o «both» (las dos)', 'El máximo de posiciones debe ser un número entero
+  entre 1 y 20', 'El riesgo por operación (%) debe ser un número entre 0,1 y 5,0', 'El número de candidatos del
+  escáner debe ser un número entero entre 1 y 30', 'Como máximo 30 símbolos en la lista', 'Instrumento no válido para
+  acciones: usa «auto» (NEXUS elige), «shares» (acciones) u «options» (opciones)', 'La prima máxima por operación (%)
+  debe ser un número entre 0,0 y 50,0', an invalid tf. `Position.origin` gains 'autopilot'. The user can only switch
+  it on/off, configure it, close its positions and reset it: no orders are placed by hand in account 3.
 - **Skill report** (`app.sim.evaluator.skill_report`, §10): `days` ≤ 0 = every stored row (the UI's 'Todo lo
   guardado' sends 0); a `source` other than empty / scanner / nexus → 400 'Fuente no válida: usa scanner o nexus', a
   non-finite `days` → 400, an unparsable one → 422; `model_key` is trimmed. Cached 60 s (600 s for longer windows or
@@ -1224,6 +1226,19 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     days before its expiry with a live price of the stock, or settles it at its intrinsic value with the last known
     price once the expiry passed (reason `EXPIRY`). Its gate decision goes to gate_log on the underlying with the
     gate's own levels. The comparison with random entries leaves options out (their R is on a theoretical premium).
+  - **Health and weekly report of NEXUS automática** (`_autopilot_watchdog`, every pass of the monitor while it is
+    on): its heartbeat is kept in memory and saved in meta `autopilot.heartbeat` every 5 min; a gap of more than two
+    bars of its tf (and over 11 min) between two passes, or between the last saved heartbeat and a start, means the
+    server or the PC stopped: noted in its log, sent as an opt-in alert (category autopilot, kind downtime) and shown
+    for a day in `status.health.downtime`. `status.health` (`_autopilot_health`): the close of the newest bar it
+    decided and the watched 24/7 markets (crypto) with no decision for over three bars plus 5 min (`stale`: their
+    candles stopped arriving), alerted once per incident (kind stale) and cleared when it decides again; markets with
+    sessions are left out (no decision while closed is normal). Weekly report (`_weekly_if_due`, Mondays from 00:00
+    UTC, for the week that just ended; the first pass after it was turned on only takes note of the week, meta
+    `autopilot.weekly_week`): its closed trades of that week as «wins de trades», total and mean R, P&L and the most
+    repeated cause of its losses (its journal), saved in meta `autopilot.weekly`, shown in `status.weekly`, noted and
+    sent as an opt-in alert (kind weekly). Terminal: `autopilot` prints the health line, `autopilot semana` the
+    report.
   - **Journal of NEXUS automática** (`app.sim.journal`, `autopilot_journal()`, `GET /api/paper/autopilot/journal`,
     terminal `autopilot diario`): when its trader opens, `open_position(context=)` keeps in `meta.context` what NEXUS
     saw on that bar (regime, score, P(up), the gate's score and win probability; `atr_pct` = ATR % of the fill, none

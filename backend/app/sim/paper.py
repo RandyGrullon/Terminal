@@ -60,7 +60,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
@@ -120,6 +120,13 @@ AUTOPILOT_STATE_KEY = "autopilot.state"  # meta: its decision log and last read 
 AUTOPILOT_KINDS = ("open", "close", "skip", "info")
 COMPARE_TTL_S = 300.0  # its comparison with random entries is recomputed at most every 5 min (new outcomes come in)
 JOURNAL_LIMIT = 500  # newest closed trades its journal analyses
+HEARTBEAT_KEY = "autopilot.heartbeat"  # meta: unix s it was last seen running while on (a gap = server or PC stopped)
+HEARTBEAT_SAVE_S = 300.0
+WEEKLY_KEY = "autopilot.weekly"  # meta: its last weekly report (AutopilotWeekly)
+WEEKLY_WEEK_KEY = "autopilot.weekly_week"  # meta: Monday (unix s) of the last week it reported or skipped
+HEALTH_GRACE_S = 300  # a 24/7 market with no decision 3 bars after its last one has «sin decisiones recientes»
+DOWNTIME_SHOW_S = 86400  # a detected stop stays in its status for a day
+WEEK_S = 7 * 86400
 AUTOPILOT_NOTE = (
     "Cuenta 100 % simulada que opera sola con las señales de NEXUS y el filtro; nunca se envía nada a un bróker. "
     "La validación publicada (docs/VALIDATION.md) no encontró ventaja: lo esperable son resultados parecidos a "
@@ -623,6 +630,13 @@ class PaperEngine:
         self._compare_cache: tuple[tuple[int, int], float, dict[str, Any]] | None = None
         self._compare_lock = asyncio.Lock()
         self._journal_cache: tuple[tuple[int, int], float, dict[str, Any]] | None = None
+        # its health: the monitor's last pass while it was on (heartbeat), the last stop detected, the stale alert
+        self._ap_seen: int | None = None
+        self._ap_seen_saved = 0.0
+        self._ap_downtime: dict[str, int] | None = None
+        self._ap_stale_warned = False
+        self._ap_weekly: dict[str, Any] | None = None
+        self._ap_weekly_week: int | None = None
         self._stale_warned: set[str] = set()  # symbols whose "sin precio en vivo" warning was already emitted
         # pending orders (account 1): id -> order dict; ids whose fill is being decided (gate at the fill price)
         self._orders: dict[int, dict] = {}
@@ -659,6 +673,7 @@ class PaperEngine:
         await self._expire_orders()  # orders whose expiry passed while NEXUS was stopped
         await self._register_listener()
         await self._load_autopilot_state()
+        await self._load_autopilot_health()
         self._autopilot_on = self._autopilot_cfg()["enabled"]
         if self.rt.settings is not None:
             self.rt.settings.add_listener(self._on_setting)
@@ -2904,11 +2919,168 @@ class PaperEngine:
             "max_exposure_pct": cfg["max_exposure_pct"],
             "max_drawdown_pct": cfg["max_drawdown_pct"],
             "futures_margin_pct": cfg["futures_margin_pct"],
+            "health": self._autopilot_health(cfg),
+            "weekly": dict(self._ap_weekly) if self._ap_weekly else None,
             "stock_instrument": cfg["stock_instrument"],
             "options_premium_pct": cfg["options_premium_pct"],
             "brake": None,  # filled by autopilot_snapshot (it needs the account's equity)
             "note": AUTOPILOT_NOTE,
         }
+
+    # ------------------------------------------------------------------ its health and weekly report
+
+    async def _meta_get(self, key: str) -> Any:
+        try:
+            return await self.rt.db.fetchval("SELECT value FROM meta WHERE key=?", (key,))
+        except Exception:
+            return None
+
+    async def _meta_put(self, key: str, value: str) -> None:
+        try:
+            await self.rt.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (key, value))
+        except Exception as exc:
+            if self._log.should_log(f"meta:{key}", 600):
+                self._emit("warn", "paper", f"NEXUS automática: no se pudo guardar {key}: {exc}")
+
+    async def _load_autopilot_health(self) -> None:
+        """Its last heartbeat and weekly report: a heartbeat older than two bars while it was on means the server was
+        stopped (or the PC asleep) — noted once, with an alert."""
+        weekly = json_loads(await self._meta_get(WEEKLY_KEY), None)
+        self._ap_weekly = weekly if isinstance(weekly, dict) else None
+        week = safe_float(await self._meta_get(WEEKLY_WEEK_KEY))
+        self._ap_weekly_week = int(week) if week is not None else None
+        cfg = self._autopilot_cfg()
+        beat = safe_float(await self._meta_get(HEARTBEAT_KEY))
+        if cfg["enabled"] and beat is not None:
+            self._check_gap(int(beat), now_s(), cfg)
+        self._ap_seen = now_s() if cfg["enabled"] else None
+
+    def _check_gap(self, last_s: int, now: int, cfg: dict[str, Any]) -> bool:
+        """A stop between two passes of its monitor (server stopped, PC asleep): noted in its log and alerted."""
+        tf_s = _bar_seconds(cfg["tf"])
+        gap = int(now) - int(last_s)
+        if gap <= max(2 * tf_s, int(2 * HEARTBEAT_SAVE_S) + 60):
+            return False
+        self._ap_downtime = {"from": int(last_s) * 1000, "to": int(now) * 1000}
+        bars = gap // tf_s
+        text = (f"Estuvo detenida {_age_text(gap)} (de {self._when(int(last_s))} a {self._when(int(now))}): no decidió "
+                f"en unas {bars} {'vela' if bars == 1 else 'velas'} de {cfg['tf']}. Para que opere sola, el servidor tiene "
+                "que seguir en marcha y el PC sin suspenderse.")
+        self._autopilot_note("—", "info", text)
+        self._emit("warn", "paper", f"NEXUS automática: {text[0].lower()}{text[1:]}",
+                   {"account_id": AUTOPILOT_ACCOUNT,
+                    "notify": {"category": "autopilot", "kind": "downtime", "priority": "warn"}})
+        return True
+
+    def _autopilot_health(self, cfg: dict[str, Any], now: int | None = None) -> dict[str, Any]:
+        """AutopilotHealth: its last decision and the 24/7 markets it watches with no decision for over three bars
+        (their candles stopped arriving: feed down, no connection, server stopped). Markets with sessions (stocks…)
+        are left out: no decision while they are closed is normal."""
+        now = int(now if now is not None else now_s())
+        tf_s = _bar_seconds(cfg["tf"])
+        held = {traded_symbol(p) for p in self._open.values() if p["account_id"] == AUTOPILOT_ACCOUNT}
+        watched = sorted(set(self._autopilot_watch) | held)
+        reads = [r for r in self._autopilot_last.values() if r.get("tf") == cfg["tf"]]
+        last = max((int(r["bar_time"]) + tf_s * 1000 for r in reads), default=None)  # the close of its newest bar
+        stale = []
+        if cfg["enabled"]:
+            for sym in watched:
+                read = self._autopilot_last.get(sym)
+                if (sym.startswith("SIM:") or asset_class(sym) not in ALWAYS_OPEN_CLASSES or read is None
+                        or read.get("tf") != cfg["tf"]):
+                    continue
+                if now > int(read["bar_time"]) // 1000 + 3 * tf_s + HEALTH_GRACE_S:
+                    stale.append(sym)
+        if not cfg["enabled"]:
+            text = "Pausada: no decide."
+        elif not watched:
+            text = "No vigila ningún mercado ahora mismo: no hay nada que decidir."
+        elif stale:
+            tickers = ", ".join(s.partition(":")[2] or s for s in stale[:5])
+            text = (f"Sin decisiones recientes en {tickers}: sus velas no llegan (feed de precios caído, sin conexión o "
+                    "el servidor estuvo detenido).")
+        else:
+            text = f"Funciona: decide al cierre de cada vela de {cfg['tf']}."
+        down = self._ap_downtime
+        if down is not None and now * 1000 - int(down["to"]) > DOWNTIME_SHOW_S * 1000:
+            down = None
+        return {"ok": not stale, "last_decision": last, "stale": stale, "downtime": dict(down) if down else None,
+                "text": text}
+
+    async def _autopilot_watchdog(self, now: int | None = None) -> None:
+        """While it is on, on every pass of the monitor: its heartbeat (a gap = the server or the PC stopped), the 24/7
+        markets without recent decisions (noted and alerted once per incident) and its weekly report."""
+        now = int(now if now is not None else now_s())
+        cfg = self._autopilot_cfg()
+        if not cfg["enabled"]:
+            self._ap_seen, self._ap_stale_warned = None, False
+            return
+        if self._ap_seen is not None:
+            self._check_gap(self._ap_seen, now, cfg)
+        self._ap_seen = now
+        if time.monotonic() - self._ap_seen_saved >= HEARTBEAT_SAVE_S:
+            self._ap_seen_saved = time.monotonic()
+            await self._meta_put(HEARTBEAT_KEY, str(now))
+        health = self._autopilot_health(cfg, now)
+        if health["stale"] and not self._ap_stale_warned:
+            self._ap_stale_warned = True
+            self._autopilot_note("—", "info", health["text"])
+            self._emit("warn", "paper", f"NEXUS automática: {health['text'][0].lower()}{health['text'][1:]}",
+                       {"account_id": AUTOPILOT_ACCOUNT,
+                        "notify": {"category": "autopilot", "kind": "stale", "priority": "warn"}})
+        elif not health["stale"] and self._ap_stale_warned:
+            self._ap_stale_warned = False
+            self._autopilot_note("—", "info", "Vuelve a decidir con normalidad")
+        await self._weekly_if_due(now)
+
+    async def _weekly_if_due(self, now: int) -> None:
+        """On Mondays (00:00 UTC on), its report of the week that just ended: kept for its view and sent as an alert
+        (category autopilot, opt-in). The first time it only takes note of the week, so a new account does not
+        report an empty week it never ran."""
+        week = now - (now - 4 * 86400) % WEEK_S  # Monday 00:00 UTC (1970-01-05 was a Monday)
+        prev = week - WEEK_S
+        if self._ap_weekly_week is not None and self._ap_weekly_week >= prev:
+            return
+        first = self._ap_weekly_week is None
+        self._ap_weekly_week = prev
+        await self._meta_put(WEEKLY_WEEK_KEY, str(prev))
+        if first:
+            return
+        report = await self._weekly_report(prev, week)
+        self._ap_weekly = report
+        await self._meta_put(WEEKLY_KEY, json_dumps(report))
+        self._autopilot_note("—", "info", report["text"])
+        self._emit("info", "paper", f"NEXUS automática · informe semanal: {report['text']}",
+                   {"account_id": AUTOPILOT_ACCOUNT,
+                    "notify": {"category": "autopilot", "kind": "weekly", "priority": "info"}})
+        await self.publish(AUTOPILOT_ACCOUNT)
+
+    async def _weekly_report(self, start_s: int, end_s: int) -> dict[str, Any]:
+        """AutopilotWeekly of [start_s, end_s): its closed trades as «x de n», their R and P&L and the most repeated
+        cause of its losses."""
+        rows = await self.rt.db.fetchall(
+            "SELECT r_multiple, pnl, meta FROM paper_positions WHERE account_id=? AND status='closed' "
+            "AND origin='autopilot' AND exit_time >= ? AND exit_time < ?", (AUTOPILOT_ACCOUNT, int(start_s), int(end_s)))
+        r = [float(x["r_multiple"]) for x in rows if safe_float(x.get("r_multiple")) is not None]
+        n, wins = len(r), sum(1 for v in r if v > 0)
+        pnl = sum(float(x.get("pnl") or 0.0) for x in rows)
+        causes = [((json_loads(x.get("meta"), {}) or {}).get("journal") or {}).get("cause") for x in rows
+                  if safe_float(x.get("r_multiple")) is not None and float(x["r_multiple"]) <= 0]
+        causes = [c for c in causes if c]
+        d1 = time.strftime("%d/%m", time.gmtime(int(start_s)))
+        d2 = time.strftime("%d/%m", time.gmtime(int(end_s) - 1))
+        if n == 0:
+            text = f"Semana del {d1} al {d2}: ninguna operación cerrada."
+        else:
+            text = (f"Semana del {d1} al {d2}: {n} {'operación cerrada' if n == 1 else 'operaciones cerradas'}, "
+                    f"{wins} de {n} ganadoras, R total {fmt_r(sum(r), 2)} ({fmt_num(pnl, 2, True)} $).")
+            if causes:
+                cause, k = Counter(causes).most_common(1)[0]
+                text += f" Lo más repetido en sus pérdidas: «{J.CAUSE_LABEL.get(cause, cause)}» ({k} de {len(causes)})."
+        text += " Operaciones simuladas; no es asesoría financiera."
+        return {"week_start": int(start_s) * 1000, "week_end": int(end_s) * 1000, "trades": n, "wins": wins,
+                "total_r": round(sum(r), 4) if n else None, "mean_r": round(sum(r) / n, 4) if n else None,
+                "pnl": round(pnl, 2), "text": text, "generated_at": now_ms()}
 
     def _alert_channels(self) -> int:
         """Alert channels (Telegram, email) on and complete: 0 means its alerts would reach nobody."""
@@ -3327,6 +3499,7 @@ class PaperEngine:
                 await self._expire_options()
                 await self.refresh_advice()
                 await self._refresh_autopilot()
+                await self._autopilot_watchdog()
                 if any(p["account_id"] == 1 for p in self._open.values()):
                     await self.publish(1)
                 if any(p["account_id"] == AUTOPILOT_ACCOUNT for p in self._open.values()):

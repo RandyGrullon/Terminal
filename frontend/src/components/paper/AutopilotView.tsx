@@ -5,11 +5,12 @@
 // {type: 'paper_autopilot'} (the user's {type: 'paper'} messages are account 1 and never feed this view); a GET every
 // 30 s while the page is visible is the fallback.
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { BookOpen, Bot, Info, Radar, RefreshCw, RotateCcw, Scale, ScrollText, SlidersHorizontal, TriangleAlert, Wallet, X } from 'lucide-react'
+import { BookOpen, Bot, CalendarDays, Info, PowerOff, Radar, RefreshCw, RotateCcw, Scale, ScrollText, SlidersHorizontal, TriangleAlert, Wallet, X } from 'lucide-react'
 import { api, errorMessage } from '../../api/client'
 import type {
   AutopilotBrake,
   AutopilotComparison,
+  AutopilotHealth,
   AutopilotJournal,
   AutopilotJournalBucket,
   AutopilotJournalVerdict,
@@ -22,6 +23,7 @@ import type {
   AutopilotStockInstrument,
   AutopilotUpdate,
   AutopilotWatch,
+  AutopilotWeekly,
   AutopilotWhy,
   Position,
   ServerMessage,
@@ -151,6 +153,8 @@ export function normalizeStatus(raw: unknown): AutopilotStatus | null {
     futures_margin_pct: numOr(o.futures_margin_pct, 50),
     stock_instrument: o.stock_instrument === 'shares' || o.stock_instrument === 'options' ? o.stock_instrument : 'auto',
     options_premium_pct: numOr(o.options_premium_pct, 10),
+    health: normalizeHealth(o.health),
+    weekly: normalizeWeekly(o.weekly),
     brake: normalizeBrake(o.brake),
     note: isStr(o.note) ? o.note : '',
   }
@@ -169,6 +173,31 @@ export function normalizeAutopilot(raw: unknown): AutopilotSnapshot | null {
     history: normalizePositions(o.history),
     risk: normalizeRisk(o.risk),
     autopilot,
+  }
+}
+
+/** Its health (all clear when missing: an older server). */
+export function normalizeHealth(raw: unknown): AutopilotHealth {
+  const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const d = o.downtime && typeof o.downtime === 'object' ? (o.downtime as Record<string, unknown>) : null
+  return {
+    ok: o.ok !== false,
+    last_decision: isNum(o.last_decision) ? o.last_decision : null,
+    stale: Array.isArray(o.stale) ? o.stale.filter(isStr) : [],
+    downtime: d && isNum(d.from) && isNum(d.to) ? { from: d.from, to: d.to } : null,
+    text: isStr(o.text) ? o.text : '',
+  }
+}
+
+function normalizeWeekly(raw: unknown): AutopilotWeekly | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  if (!isNum(o.week_start) || !isNum(o.week_end) || !isStr(o.text)) return null
+  const int = (v: unknown) => Math.max(0, Math.round(numOr(v, 0)))
+  return {
+    week_start: o.week_start, week_end: o.week_end, trades: int(o.trades), wins: int(o.wins),
+    total_r: isNum(o.total_r) ? o.total_r : null, mean_r: isNum(o.mean_r) ? o.mean_r : null, pnl: numOr(o.pnl, 0),
+    text: o.text, generated_at: numOr(o.generated_at, 0),
   }
 }
 
@@ -386,6 +415,50 @@ function stocksRule(s: AutopilotStatus, pct: (v: number, d?: number) => string):
       : 'Acciones: compra acciones para apostar al alza; no apuesta a la baja (prima máxima de opciones: 0 %).'
   }
   return `Acciones: ${how}. Las opciones tienen precio teórico (Black-Scholes con la volatilidad de 20 días, no cotizaciones reales): paga como mucho el ${pct(s.options_premium_pct, 0)} de su capital en primas por operación, con el stop en −50 % de la prima, y las cierra 7 días antes de su vencimiento.`
+}
+
+/** Its health notice: watched markets without recent decisions, and a stop of the server or the PC it detected. */
+export function HealthNotice({ health, enabled }: { health: AutopilotHealth; enabled: boolean }) {
+  if (!enabled || (health.ok && !health.downtime)) return null
+  return (
+    <>
+      {!health.ok && (
+        <div className="notice ap-brake" role="alert">
+          <TriangleAlert size={15} style={{ flex: 'none', marginTop: 1 }} />
+          <span>{health.text}</span>
+        </div>
+      )}
+      {health.downtime && (
+        <div className="notice ap-note" role="note">
+          <PowerOff size={15} style={{ flex: 'none', marginTop: 1 }} />
+          <span>
+            Estuvo detenida de {fmtDateTime(health.downtime.from)} a {fmtDateTime(health.downtime.to)} (servidor apagado o PC suspendido): mientras tanto
+            no decidió. Para que opere sola, deja el servidor en marcha y el PC sin suspenderse.
+          </span>
+        </div>
+      )}
+    </>
+  )
+}
+
+/** «Informe semanal»: its last weekly report, verbatim from the backend. */
+export function WeeklyCard({ weekly }: { weekly: AutopilotWeekly | null }) {
+  return (
+    <Card
+      title={
+        <>
+          <CalendarDays size={14} /> Informe semanal
+        </>
+      }
+      sub="Cada lunes, la semana anterior; también por Telegram o correo si activaste sus avisos"
+    >
+      {weekly ? (
+        <p className="small">{weekly.text}</p>
+      ) : (
+        <span className="tiny muted">Todavía no hay informe: el primero llega el lunes siguiente a una semana completa activa.</span>
+      )}
+    </Card>
+  )
 }
 
 /** The brake notice: why it opens nothing new and what to do. */
@@ -1367,6 +1440,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
   const journalCard = <JournalCard journal={journal} loading={journalLoading} error={journalError} onRefresh={() => void loadJournal(true)} />
   const controls = status ? <AutopilotControls status={status} saving={saving} error={saveError} onSave={save} /> : null
   const moneyCard = status ? <MoneyCard status={status} dailyLossPct={snap?.risk?.daily_loss_limit_pct ?? null} /> : null
+  const weeklyCard = status ? <WeeklyCard weekly={status.weekly} /> : null
   const watchCard = status ? <WatchCard status={status} onOpenChart={openSymbol} /> : null
   const logCard = status ? <DecisionLog log={status.log} onOpenChart={openSymbol} /> : null
 
@@ -1416,6 +1490,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
         <>
           {error && <ErrorBox error={`${error} · mostrando los últimos datos conocidos`} onRetry={() => void load()} />}
           <BrakeNotice brake={status?.brake ?? null} />
+          {status && <HealthNotice health={status.health} enabled={status.enabled} />}
           <PaperStats account={snap.account} winTally />
           {wide ? (
             <div className="pp-layout">
@@ -1429,6 +1504,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
               <div className="pp-side">
                 {controls}
                 {moneyCard}
+                {weeklyCard}
                 {watchCard}
                 <RiskPanel risk={snap.risk} />
               </div>
@@ -1442,6 +1518,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
                 <div className="ap-col">
                   {controls}
                   {moneyCard}
+                  {weeklyCard}
                 </div>
                 <div className="ap-col">
                   {watchCard}

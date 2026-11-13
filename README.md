@@ -266,6 +266,12 @@ que la actives en «Cómo opera»:
   en la que las abrió, y no abre una segunda posición en esos símbolos.
 - Puedes **pausarla** (no abre nada nuevo; sus posiciones siguen con su stop y sus objetivos), cerrar sus posiciones
   a mano o **reiniciarla** con otro saldo.
+- **Vigilancia**: si en un mercado de 24 h (BTC, ETH…) pasan más de tres velas sin que decida (no llegan sus velas)
+  o si detecta que el servidor o el PC estuvieron detenidos, te lo dice en su vista y en su registro, y por Telegram o
+  correo si activaste sus avisos. Para que opere sola, deja el servidor en marcha y el PC sin suspenderse.
+- **Informe semanal**: cada lunes resume la semana anterior (operaciones cerradas, «x de n» ganadoras, R total,
+  resultado y la causa más repetida de sus pérdidas) en su vista y, con sus avisos activos, por Telegram o correo. En
+  la terminal: `autopilot semana`.
 - **Diario de operaciones**: al abrir guarda lo que vio NEXUS (régimen, puntuación del filtro) y al cerrar cuánto fue
   a favor y en contra y por qué terminó así («En contra desde el principio», «Ganaba 1R o más y lo devolvió»,
   «Llegó a su objetivo»…). Su tarjeta agrupa las operaciones por causa, sesión (Asia, Londres, Nueva York, fin de

@@ -67,6 +67,8 @@ export interface AutopilotStatus {
   futures_margin_pct: number // index futures: equity tied up as approximate margin at most (0 = no futures)
   stock_instrument: AutopilotStockInstrument // stocks and funds: shares, options or NEXUS's choice
   options_premium_pct: number // options: the most premium paid per trade, % of equity (0 = no options)
+  health: AutopilotHealth // its health: decisions arriving, stops of the server / PC detected
+  weekly: AutopilotWeekly | null // its last weekly report (Mondays), null until the first one
   brake: AutopilotBrake | null // null outside a snapshot
   note: string // honest Spanish note from the backend: shown verbatim
 }
@@ -102,6 +104,34 @@ export interface AutopilotCompareRandom {
   entries: number // random entries with a known outcome
   wins: number // of them with R > 0
   mean_r: number | null // mean of the per-trade references (R)
+}
+
+/** Its health: the newest decision and the 24/7 markets without a recent one (their candles stopped arriving). */
+export interface AutopilotHealth {
+  ok: boolean // false while a watched 24/7 market has had no decision for over three bars
+  last_decision: number | null // close of the newest bar it decided (ms)
+  stale: string[] // watched 24/7 markets without a recent decision
+  downtime: AutopilotDowntime | null // the last stop detected (server stopped, PC asleep), shown for a day
+  text: string // Spanish summary
+}
+
+/** A stop of the server (or the PC) while it was on: from its last heartbeat to when it ran again (ms). */
+export interface AutopilotDowntime {
+  from: number
+  to: number
+}
+
+/** Its report of the last week (Monday 00:00 UTC to Monday): closed trades, «wins de trades», R and P&L. */
+export interface AutopilotWeekly {
+  week_start: number
+  week_end: number
+  trades: number
+  wins: number
+  total_r: number | null
+  mean_r: number | null
+  pnl: number
+  text: string
+  generated_at: number
 }
 
 /** Verdict of a group of its closed trades: none · small (under 30) · unclear (no interval, or it includes 0) ·
