@@ -74,9 +74,9 @@ uv pip install --python backend/.tmp/pgenv/Scripts/python.exe pgserver
 backend/.tmp/pgenv/Scripts/python.exe tools/pg_start.py backend/.tmp/pgdata   # imprime la URI
 ```
 
-Estado tras el espejo en la cuenta de práctica de Alpaca (13/11/2026, en Windows): backend 2028 passed / 27 skipped
-sobre SQLite y 2039 passed / 16 skipped sobre PostgreSQL (las omisiones son las de PostgreSQL, red, solo Linux / POSIX
-y el lock exacto); UI 267 pruebas en 9 suites; `tsc` sin errores; contrato 137 comprobaciones · 0 fallos · 6 avisos
+Estado tras las estrategias de PyChart en NEXUS automática (13/11/2026, en Windows): backend 2035 passed / 27 skipped
+sobre SQLite y 2046 passed / 16 skipped sobre PostgreSQL (las omisiones son las de PostgreSQL, red, solo Linux / POSIX
+y el lock exacto); UI 268 pruebas en 9 suites; `tsc` sin errores; contrato 137 comprobaciones · 0 fallos · 6 avisos
 (sin red, `--symbol SIM:NEXUS` y base nueva, como en CI: los avisos son listas vacías y ningún informe de validación
 guardado). La prueba más lenta es `tests/test_imp_engine_repaint_history.py` (regresión de repintado: 300 cierres,
 ~2,5 min). Si la suite sobre PostgreSQL local se vuelve muy lenta (miles de esquemas creados y borrados por las
@@ -103,7 +103,8 @@ pruebas), arranca `tools/pg_start.py` con una carpeta nueva.
   - `sim/`: cuenta demo (`paper.py`: órdenes límite / stop pendientes, riesgo de cartera; cuentas 1 «Principal», 2
     «Simulación» y 3 «NEXUS automática», que opera sola con un `AutoProfile` como el auto-trading;
     `autopilot_compare.py` la compara con entrar al azar con el método de la validación; `journal.py` = su diario:
-    contexto al abrir, causa y excursiones al cerrar, grupos en «x de n»), escáner, evaluador de predicciones
+    contexto al abrir, causa y excursiones al cerrar, grupos en «x de n» también por fuente de la señal: NEXUS o una
+    estrategia de PyChart, que la cuenta 3 puede seguir con `autopilot.script_ids`), escáner, evaluador de predicciones
     (habilidad frente a la referencia, repetición offline), backtest, simulador, Monte Carlo.
   - `scripting/`: PyChart (validador AST, `worker.py` en subproceso aislado, `sandbox.py`; `runtime_news.py` =
     `noticias`, el calendario económico que el servidor pasa en el payload porque el worker no tiene red).

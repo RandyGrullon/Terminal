@@ -54,10 +54,11 @@ tu servidor de correo.
 | **Mercados** | Los ~458.000 activos del escáner público de TradingView (acciones de muchos países, cripto, forex, futuros, CFD, bonos, índices) con precio, cambio, volumen, rating técnico, RSI, ADX, rendimiento y la lectura rápida de NEXUS. |
 | **Escáner** | Recorre un mercado entero, ordena oportunidades y, en modo profundo, aplica NEXUS + filtro a los mejores. Cada predicción se guarda antes del resultado y se verifica después; el modelo del escáner se reentrena con esos resultados. |
 | **Simulación** | Mercado simulado (sintético con regímenes alcista, bajista, lateral, volátil y crash, o replay vela a vela de un activo real sin mirar el futuro), backtest **con y sin filtro** y Monte Carlo (riesgo de ruina, VaR). |
-| **Cuenta demo** | Operaciones simuladas a mercado, **órdenes límite y stop pendientes**, gestión automática de SL, TP parciales y stop dinámico, avisos de salida, **límites de riesgo de cartera** y auto-trading opcional que solo abre señales TOMAR. Además, **NEXUS automática**: una segunda cuenta demo, propia de NEXUS, que opera sola con sus señales (apagada por defecto). |
+| **Cuenta demo** | Operaciones simuladas a mercado, **órdenes límite y stop pendientes**, gestión automática de SL, TP parciales y stop dinámico, avisos de salida, **límites de riesgo de cartera** y auto-trading opcional que solo abre señales TOMAR. Además, **NEXUS automática**: una segunda cuenta demo, propia de NEXUS, que opera sola con sus señales (apagada por defecto), lleva un diario de sus operaciones, deja de entrar donde pierde con evidencia, puede seguir tus estrategias de PyChart y, si quieres, se repite en una cuenta de práctica de Alpaca (sin dinero real). |
 | **PyChart** | Indicadores y estrategias en **Python** con una API estilo Pine Script (`ta.ema`, `plot`, `plotshape`, `strategy.entry`…): errores por línea, ejecución aislada (sandbox) y backtest. |
+| **Copiloto** | Una IA en tu propio PC (Ollama) que entiende tus datos de NEXUS con herramientas de solo lectura: explica qué hizo NEXUS automática y por qué, resume su diario, mira un mercado o las noticias, busca en internet si añades una clave y, en su **laboratorio**, escribe y prueba estrategias de PyChart con resultados honestos (desarrollo y comprobación frente a entrar al azar). No opera ni cambia ajustes. |
 | **Aprendizaje** | Cómo se retroalimenta el sistema: acierto fuera de muestra frente a la referencia, calibración, pesos aprendidos, decisiones del filtro y la **validación walk-forward** («¿hay ventaja real?»). |
-| **Ajustes** | Riesgo, NEXUS, filtro, escáner, proveedores de datos y sus claves, cuenta demo, alertas, riesgo de cartera, tiempo real y validación; estado del sistema y de la base de datos. |
+| **Ajustes** | Riesgo, NEXUS, filtro, escáner, proveedores de datos y sus claves, cuenta demo, alertas, riesgo de cartera, tiempo real, bróker de práctica (Alpaca), copiloto y validación; estado del sistema y de la base de datos. |
 | **Semáforo** (cabecera) | *Operar*, *Precaución* o *No operar* según la Fed, el calendario económico de esta semana y la próxima, la volatilidad (VIX), futuros, dólar, tipos y *funding*. En rojo, el filtro dice NO TOMAR. |
 | **Terminal** (botón de la cabecera o ``Ctrl+` ``) | Todo lo que pasa, en vivo (señales, operaciones, escaneos, aprendizaje, errores), y una línea de comandos con alias en español. |
 
@@ -273,6 +274,14 @@ que la actives en «Cómo opera»:
   cero (más exigente que el 95 % porque mira muchos grupos a la vez). El registro dice por qué descartó y con qué
   evidencia, y su vista lista los contextos pausados. Cuando esas pérdidas tienen más de 90 días lo vuelve a probar.
   Solo quita entradas, nunca añade. Se apaga con «Aprender de sus pérdidas» o `autopilot aprender off`.
+- **Estrategias de PyChart** (opcional): en su tarjeta «Estrategias de PyChart» marca hasta 3 de tus scripts de
+  estrategia (o los ejemplos). Cuando NEXUS no tiene señal en una vela, ejecuta cada estrategia con las velas ya
+  cerradas y, si su regla de entrada se cumple en esa vela, abre la operación con su stop y su objetivo (si no tiene
+  stop, el de NEXUS), y por defecto solo si el filtro dice TOMAR. Esa posición se cierra con su stop, su objetivo o
+  su propia regla de cierre, no con las salidas de NEXUS. No están validadas: su diario las mide aparte («Fuente de la
+  señal») frente a entrar al azar, y «Aprender de sus pérdidas» deja de usar la que pierda con evidencia (30
+  operaciones o más). Pruébalas antes en el laboratorio del copiloto. En la terminal: `autopilot --estrategias 12,15`,
+  `--estrategias no` y `--filtro-estrategias on|off`.
 - **Vigilancia**: si en un mercado de 24 h (BTC, ETH…) pasan más de tres velas sin que decida (no llegan sus velas)
   o si detecta que el servidor o el PC estuvieron detenidos, te lo dice en su vista y en su registro, y por Telegram o
   correo si activaste sus avisos. Para que opere sola, deja el servidor en marcha y el PC sin suspenderse.

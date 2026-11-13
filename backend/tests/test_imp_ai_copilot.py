@@ -90,6 +90,7 @@ def test_conversation_with_read_only_tools_over_its_own_data(runtime_factory, no
             assert tool_msg["role"] == "tool" and tool_msg["tool_name"] == "estado_nexus_automatica"
             data = json.loads(tool_msg["content"])
             assert data["activa"] is False and data["cuenta"]["saldo"] == 1000.0
+            assert data["estrategias_de_pychart"] == [] and data["estrategias_con_filtro"] is True
             assert "Herramienta desconocida" in fake.chats[2]["messages"][-1]["content"]
             await engine.stop()
 

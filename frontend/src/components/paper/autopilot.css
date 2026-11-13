@@ -210,3 +210,35 @@
   border-radius: 8px;
   overflow-wrap: anywhere;
 }
+
+/* Estrategias de PyChart (AutopilotScripts) */
+.ap-scripts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.ap-script-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.ap-script-row.on {
+  border-color: var(--accent);
+}
+.ap-script-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ap-script-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--warn);
+}

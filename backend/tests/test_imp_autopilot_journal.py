@@ -70,7 +70,7 @@ def test_the_journal_groups_its_trades_and_concludes_only_with_evidence():
     assert few["insights"][0].startswith("Con 4 operaciones cerradas todavía no se puede concluir nada")
     assert "3 de 3 pérdidas: «En contra desde el principio»." in few["insights"]
     dims = [g["dimension"] for g in few["groups"]]
-    assert dims == ["cause", "session", "regime", "news", "gate", "side", "market"]
+    assert dims == ["cause", "session", "regime", "news", "gate", "side", "market", "source"]
     # 40 London trades that lose and 40 New York trades that win, on 40 weekdays (2 March 2026 is a Monday): both
     # groups have evidence
     weekdays = [d for d in range(60) if d % 7 < 5][:40]
@@ -125,7 +125,7 @@ def test_journal_api_and_terminal(api_client):
     body = r.json()
     assert (body["trades"], body["verdict"], body["verdict_label"]) == (0, "none", "Sin operaciones")
     assert body["insights"] == ["Aún no hay operaciones cerradas de NEXUS automática que analizar."]
-    assert isinstance(body["generated_at"], int) and len(body["groups"]) == 7
+    assert isinstance(body["generated_at"], int) and len(body["groups"]) == 8
     res = api_client.post("/api/terminal", json={"text": "autopilot diario"}).json()
     assert res["ok"], res["lines"]
     text = "\n".join(line["text"] for line in res["lines"])

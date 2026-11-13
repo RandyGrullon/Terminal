@@ -69,6 +69,9 @@ export interface AutopilotStatus {
   options_premium_pct: number // options: the most premium paid per trade, % of equity (0 = no options)
   learn_guard: boolean // it learns from its losses: no entries where its recent trades lose with strong evidence
   paused_contexts: AutopilotPausedContext[] // where it does not open now (learn_guard), [] when off or none
+  script_ids: number[] // saved PyChart strategies that also give it entries when NEXUS has none (at most 3)
+  script_gate: boolean // their entries also need the gate's TOMAR
+  scripts: AutopilotScript[] // those strategies with their last check
   health: AutopilotHealth // its health: decisions arriving, stops of the server / PC detected
   weekly: AutopilotWeekly | null // its last weekly report (Mondays), null until the first one
   brake: AutopilotBrake | null // null outside a snapshot
@@ -208,6 +211,14 @@ export interface AutopilotComparison {
   note: string // the method, Spanish, shown verbatim
 }
 
+/** A saved PyChart strategy NEXUS automática follows (autopilot.script_ids): its name and its last error. */
+export interface AutopilotScript {
+  id: number
+  name: string
+  error: string | null // Spanish: why its last run gave no signal (a script error, not a strategy, no candles…)
+  checked_at: number | null // ms of its last run (or of its check when chosen)
+}
+
 /** POST /api/paper/autopilot: only the fields being changed (400 {detail: '<Spanish>'} on a bad value). */
 export interface AutopilotUpdate {
   enabled?: boolean
@@ -224,4 +235,6 @@ export interface AutopilotUpdate {
   stock_instrument?: AutopilotStockInstrument
   options_premium_pct?: number
   learn_guard?: boolean
+  script_ids?: number[] // [] = none
+  script_gate?: boolean
 }

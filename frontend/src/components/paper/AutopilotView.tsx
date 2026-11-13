@@ -38,6 +38,7 @@ import { useApp } from '../../store'
 import { Badge, Button, Card, Disclaimer, Empty, ErrorBox, Field, Loading, Modal, NumberInput, Select, Spinner, Toggle } from '../ui'
 import SymbolSearch from '../SymbolSearch'
 import { asTimeframe, fmtMoney, isNum, useInterval } from '../markets/opsUtils'
+import AutopilotScripts, { normalizeScripts } from './AutopilotScripts'
 import BrokerCard from './BrokerCard'
 import PaperStats from './PaperStats'
 import PositionsTable from './PositionsTable'
@@ -157,6 +158,9 @@ export function normalizeStatus(raw: unknown): AutopilotStatus | null {
     options_premium_pct: numOr(o.options_premium_pct, 10),
     learn_guard: o.learn_guard !== false,
     paused_contexts: normalizePaused(o.paused_contexts),
+    script_ids: Array.isArray(o.script_ids) ? o.script_ids.filter((x): x is number => typeof x === 'number' && x > 0) : [],
+    script_gate: o.script_gate !== false,
+    scripts: normalizeScripts(o.scripts),
     health: normalizeHealth(o.health),
     weekly: normalizeWeekly(o.weekly),
     brake: normalizeBrake(o.brake),
@@ -1501,6 +1505,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
   const journalCard = <JournalCard journal={journal} loading={journalLoading} error={journalError} onRefresh={() => void loadJournal(true)} />
   const controls = status ? <AutopilotControls status={status} saving={saving} error={saveError} onSave={save} /> : null
   const moneyCard = status ? <MoneyCard status={status} dailyLossPct={snap?.risk?.daily_loss_limit_pct ?? null} /> : null
+  const scriptsCard = status ? <AutopilotScripts status={status} saving={saving} error={saveError} onSave={save} /> : null
   const weeklyCard = status ? <WeeklyCard weekly={status.weekly} /> : null
   const watchCard = status ? <WatchCard status={status} onOpenChart={openSymbol} /> : null
   const logCard = status ? <DecisionLog log={status.log} onOpenChart={openSymbol} /> : null
@@ -1566,6 +1571,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
               </div>
               <div className="pp-side">
                 {controls}
+                {scriptsCard}
                 {moneyCard}
                 {weeklyCard}
                 <BrokerCard />
@@ -1581,6 +1587,7 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
               <div className="ap-cols">
                 <div className="ap-col">
                   {controls}
+                  {scriptsCard}
                   {moneyCard}
                   {weeklyCard}
                   <BrokerCard />

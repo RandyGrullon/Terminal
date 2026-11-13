@@ -583,7 +583,7 @@ _AP_INSTRUMENTS = {"auto": "auto", "nexus": "auto", "acciones": "shares", "share
                    "options": "options"}
 AUTOPILOT_USAGE = ("autopilot [on|off] [lista <símbolos…> | escaner [N] | ambos [N]] [--tf 1h] [--max 5] [--risk 1] "
                    "[--top 10] [--expo 100] [--freno 20] [--margen 50] [--instrumento auto|acciones|opciones] "
-                   "[--prima 10] · "
+                   "[--prima 10] [--estrategias <id,…>|no] [--filtro-estrategias on|off] · "
                    "autopilot pos | log | azar | diario | semana | aprender on|off | avisos on|off | "
                    "close <id|símbolo|all> | "
                    "reset [saldo] --yes")
@@ -623,6 +623,20 @@ def _ap_stocks_line(st: dict) -> str:
         return f"Acciones: solo opciones, un call para apostar al alza y un put a la baja; {opts}"
     return (f"Acciones: NEXUS elige, acciones para apostar al alza y un put a la baja (una cuenta de efectivo no vende "
             f"en corto); {opts}")
+
+
+def _print_scripts(ctx: CommandContext, st: dict) -> None:
+    """The PyChart strategies it follows (their last error, if any), when there are some."""
+    scripts = st.get("scripts") or []
+    if not scripts:
+        return
+    names = ", ".join(f"«{s['name']}» ({s['id']})" for s in scripts)
+    gate = "también con el filtro TOMAR" if st.get("script_gate") else "sin el filtro TOMAR"
+    ctx.print(f"Estrategias de PyChart: {names} · {gate} · sin validar: su diario las mide frente a entrar al azar",
+              "info")
+    for s in scripts:
+        if s.get("error"):
+            ctx.print(f"  «{s['name']}»: {s['error']}", "warn")
 
 
 def _print_learned(ctx: CommandContext, st: dict) -> None:
@@ -691,6 +705,7 @@ def _print_autopilot(ctx: CommandContext, snap: dict) -> None:
     ctx.print(("Futuros: contratos enteros, con hasta el " + fmt_pct(fm, 0, False) + " del capital como margen aproximado"
                if fm else "No opera futuros (--margen 0)"), "muted")
     ctx.print(_ap_stocks_line(st), "muted")
+    _print_scripts(ctx, st)
     _print_learned(ctx, st)
     health = st.get("health") or {}
     if health.get("text"):
@@ -931,6 +946,23 @@ async def _autopilot(ctx: CommandContext) -> None:
         if mode is None:
             ctx.fail("Indica --instrumento auto (NEXUS elige), acciones u opciones")
         update["stock_instrument"] = mode
+    scripts = ctx.flag("estrategias")
+    if scripts is not None:
+        text = str(scripts).strip().lower()
+        if text in _OFF or text in ("", "ninguna"):
+            update["script_ids"] = []
+        else:
+            parts = [p for p in re.split(r"[,;\s]+", text) if p]
+            if not parts or not all(p.isdigit() for p in parts):
+                ctx.fail("Indica --estrategias con los números de tus scripts de PyChart (p. ej. --estrategias 12,15; "
+                         "los ves con «scripts») o «no» para quitarlas")
+            update["script_ids"] = [int(p) for p in parts]
+    gate = ctx.flag("filtro-estrategias")
+    if gate is not None:
+        word = str(gate).strip().lower()
+        if word not in _ON and word not in _OFF:
+            ctx.fail("Indica --filtro-estrategias on (también pasan por el filtro TOMAR) u off")
+        update["script_gate"] = word in _ON
     try:
         snap = await paper.set_autopilot(**update) if update else await paper.autopilot_snapshot()
     except PaperError as exc:

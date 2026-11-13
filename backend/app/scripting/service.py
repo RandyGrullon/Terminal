@@ -14,7 +14,7 @@ import unicodedata
 from typing import Any, Callable
 
 from app import config
-from app.util import RateLimitedLog, clean_json, normalize_tf, now_ms
+from app.util import RateLimitedLog, clean_json, normalize_tf, now_ms, now_s, tf_seconds
 
 SOURCE = "scripts"
 NAME_MAX = 80
@@ -471,8 +471,13 @@ class ScriptService:
         inputs: Any = None,
         *,
         name: str | None = None,
+        closed_only: bool = False,
+        quiet: bool = False,
     ) -> dict:
-        """Run a script on `limit` candles of symbol/tf inside the sandbox -> ScriptRunResult."""
+        """Run a script on `limit` candles of symbol/tf inside the sandbox -> ScriptRunResult. closed_only: leave out a
+        last candle that is still forming (a strategy's `next` is then the action at the open after a CLOSED bar).
+        quiet: no events nor alerts at all (the caller reports its errors: NEXUS automática runs its strategies on every
+        bar of every market and notes an error at most every 6 h)."""
         text = _clean_code(code)
         if inputs is not None and not isinstance(inputs, dict):
             raise ScriptServiceError(400, "Las entradas deben ser un objeto {nombre: valor}")
@@ -488,6 +493,10 @@ class ScriptService:
         run_script = _load_sandbox()
         sym = await self._resolve_symbol(symbol)
         candles = await self._candles(sym, tf_key, bars)
+        if closed_only and candles and int(candles[-1]["time"]) + tf_seconds(tf_key) > now_s():
+            candles = candles[:-1]
+            if not candles:
+                raise ScriptServiceError(400, f"Sin velas cerradas de {sym} {tf_key}")
         news = self._news(candles)
         extra = {"news": news} if news is not None else {}
         started = time.perf_counter()
@@ -510,7 +519,8 @@ class ScriptService:
         self._last_run_ms = int(result["duration_ms"])
         if not result["ok"]:
             self._run_errors += 1
-        self._run_events(result, sym, tf_key, name)
+        if not quiet:
+            self._run_events(result, sym, tf_key, name)
         return result
 
     def _news(self, candles: list[dict]) -> dict | None:

@@ -49,8 +49,8 @@ TOOL_DEFS: dict[str, dict] = {
     "estado_nexus_automatica": _fn(
         "estado_nexus_automatica",
         "Estado actual de NEXUS automática, la cuenta demo simulada que opera sola: si está activa, qué mercados vigila "
-        "y qué dijo NEXUS en la última vela de cada uno, su salud, lo que aprendió de sus pérdidas, sus posiciones "
-        "abiertas, saldo, rentabilidad y operaciones cerradas."),
+        "y qué dijo NEXUS en la última vela de cada uno, su salud, lo que aprendió de sus pérdidas, las estrategias "
+        "de PyChart que sigue, sus posiciones abiertas, saldo, rentabilidad y operaciones cerradas."),
     "decisiones_recientes": _fn(
         "decisiones_recientes",
         "Las últimas decisiones de NEXUS automática: qué abrió, qué descartó y por qué, y qué cerró.",
@@ -58,7 +58,8 @@ TOOL_DEFS: dict[str, dict] = {
     "diario_de_operaciones": _fn(
         "diario_de_operaciones",
         "Diario de sus operaciones cerradas: causas de las pérdidas y grupos por sesión, régimen, noticias, filtro, "
-        "dirección y mercado, como «x de n» con el R medio y si hay evidencia."),
+        "dirección, mercado y fuente de la señal (NEXUS o una estrategia de PyChart), como «x de n» con el R medio y "
+        "si hay evidencia."),
     "comparacion_con_el_azar": _fn(
         "comparacion_con_el_azar",
         "Compara las operaciones cerradas de NEXUS automática con entrar al azar en los mismos mercados y momentos."),
@@ -125,6 +126,8 @@ async def _estado(rt: Any, args: dict, cfg: dict) -> dict:
                               f"{round(p['mean_r'], 2)})" for p in st.get("paused_contexts") or []],
         "vigila": [{"simbolo": w["symbol"], "motivo": w["why"], "ultima_vela": (w.get("last") or {}).get("label")}
                    for w in st.get("watching") or []],
+        "estrategias_de_pychart": [{"nombre": x.get("name"), "error": x.get("error")} for x in st.get("scripts") or []],
+        "estrategias_con_filtro": st.get("script_gate"),
         "cuenta": {"saldo": acct["balance"], "equity": acct["equity"], "saldo_inicial": acct["initial_balance"],
                    "rentabilidad_pct": acct["return_pct"], "cerradas": acct["trades"], "ganadoras": acct["wins"]},
         "posiciones_abiertas": [{"simbolo": p["symbol"], "lado": p["side"], "entrada": p["entry_price"],

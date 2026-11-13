@@ -33,4 +33,6 @@ DEFAULTS: dict = {
     # it learns from its losses: no entries in a context (session, regime, news, filter score, direction, market) where
     # its trades of the last 90 days lose with strong evidence (30+ trades, the whole 99 % interval below zero)
     "autopilot.learn_guard": True,
+    "autopilot.script_ids": [],  # saved PyChart strategies that also give it entries (at most 3)
+    "autopilot.script_gate": True,  # their entries also need the gate's TOMAR
 }

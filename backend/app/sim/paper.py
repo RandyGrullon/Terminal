@@ -129,6 +129,9 @@ HEALTH_GRACE_S = 300  # a 24/7 market with no decision 3 bars after its last one
 DOWNTIME_SHOW_S = 86400  # a detected stop stays in its status for a day
 WEEK_S = 7 * 86400
 GUARD_WINDOW_S = 90 * 86400  # what it learns from its losses only looks at the trades of the last 90 days
+SCRIPT_BARS = 1000  # candles a PyChart strategy of NEXUS automática runs on (room for long averages to warm up)
+MAX_SCRIPTS = 3  # strategies it may follow at once (each runs in the sandbox on every closed bar of every market)
+SCRIPT_RUNS_KEEP = 500  # cached strategy runs (one per strategy, market, timeframe and bar)
 AUTOPILOT_NOTE = (
     "Cuenta 100 % simulada que opera sola con las señales de NEXUS y el filtro; nunca usa dinero real ni un bróker "
     "real (el espejo opcional solo repite sus posiciones en tu cuenta de práctica de Alpaca). "
@@ -492,6 +495,39 @@ def option_inst(pos: dict) -> dict | None:
     return inst if isinstance(inst, dict) and inst.get("kind") == "option" else None
 
 
+def script_source(script: dict) -> str:
+    """The journal source of a PyChart strategy's entry: "script:<id>:<name>" (app.sim.journal.source_key)."""
+    return f"script:{int(script['id'])}:{str(script.get('name') or '')[:60]}"
+
+
+def script_id_of(pos: dict) -> int | None:
+    """The PyChart strategy that opened a position of NEXUS automática (None: NEXUS's own signal)."""
+    meta = pos.get("meta") if isinstance(pos.get("meta"), dict) else {}
+    ctx = meta.get("context") if isinstance(meta.get("context"), dict) else {}
+    src = str(ctx.get("source") or "")
+    if not src.startswith("script:"):
+        return None
+    try:
+        return int(src.split(":", 2)[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def script_levels(script: dict) -> dict[str, Any]:
+    """open_position arguments of a strategy's entry: its stop (if any) and its single target, or no targets at all
+    (its exits are then its stop and its own close rules, as in its backtest)."""
+    nxt = script.get("next") if isinstance(script.get("next"), dict) else {}
+    out: dict[str, Any] = {}
+    stop, limit = safe_float(nxt.get("stop")), safe_float(nxt.get("limit"))
+    if stop is not None:
+        out["sl"] = stop
+    if limit is not None:
+        out["tps"] = [limit]
+    else:
+        out["no_targets"] = True
+    return out
+
+
 def traded_symbol(pos: dict) -> str:
     """The market a position follows: an option's underlying stock, any other position's own symbol."""
     inst = option_inst(pos)
@@ -640,6 +676,9 @@ class PaperEngine:
         self._ap_stale_warned = False
         self._ap_weekly: dict[str, Any] | None = None
         self._ap_weekly_week: int | None = None
+        # the PyChart strategies it follows: their last check (name, error) and their runs of each bar
+        self._ap_scripts: dict[int, dict[str, Any]] = {}
+        self._ap_script_runs: dict[tuple, dict[str, Any]] = {}
         # what it learned from its losses: contexts where its recent trades lose with strong evidence (cached)
         self._guard_cache: tuple[tuple[int, int, int], list[dict[str, Any]]] | None = None
         self._stale_warned: set[str] = set()  # symbols whose "sin precio en vivo" warning was already emitted
@@ -819,6 +858,18 @@ class PaperEngine:
         symbols = frozenset(str(s).strip().upper() for s in (self._setting("paper.auto_symbols", []) or []) if str(s).strip())
         return AutoProfile(1, "auto", str(self._setting("paper.auto_tf", "1h")), symbols, 0, None, "Auto")
 
+    def _script_ids(self) -> list[int]:
+        """autopilot.script_ids validated: positive ids, no repeats, at most MAX_SCRIPTS."""
+        out: list[int] = []
+        for v in self._setting("autopilot.script_ids", []) or []:
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                continue
+            if n > 0 and n not in out:
+                out.append(n)
+        return out[:MAX_SCRIPTS]
+
     def _autopilot_cfg(self) -> dict[str, Any]:
         """Validated settings of NEXUS's own account (out-of-range values are clamped, unknown ones fall back)."""
         def num(key: str, default: float, lo: float, hi: float) -> float:
@@ -846,6 +897,8 @@ class PaperEngine:
             "stock_instrument": instr if instr in STOCK_INSTRUMENTS else "auto",
             "options_premium_pct": float(num("autopilot.options_premium_pct", 10.0, 0.0, 50.0)),
             "learn_guard": bool(self._setting("autopilot.learn_guard", True)),
+            "script_ids": self._script_ids(),
+            "script_gate": bool(self._setting("autopilot.script_gate", True)),
         }
 
     def _autopilot_held(self) -> dict[str, set[str]]:
@@ -1466,6 +1519,7 @@ class PaperEngine:
         margin_pct: float | None = None,
         instrument: dict | None = None,
         context: dict | None = None,
+        no_targets: bool = False,
     ) -> dict:
         """Open a paper position. Returns {"position": Position, "gate": GateResult | None}.
 
@@ -1522,7 +1576,7 @@ class PaperEngine:
         fill = M.slipped_price(ref, s, self._slip_pct(), opening=True) if slippage else float(ref)
         stop = await self._choose_stop(symbol, tf_n, s, fill, sl, gate)
         risk_unit = abs(fill - stop)
-        targets = self._choose_targets(s, fill, risk_unit, sl, tp, tps, gate)
+        targets = [None, None, None] if no_targets else self._choose_targets(s, fill, risk_unit, sl, tp, tps, gate)
 
         # an index future (contracts=True): whole contracts, the money at the stop = points × multiplier per contract
         spec = futures_spec(symbol) if contracts and qty is None and instrument is None else None
@@ -2614,7 +2668,11 @@ class PaperEngine:
                                                              "datos de este mercado; lo reintenta en la próxima")
                     return
                 for pos in followed:
-                    await self._auto_exit(pos, current)
+                    sid = script_id_of(pos)
+                    if sid is None:
+                        await self._auto_exit(pos, current)
+                    elif own:  # a PyChart strategy's position follows its own exits, not NEXUS's
+                        await self._script_exit(pos, sid, symbol, tf, upto)
                 if not prof.entries:
                     return  # an exits-only trader (a position from before a change of timeframe)
                 if not self._newest_bar(symbol, tf, upto, acct):
@@ -2622,13 +2680,19 @@ class PaperEngine:
                 if any(p["account_id"] == acct and traded_symbol(p) == symbol for p in self._open.values()):
                     return  # one position per market (an option counts on its underlying)
                 action = current.get("action")
+                cfg = self._autopilot_cfg() if own else None
+                script: dict[str, Any] | None = None  # a PyChart strategy's entry when NEXUS itself has none
                 if action == "BUY":
                     side = "long"
                 elif action == "SELL" and self._setting("nexus.allow_short", True):
                     side = "short"
                 else:
-                    return
-                cfg = self._autopilot_cfg() if own else None
+                    script = await self._script_entry(symbol, tf, upto, cfg) if cfg is not None else None
+                    if script is None:
+                        return
+                    side = script["next"]["side"]
+                    if side == "short" and not self._setting("nexus.allow_short", True):
+                        return
                 if cfg is not None and not in_dollars(symbol):  # its account is in USD
                     if self._log.should_log(f"ap-usd:{symbol}", 6 * 3600):
                         ticker = symbol.partition(":")[2] or symbol
@@ -2667,8 +2731,10 @@ class PaperEngine:
                         self._autopilot_note(symbol, "skip", f"{SIDE_LABEL[side]} descartado: {blk.message}")
                     return
                 gate = ((current.get("gate") or {}).get(side)) or None
-                if not isinstance(gate, dict) or gate.get("verdict") != "TAKE":
-                    text = (f"{SIDE_LABEL[side]} descartado por el filtro ({gate_line(gate)})"
+                by = f" de la estrategia «{script['name']}»" if script is not None else ""
+                needs_gate = script is None or bool(cfg and cfg["script_gate"])
+                if needs_gate and (not isinstance(gate, dict) or gate.get("verdict") != "TAKE"):
+                    text = (f"{SIDE_LABEL[side]}{by} descartado por el filtro ({gate_line(gate)})"
                             + (f": {gate.get('summary')}" if isinstance(gate, dict) and gate.get("summary") else ""))
                     self._emit("info", "paper", f"{prof.label}: {symbol} {text}")
                     if own:
@@ -2678,19 +2744,21 @@ class PaperEngine:
                 plan: dict[str, Any] | None = None
                 what = SIDE_LABEL[side]
                 # what NEXUS saw on this bar, for the journal of its trades
+                g = gate if isinstance(gate, dict) else {}
+                source = script_source(script) if script is not None else J.SOURCE_NEXUS
                 context = {"regime": str(current.get("regime") or "") or None,
                            "score": safe_float(current.get("score")), "prob_up": safe_float(current.get("prob_up")),
-                           "gate_score": safe_float(gate.get("score")),
-                           "win_prob": safe_float(gate.get("win_prob"))} if own else None
-                if cfg is not None and self._uses_options(cfg, symbol, side):
+                           "gate_score": safe_float(g.get("score")),
+                           "win_prob": safe_float(g.get("win_prob")), "source": source} if own else None
+                if cfg is not None and script is None and self._uses_options(cfg, symbol, side):
                     what = "Call" if side == "long" else "Put"
                 if cfg is not None and cfg["learn_guard"]:  # what it learned from its losses
-                    keys = J.context_keys(regime=current.get("regime"), ts=now_s(), gate_score=gate.get("score"),
-                                          bet=side, symbol=symbol)
+                    keys = J.context_keys(regime=current.get("regime"), ts=now_s(), gate_score=g.get("score"),
+                                          bet=side, symbol=symbol, source=source)
                     hit = next((p for p in await self._learned_pauses() if keys.get(p["dimension"]) == p["key"]), None)
                     if hit is not None:
                         if self._log.should_log(f"ap-guard:{symbol}:{hit['dimension']}:{hit['key']}", 6 * 3600):
-                            self._autopilot_note(symbol, "skip", f"{what} descartado: {self._guard_text(hit)}")
+                            self._autopilot_note(symbol, "skip", f"{what}{by} descartado: {self._guard_text(hit)}")
                         return
                 try:
                     if cfg is not None and what in ("Call", "Put"):
@@ -2702,12 +2770,14 @@ class PaperEngine:
                             max_exposure_pct=cfg["max_exposure_pct"] or None, instrument=plan["instrument"],
                             context=context)
                     else:
-                        res = await self.open_position(
-                            acct, symbol, side, tf, origin=prof.origin, gate=gate, check_gate=False,
+                        levels = script_levels(script) if script is not None else {}
+                        res = await self.open_position(  # a strategy's entry without the gate: no gate at all
+                            acct, symbol, side, tf, origin=prof.origin, gate=gate if needs_gate else None,
+                            check_gate=False,
                             risk_pct=prof.risk_pct, max_positions=prof.max_positions or None,
                             max_exposure_pct=(cfg["max_exposure_pct"] or None) if cfg is not None else None,
                             contracts=cfg is not None, margin_pct=cfg["futures_margin_pct"] if cfg is not None else None,
-                            context=context)
+                            context=context, **levels)
                 except PaperRiskBlocked as blk:  # no option fits / lost the race for the last free slot / risk room
                     if self._log.should_log(f"auto-risk:{acct}:{symbol}:{blk.rule}", 3600):
                         self._emit("info", "paper", f"{prof.label}: {symbol} {what} descartado: {blk.message}")
@@ -2728,8 +2798,10 @@ class PaperEngine:
                             f"{fmt_price(pos.get('sl'))} · filtro {gate_line(gate)}")
                     else:
                         self._autopilot_note(symbol, "open",
-                                             f"Abre {SIDE_LABEL[side].lower()} a {fmt_price(pos.get('entry_price'))} · "
-                                             f"SL {fmt_price(pos.get('sl'))} · filtro {gate_line(gate)}")
+                                             f"Abre {SIDE_LABEL[side].lower()}{by} a {fmt_price(pos.get('entry_price'))}"
+                                             f" · SL {fmt_price(pos.get('sl'))} · "
+                                             + (f"filtro {gate_line(gate)}" if needs_gate
+                                                else f"filtro no exigido ({gate_line(gate)})"))
         except PaperRiskBlocked as blk:
             if self._log.should_log(f"auto-risk:{acct}:{symbol}:{blk.rule}", 3600):
                 self._emit("info", "paper", f"{prof.label}: {symbol} descartado: {blk.message}")
@@ -2798,6 +2870,121 @@ class PaperEngine:
         if config.BACKGROUND:
             await self._sync_subscriptions()
         return True
+
+    async def _script_signal(self, script_id: int, symbol: str, tf: str, upto: int | None) -> dict[str, Any]:
+        """{"id", "name", "next", "error"}: what a saved PyChart strategy asks for at the open after the closed bar
+        `upto` (its open time), run in the PyChart sandbox on the closed candles only (causal: its `next` uses that
+        bar's own values). One run per strategy, market and bar: its exit and its entry are decided on the same run."""
+        key = (script_id, symbol, tf, upto)
+        cached = self._ap_script_runs.get(key)
+        if cached is not None:
+            return cached
+        out: dict[str, Any] = {"id": script_id, "name": f"Script {script_id}", "next": None, "error": None}
+        scripts = getattr(self.rt, "scripts", None)
+        res: dict | None = None
+        if scripts is None:
+            out["error"] = "el módulo PyChart no está cargado"
+        else:
+            from app.scripting.service import ScriptServiceError
+
+            try:
+                script = await scripts.get(script_id)
+                out["name"] = str(script.get("name") or out["name"])
+                res = await scripts.run(script.get("code"), symbol, tf, SCRIPT_BARS, None,
+                                        name=f"NEXUS automática: {out['name']}", closed_only=True, quiet=True)
+            except ScriptServiceError as exc:
+                out["error"] = str(exc)
+        if isinstance(res, dict):
+            strat = res.get("strategy")
+            errors = [e for e in res.get("errors") or [] if isinstance(e, dict)]
+            if not res.get("ok"):
+                err = errors[0] if errors else {}
+                where = f"línea {err.get('line')}: " if err.get("line") else ""
+                out["error"] = f"{where}{str(err.get('message') or 'el script falló')[:200]}"
+            elif (res.get("meta") or {}).get("kind") != "strategy" or not isinstance(strat, dict):
+                out["error"] = "no es una estrategia: declara strategy(...) y usa strategy.entry / exit / close"
+            else:
+                nxt = strat.get("next")
+                fresh = upto is None or int(safe_float((nxt or {}).get("time")) or -1) == int(upto)
+                if isinstance(nxt, dict) and fresh:
+                    out["next"] = nxt
+        self._ap_scripts[script_id] = {"name": out["name"], "error": out["error"], "checked_at": now_ms()}
+        if len(self._ap_script_runs) >= SCRIPT_RUNS_KEEP:
+            self._ap_script_runs.clear()
+        self._ap_script_runs[key] = out
+        if out["error"] and self._log.should_log(f"ap-script:{script_id}:{out['error'][:60]}", 6 * 3600):
+            self._autopilot_note(symbol, "info", f"Estrategia «{out['name']}»: {out['error']}")
+        return out
+
+    async def _script_entry(self, symbol: str, tf: str, upto: int | None, cfg: dict) -> dict[str, Any] | None:
+        """The first PyChart strategy it follows that asks for an entry on this bar (None: none does)."""
+        for sid in cfg["script_ids"]:
+            sig = await self._script_signal(sid, symbol, tf, upto)
+            nxt = sig.get("next")
+            if isinstance(nxt, dict) and nxt.get("action") == "entry" and nxt.get("side") in ("long", "short"):
+                return sig
+        return None
+
+    async def _script_exit(self, pos: dict, script_id: int, symbol: str, tf: str, upto: int | None) -> bool:
+        """Close a PyChart strategy's position when its rules close it (strategy.close) or turn it around (an entry
+        the other way). Its stop and target stay with the engine; NEXUS's exit rules do not apply to it."""
+        sig = await self._script_signal(script_id, symbol, tf, upto)
+        nxt = sig.get("next")
+        if not isinstance(nxt, dict):
+            return False
+        turn = nxt.get("action") == "entry" and nxt.get("side") != pos["side"]
+        if nxt.get("action") != "close" and not turn:
+            return False
+        price = self.cached_price(pos["symbol"], PRICE_STALE_S) or await self.last_price(pos["symbol"])
+        if price is None:
+            return False
+        label = f"Salida de la estrategia «{sig['name']}»"
+        async with self._lock:
+            if pos["id"] not in self._open:
+                return False
+            await self._close(pos, price, "SIGNAL", label, now_s())
+        self._autopilot_note(traded_symbol(pos), "close",
+                             f"Cierra {SIDE_LABEL[pos['side']].lower()} a {fmt_price(price)} (salida de la estrategia "
+                             f"«{sig['name']}», {fmt_r(pos.get('r_multiple'))})")
+        await self.publish(pos["account_id"])
+        if config.BACKGROUND:
+            await self._sync_subscriptions()
+        return True
+
+    async def _validate_scripts(self, raw: Any) -> list[int]:
+        """autopilot.script_ids from the user: saved scripts that compile as strategies (Spanish PaperError)."""
+        items = [raw] if isinstance(raw, (int, str)) else list(raw or [])
+        ids: list[int] = []
+        for v in items:
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                raise PaperError(f"Identificador de script no válido: {v}") from None
+            if n <= 0:
+                raise PaperError(f"Identificador de script no válido: {v}")
+            if n not in ids:
+                ids.append(n)
+        if len(ids) > MAX_SCRIPTS:
+            raise PaperError(f"Como mucho {MAX_SCRIPTS} estrategias a la vez (cada una se ejecuta en cada vela de cada "
+                             "mercado)")
+        scripts = getattr(self.rt, "scripts", None)
+        if ids and scripts is None:
+            raise PaperError("El módulo PyChart no está cargado")
+        from app.scripting.service import ScriptServiceError
+
+        for sid in ids:
+            try:
+                script = await scripts.get(sid)
+                comp = await scripts.compile(script.get("code"))
+            except ScriptServiceError as exc:
+                raise PaperError(f"Script {sid}: {exc}") from None
+            name = str(script.get("name") or f"Script {sid}")
+            if not comp.get("ok"):
+                raise PaperError(f"El script «{name}» tiene errores: corrígelo en PyChart antes de usarlo")
+            if (comp.get("meta") or {}).get("kind") != "strategy":
+                raise PaperError(f"«{name}» es un indicador: solo una estrategia (strategy(...)) puede darle entradas")
+            self._ap_scripts[sid] = {"name": name, "error": None, "checked_at": now_ms()}
+        return ids
 
     # ------------------------------------------------------------------ NEXUS's own account (autopilot)
 
@@ -2934,6 +3121,12 @@ class PaperEngine:
             "max_drawdown_pct": cfg["max_drawdown_pct"],
             "futures_margin_pct": cfg["futures_margin_pct"],
             "learn_guard": cfg["learn_guard"],
+            "script_ids": list(cfg["script_ids"]),
+            "script_gate": cfg["script_gate"],
+            "scripts": [{"id": sid, "name": (self._ap_scripts.get(sid) or {}).get("name") or f"Script {sid}",
+                         "error": (self._ap_scripts.get(sid) or {}).get("error"),
+                         "checked_at": (self._ap_scripts.get(sid) or {}).get("checked_at")}
+                        for sid in cfg["script_ids"]],
             "paused_contexts": [dict(p) for p in self._guard_cache[1]] if self._guard_cache and cfg["learn_guard"] else [],
             "health": self._autopilot_health(cfg),
             "weekly": dict(self._ap_weekly) if self._ap_weekly else None,
@@ -3304,7 +3497,8 @@ class PaperEngine:
                             alerts: Any = None, max_exposure_pct: Any = None,
                             max_drawdown_pct: Any = None, futures_margin_pct: Any = None,
                             stock_instrument: Any = None, options_premium_pct: Any = None,
-                            learn_guard: Any = None) -> dict[str, Any]:
+                            learn_guard: Any = None, script_ids: Any = None,
+                            script_gate: Any = None) -> dict[str, Any]:
         """Change the settings of NEXUS's own account (only the given fields); Spanish PaperError on a bad value.
         `alerts`: its trades as alerts through the user's channels (setting alerts.autopilot, opt-in)."""
         values: dict[str, Any] = {}
@@ -3314,6 +3508,10 @@ class PaperEngine:
             values["alerts.autopilot"] = bool(alerts)
         if learn_guard is not None:
             values["autopilot.learn_guard"] = bool(learn_guard)
+        if script_ids is not None:
+            values["autopilot.script_ids"] = await self._validate_scripts(script_ids)
+        if script_gate is not None:
+            values["autopilot.script_gate"] = bool(script_gate)
         if source is not None:
             src = str(source).strip().lower()
             if src not in AUTOPILOT_SOURCES:

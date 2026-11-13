@@ -30,6 +30,7 @@ globalThis.localStorage ??= {
 const ENTRY = `
 export { api, ApiError } from './api/client'
 export { socket } from './api/ws'
+export { MAX_STRATEGIES, ScriptsView, normalizeScripts, toggleId } from './components/paper/AutopilotScripts'
 export {
   default as AutopilotView,
   AUTOPILOT_ACCOUNT_ID,
@@ -125,6 +126,7 @@ function status(over = {}) {
     enabled: true, account_id: 3, source: 'scanner', tf: '1h', symbols: [], max_positions: 5, risk_pct: 1, scanner_top: 10,
     alerts: false, alert_channels: 0, initial_balance: 1000, max_exposure_pct: 100, max_drawdown_pct: 20, futures_margin_pct: 50,
     stock_instrument: 'auto', options_premium_pct: 10, learn_guard: true, paused_contexts: [],
+    script_ids: [], script_gate: true, scripts: [],
     health: { ok: true, last_decision: NOW - 600_000, stale: [], downtime: null, text: 'Funciona: decide al cierre de cada vela de 1h.' },
     weekly: null,
     brake: { limit_pct: 20, drawdown_pct: 1.2, active: false },
@@ -178,8 +180,10 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
   assert.deepEqual(t.AutopilotStatus, [
     'enabled', 'account_id', 'source', 'tf', 'symbols', 'max_positions', 'risk_pct', 'scanner_top', 'watching', 'scan', 'log',
     'alerts', 'alert_channels', 'initial_balance', 'max_exposure_pct', 'max_drawdown_pct', 'futures_margin_pct',
-    'stock_instrument', 'options_premium_pct', 'learn_guard', 'paused_contexts', 'health', 'weekly', 'brake', 'note',
+    'stock_instrument', 'options_premium_pct', 'learn_guard', 'paused_contexts', 'script_ids', 'script_gate', 'scripts',
+    'health', 'weekly', 'brake', 'note',
   ])
+  assert.deepEqual(t.AutopilotScript, ['id', 'name', 'error', 'checked_at'])
   assert.deepEqual(t.AutopilotPausedContext, ['dimension', 'label', 'key', 'bucket_label', 'n', 'wins', 'mean_r', 'ci'])
   assert.deepEqual(t.AutopilotHealth, ['ok', 'last_decision', 'stale', 'downtime', 'text'])
   assert.deepEqual(t.AutopilotDowntime, ['from', 'to'])
@@ -205,7 +209,8 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
   assert.deepEqual(t.AutopilotScan, ['id', 'finished_at', 'opportunities'])
   assert.deepEqual(t.AutopilotUpdate, [
     'enabled?', 'source?', 'symbols?', 'tf?', 'max_positions?', 'risk_pct?', 'scanner_top?', 'alerts?', 'max_exposure_pct?',
-    'max_drawdown_pct?', 'futures_margin_pct?', 'stock_instrument?', 'options_premium_pct?', 'learn_guard?',
+    'max_drawdown_pct?', 'futures_margin_pct?', 'stock_instrument?', 'options_premium_pct?', 'learn_guard?', 'script_ids?',
+    'script_gate?',
   ])
   assert.match(src, /export type AutopilotStockInstrument = 'auto' \| 'shares' \| 'options'/)
   assert.deepEqual(t.AutopilotBrake, ['limit_pct', 'drawdown_pct', 'active'])
@@ -762,4 +767,31 @@ test('demo page: the account switch is remembered per browser; "Mi cuenta" stays
     globalThis.localStorage.getItem = realGet
     memory.delete(KEY)
   }
+})
+
+// ----------------------------------------------------------------------------- PyChart strategies (AutopilotScripts)
+
+test('strategies: the saved scripts to tick (at most 3), their errors, the gate switch and the honest note', () => {
+  const scripts = [
+    { id: 7, name: 'Cruce de EMAs (estrategia)', description: '', is_example: true, updated_at: 1 },
+    { id: 12, name: 'Mi ruptura', description: '', is_example: false, updated_at: 2 },
+  ]
+  const st = M.normalizeAutopilot(snapshot({ script_ids: [12], script_gate: false,
+    scripts: [{ id: 12, name: 'Mi ruptura', error: 'línea 3: NameError', checked_at: NOW - 60_000 }] })).autopilot
+  assert.deepEqual([st.script_ids, st.script_gate], [[12], false])
+  const html = render(M.ScriptsView, { status: st, scripts, listError: null, error: null, saving: false, onToggle: noop,
+    onGate: noop, onStudio: noop })
+  assert.ok(html.includes('Estrategias de PyChart') && html.includes('Cruce de EMAs (estrategia)') && html.includes('· ejemplo'), html)
+  assert.ok(html.includes('línea 3: NameError') && html.includes('No están validadas') && html.includes('Fuente de la señal'), html)
+  assert.ok(html.includes('Sus entradas también pasan por el filtro TOMAR') && html.includes('Abrir PyChart'), html)
+  assert.equal((html.match(/type="checkbox" checked=""/g) || []).length, 1, 'only the chosen one is ticked')
+  const empty = render(M.ScriptsView, { status: st, scripts: [], listError: null, error: 'Script 9: Script no encontrado',
+    saving: false, onToggle: noop, onGate: noop, onStudio: noop })
+  assert.ok(empty.includes('Todavía no tienes scripts') && empty.includes('Script 9: Script no encontrado'), empty)
+  assert.deepEqual(M.toggleId([7], 12), [7, 12])
+  assert.deepEqual(M.toggleId([7, 12], 7), [12])
+  assert.deepEqual(M.toggleId([1, 2, 3], 4), [1, 2, 3], `never more than ${M.MAX_STRATEGIES}`)
+  assert.deepEqual(M.normalizeScripts([{ id: 3 }, { id: 'x' }, null]), [{ id: 3, name: 'Script 3', error: null, checked_at: null }])
+  const old = M.normalizeAutopilot(snapshot({ script_ids: undefined, script_gate: undefined, scripts: undefined })).autopilot
+  assert.deepEqual([old.script_ids, old.script_gate, old.scripts], [[], true, []], 'an older server: no strategies, gate on')
 })

@@ -355,6 +355,7 @@ autopilot.initial_balance 1000 · autopilot.max_exposure_pct 100 (0..500; 0 = of
 autopilot.futures_margin_pct 50 (0..100; 0 = it trades no futures)
 autopilot.stock_instrument "auto" (auto|shares|options) · autopilot.options_premium_pct 10 (0..50; 0 = no options)
 autopilot.learn_guard true (it learns from its losses)
+autopilot.script_ids [] (saved PyChart strategies that also give it entries; at most 3) · autopilot.script_gate true
 realtime.enabled true · realtime.twelvedata_credits_min 8 · realtime.twelvedata_credits_day 800 (0 = no daily cap)
 realtime.polygon_calls_min 5 · realtime.reserve_pct 25 · realtime.max_symbols 4 · realtime.min_interval_s 15
 scanner.replay_days 7                     (int days, clamped 0..30 by the evaluator; 0 = vectors dropped at resolution)
@@ -680,7 +681,8 @@ GET  /api/paper/autopilot/compare?fresh=     -> AutopilotComparison (vs random e
 GET  /api/paper/autopilot/journal?fresh=     -> AutopilotJournal (its trade journal; cached, fresh = recompute)
 POST /api/paper/autopilot {enabled?, source?: scanner|list|both, symbols?, tf?, max_positions?, risk_pct?,
                            scanner_top?, alerts?, max_exposure_pct?, max_drawdown_pct?, futures_margin_pct?,
-                           stock_instrument?: auto|shares|options, options_premium_pct?, learn_guard?}
+                           stock_instrument?: auto|shares|options, options_premium_pct?, learn_guard?,
+                           script_ids?: number[] (saved PyChart strategies; [] = none), script_gate?}
      -> AutopilotSnapshot (only the given fields change; 400 {detail} in Spanish on a bad value)
 POST /api/paper/autopilot/reset {initial_balance?}     -> AutopilotSnapshot (account 3 only)
 POST /api/paper/autopilot/close {position_id? | all?}  -> AutopilotSnapshot (400 when neither; 404 unknown id)
@@ -711,6 +713,7 @@ GET  /api/learning/replay?days=&model_key=                       -> scanner repl
   channels on and complete now, `AlertService.active_channels()`; 0 = they would reach nobody), initial_balance,
   max_exposure_pct, max_drawdown_pct, futures_margin_pct, stock_instrument: auto|shares|options, options_premium_pct,
   learn_guard, paused_contexts: AutopilotPausedContext[] {dimension, label, key, bucket_label, n, wins, mean_r, ci},
+  script_ids, script_gate, scripts: AutopilotScript[] {id, name, error, checked_at},
   health: AutopilotHealth {ok, last_decision (ms), stale: string[], downtime: AutopilotDowntime {from, to} | null,
   text}, weekly: AutopilotWeekly {week_start, week_end, trades, wins, total_r, mean_r, pnl, text, generated_at} |
   null, brake: AutopilotBrake {limit_pct, drawdown_pct, active} | null, note}`. 400 texts: 'Fuente no válida: usa
@@ -1243,6 +1246,26 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     once those losses are older than 90 days the context is tried again. `status.paused_contexts` lists them (filled
     by `autopilot_snapshot`); `set_autopilot(learn_guard=)`, terminal `autopilot aprender on|off`, UI switch
     «Aprender de sus pérdidas». It never makes trades it would not take otherwise: it only removes entries.
+  - **PyChart strategies as signal sources** (`autopilot.script_ids`, at most 3 saved scripts; `autopilot.script_gate`,
+    on by default). On each closed bar where NEXUS's own decision has no entry (not BUY / SELL), its trader runs each
+    chosen strategy in the PyChart sandbox on the market's last 1 000 CLOSED candles (`ScriptService.run(...,
+    closed_only=True, quiet=True)`: a forming last candle is left out, and the run logs nothing: its errors are
+    noted by NEXUS automática at most every 6 h) and
+    takes the first `strategy.next` that is an entry signalled on that very bar (an older one is stale). The entry
+    goes through the same checks as NEXUS's (one position per market, USD only, the loss brake, market open, risk
+    limits, «Aprender de sus pérdidas»), through the gate's TOMAR when `script_gate` is on (off: no gate at all), and
+    takes the strategy's stop (or NEXUS's default stop when it has none: needed to size by risk) and its single
+    target (none: `open_position(no_targets=True)`). Its journal context says `source` "script:<id>:<name>". Such a
+    position does not follow NEXUS's exit rules: on each bar its strategy is run again and its close rule or an
+    entry the other way closes it at market (reason SIGNAL, label «Salida de la estrategia «name»»); its stop and
+    target stay with the engine. Shares only (never an option for a strategy's entry). NEXUS's own signal always
+    comes first. The journal adds the dimension «Fuente de la señal» (NEXUS / each strategy) and the causes «Su
+    estrategia la cerró…»; `source` is also a pre-trade dimension of «Aprender de sus pérdidas», so a strategy that
+    loses with strong evidence (30+ trades, 99 % interval below 0) is paused — never NEXUS's own signals as a whole.
+    `set_autopilot(script_ids=)` checks each one (it exists, compiles, declares `strategy(...)`; Spanish PaperError);
+    `status.scripts` shows their names and the last error of a run (also noted in its log, at most every 6 h).
+    Terminal `autopilot --estrategias 12,15|no --filtro-estrategias on|off`; UI card «Estrategias de PyChart»
+    (`AutopilotScripts.tsx`). Not validated: they are measured like everything else, against random entries.
   - **Health and weekly report of NEXUS automática** (`_autopilot_watchdog`, every pass of the monitor while it is
     on): its heartbeat is kept in memory and saved in meta `autopilot.heartbeat` every 5 min; a gap of more than two
     bars of its tf (and over 11 min) between two passes, or between the last saved heartbeat and a start, means the
@@ -1419,6 +1442,11 @@ vectorized *rules*. Signals are evaluated at the bar close and filled at the nex
 touched in the same bar. Levels are captured on the signal bar and stay fixed for the trade unless
 `strategy.exit(..., update=True)` (refreshed on every close, Pine behaviour); `trail_atr=k` adds a chandelier trailing
 stop at k × ATR(14) from the best price. One position at a time (no pyramiding); an opposite entry reverses it.
+`strategy.next` (`BacktestResult.next`, PyChart only): what the rules ask for at the open after the last bar, without
+doing it — `StrategyNextAction {action entry|close, id, side, time (open time of the last bar), price (its close),
+stop, limit (an entry's levels from its own stop / limit and its exit rules on that bar, on the right side of the
+price), reverse, comment}` or null. Causal: it is exactly what the loop would evaluate on that bar, so the same
+candles plus one more bar execute that entry at the new bar's open (`tests/test_imp_autopilot_scripts.py`).
 Sandbox detail: numpy is warmed up before the restrictions are applied and only already-loaded numpy internals may be
 imported by numpy itself (`ctypeslib`, `f2py`, `distutils`, `testing` and the file-I/O modules stay blocked).
 - Imports are handed out as read-only module proxies, and `from <module> import <name>` is resolved through them

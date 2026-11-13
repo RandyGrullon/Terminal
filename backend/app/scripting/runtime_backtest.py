@@ -80,6 +80,7 @@ class _Backtester:
         self.in_pos = [False] * self.n
         self.trades: list[dict] = []
         self.markers: list[dict] = []
+        self.next_action: dict | None = None
 
     # ------------------------------------------------------------------ helpers
     def _rules_for(self, entry_id: str) -> list[tuple[int, dict]]:
@@ -257,6 +258,48 @@ class _Backtester:
         if pos.trail is None or (level - pos.trail) * s > 0:
             pos.trail = level  # ratchets only in the trade's favour
 
+    def _signal_levels(self, rule: dict, j: int) -> tuple[float | None, float | None]:
+        """The stop and target an entry signalled on bar j would take: its own stop / limit and those of its exit
+        rules on that bar, combined like _effective (the tightest stop, the nearest target)."""
+        side = rule["dir"]
+        stops: list[float] = []
+        limits: list[float] = []
+        candidates = [(rule["stop"], rule["limit"])] + [(r["stop"], r["limit"]) for _, r in self._rules_for(rule["id"])
+                                                       if r["when"][j]]
+        for stop_arr, limit_arr in candidates:
+            stop = stop_arr[j] if stop_arr is not None else None
+            limit = limit_arr[j] if limit_arr is not None else None
+            if _finite(stop):
+                stops.append(float(stop))
+            if _finite(limit):
+                limits.append(float(limit))
+        price = self.c[j]
+        stops = [s for s in stops if (price - s) * side > 0]  # on the right side of the price
+        limits = [lim for lim in limits if (lim - price) * side > 0]
+        pick_stop, pick_limit = (max, min) if side > 0 else (min, max)
+        return (pick_stop(stops) if stops else None), (pick_limit(limits) if limits else None)
+
+    def _next(self, j: int, ruined: bool) -> dict | None:
+        """What the rules ask for at the open after the last bar j, without doing it: the entry (or the close) the
+        strategy would trade next. Causal: only bar j's own values, exactly what the loop would evaluate."""
+        pos = self.pos
+        closing = None
+        if pos is not None:
+            closing = next((r for r in self.closes if r["when"][j] and (r["id"] is None or r["id"] == pos.entry_id)),
+                           None)
+        base = {"time": int(self.t[j]), "price": self.c[j]}
+        if not ruined:
+            current = 0 if (pos is None or closing is not None) else pos.side
+            for rule in self.entries:
+                if rule["when"][j] and rule["dir"] != current:
+                    stop, limit = self._signal_levels(rule, j)
+                    return {**base, "action": "entry", "id": rule["id"], "side": "long" if rule["dir"] > 0 else "short",
+                            "stop": stop, "limit": limit, "reverse": current != 0, "comment": rule["comment"]}
+        if closing is not None and pos is not None:
+            return {**base, "action": "close", "id": pos.entry_id, "side": "long" if pos.side > 0 else "short",
+                    "stop": None, "limit": None, "reverse": False, "comment": closing["comment"]}
+        return None
+
     def run(self) -> None:
         pending_close: tuple[str, str | None] | None = None
         pending_entry: tuple[dict, int] | None = None
@@ -284,6 +327,7 @@ class _Backtester:
             if self.equity[j] <= 0:
                 ruined = True
             if j == self.n - 1:
+                self.next_action = self._next(j, ruined)
                 break
             pos = self.pos
             if pos is not None:
@@ -342,6 +386,7 @@ class _Backtester:
             "trades": self.trades,
             "markers": self.markers,
             "candles": [],
+            "next": self.next_action,
         }
 
 

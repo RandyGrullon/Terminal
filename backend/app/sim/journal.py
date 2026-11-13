@@ -32,7 +32,8 @@ BOOTSTRAP_RUNS = 2000
 MAX_INSIGHTS = 6
 # what it learns from its losses: the pre-trade dimensions, a stricter interval (many groups are looked at at once: at
 # 95 % one of them would come out negative by chance) and at least MIN_TRADES trades in the group
-GUARD_DIMS = ("regime", "session", "news", "gate", "side", "market")
+GUARD_DIMS = ("regime", "session", "news", "gate", "side", "market", "source")
+SOURCE_NEXUS = "nexus"  # the entry came from NEXUS's own signal; "script:<id>:<name>" from a PyChart strategy
 GUARD_LEVEL = 0.99
 NEXUS_EXITS = ("EARLY", "REVERSE", "SIGNAL", "TIME")
 
@@ -52,6 +53,8 @@ CAUSE_LABEL = {
     "stop_tras_favor": "Fue a favor, pero tocó el stop",
     "devolvio": "Ganaba 1R o más y lo devolvió",
     "salida_nexus_perdida": "NEXUS la cerró antes, en pérdida",
+    "salida_estrategia_ganancia": "Su estrategia la cerró con ganancia",
+    "salida_estrategia_perdida": "Su estrategia la cerró antes, en pérdida",
     "vencimiento": "Vencimiento de la opción",
     "manual": "Cerrada a mano",
     "otra": "Otra salida",
@@ -204,10 +207,30 @@ def _regime_key(t: dict) -> str | None:
     return str(reg) if isinstance(reg, str) and reg and reg != "unknown" else None
 
 
+def source_key(source: Any) -> str:
+    """The source of an entry as a group key: "nexus" or "script:<id>:<name>" (a renamed strategy is a new group)."""
+    text = str(source or "")
+    return text if text.startswith("script:") else SOURCE_NEXUS
+
+
+def source_label(key: str) -> str:
+    if not key.startswith("script:"):
+        return "Señales de NEXUS"
+    name = key.split(":", 2)[2] if key.count(":") >= 2 else key
+    return f"Estrategia «{name}»"
+
+
+def _source_key(t: dict) -> str:
+    return source_key((t.get("context") or {}).get("source"))
+
+
 def _cause_key(t: dict) -> str:
     j = t.get("journal") if isinstance(t.get("journal"), dict) else {}
     cause = j.get("cause")
-    return cause if cause in CAUSE_LABEL else cause_of(t.get("r"), t.get("exit_reason"), safe_float(j.get("mfe_r")))
+    cause = cause if cause in CAUSE_LABEL else cause_of(t.get("r"), t.get("exit_reason"), safe_float(j.get("mfe_r")))
+    if _source_key(t) != SOURCE_NEXUS and cause.startswith("salida_nexus_"):  # a PyChart strategy closed it
+        cause = cause.replace("salida_nexus_", "salida_estrategia_")
+    return cause
 
 
 # dimension -> (title, key of a trade, label of a key)
@@ -219,6 +242,7 @@ DIMENSIONS: tuple[tuple[str, str, Callable[[dict], str | None], Callable[[str], 
     ("gate", "Puntuación del filtro", _gate_key, lambda k: GATE_LABEL.get(k, k)),
     ("side", "Dirección", _bet, lambda k: SIDE_LABEL.get(k, k)),
     ("market", "Mercado", lambda t: asset_class(str(t.get("symbol") or "")), lambda k: MARKET_LABEL.get(k, k)),
+    ("source", "Fuente de la señal", _source_key, source_label),
 )
 
 
@@ -288,7 +312,8 @@ def _insights(trades: list[dict], groups: list[dict]) -> list[str]:
     return out[:MAX_INSIGHTS]
 
 
-def context_keys(*, regime: Any, ts: int, gate_score: Any, bet: str, symbol: str) -> dict[str, str | None]:
+def context_keys(*, regime: Any, ts: int, gate_score: Any, bet: str, symbol: str,
+                 source: Any = SOURCE_NEXUS) -> dict[str, str | None]:
     """The group keys of a decision about to open, per pre-trade dimension (the keys `analyze` groups trades by)."""
     m = news_minutes(int(ts))
     g = safe_float(gate_score)
@@ -299,6 +324,7 @@ def context_keys(*, regime: Any, ts: int, gate_score: Any, bet: str, symbol: str
         "gate": None if g is None else ("80" if g >= 80 else "70" if g >= 70 else "bajo"),
         "side": "short" if bet == "short" else "long",
         "market": asset_class(symbol),
+        "source": source_key(source),
     }
 
 
@@ -319,8 +345,8 @@ def losing_contexts(trades: Iterable[dict], *, level: float = GUARD_LEVEL, min_n
             if key:
                 groups.setdefault(key, []).append(t)
         for key, ts in sorted(groups.items()):
-            if len(ts) < int(min_n):
-                continue
+            if len(ts) < int(min_n) or (dim == "source" and key == SOURCE_NEXUS):
+                continue  # NEXUS's own signals as a whole are never paused: only a losing PyChart strategy
             r = np.array([float(t["r"]) for t in ts], dtype=float)
             days = np.array([int(t["exit_time"]) // 86400 for t in ts])
             ci = S.block_bootstrap_mean_ci(r, days, runs=BOOTSTRAP_RUNS, seed=S.seed_for(seed, "guard", dim, key),

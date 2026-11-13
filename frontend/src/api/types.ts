@@ -464,6 +464,20 @@ export interface BacktestResult {
   trades: Trade[]
   markers: ChartMarker[]
   candles: Candle[]
+  next?: StrategyNextAction | null // PyChart strategies only: what its rules ask for at the open after the last bar
+}
+
+/** What a PyChart strategy's rules ask for at the open after the last bar (causal: that bar's own values). */
+export interface StrategyNextAction {
+  action: 'entry' | 'close'
+  id: string
+  side: 'long' | 'short'
+  time: number // open time (s) of the last bar, the one that gives the signal
+  price: number // its close
+  stop: number | null // an entry's stop and target from its exit rules on that bar
+  limit: number | null
+  reverse: boolean // an entry that turns an open position around
+  comment: string | null
 }
 
 export interface MonteCarloResult {

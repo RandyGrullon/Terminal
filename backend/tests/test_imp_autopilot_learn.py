@@ -43,7 +43,11 @@ def test_the_keys_of_a_decision_match_the_journal_groups():
     keys = J.context_keys(regime="trend_up", ts=fomc.ny_time("2025-01-15", 8, 50), gate_score=81, bet="short",
                           symbol="NASDAQ:AAPL")
     assert keys == {"regime": "trend_up", "session": "nueva_york", "news": "cerca", "gate": "80", "side": "short",
-                    "market": "stock"}
+                    "market": "stock", "source": "nexus"}
+    script = J.context_keys(regime=None, ts=fomc.ny_time("2025-01-15", 8, 50), gate_score=None, bet="long",
+                            symbol=SYM, source="script:7:Cruce de EMAs")
+    assert script["source"] == "script:7:Cruce de EMAs" and J.source_label(script["source"]) == "Estrategia «Cruce de EMAs»"
+    assert J.source_key("otra cosa") == "nexus" and J.source_label("nexus") == "Señales de NEXUS"
     assert J.context_keys(regime="unknown", ts=fomc.ny_time("2026-01-17", 12, 0), gate_score=None, bet="long",
                           symbol=SYM)["regime"] is None
 
