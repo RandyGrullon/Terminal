@@ -119,6 +119,27 @@ def test_strategy_example_skips_signals_near_news():
     assert unfiltered["strategy"]["metrics"]["trades"] == 1
 
 
+def test_strategy_example_costs_follow_the_market_of_the_symbol():
+    """Its default costs are those of the symbol's market (crypto ten times forex), or the user's own."""
+    sandbox = pytest.importorskip("app.scripting.sandbox")
+    code = next(ex["code"] for ex in load_examples() if ex["file"] == "estrategia_rangos_sesion.py")
+    candles = _candles(n=48)
+
+    def costs(symbol: str, inputs: dict | None = None) -> tuple[float, float, str]:
+        res = sandbox.run_script(code, candles, inputs or {}, symbol=symbol, tf="5m", timeout=30.0, news=NEWS)
+        assert res["ok"], res["errors"]
+        params = res["strategy"]["params"]
+        return params["fee_pct"], params["slippage_pct"], res["stdout"]
+
+    fee, slip, out = costs("BINANCE:BTCUSDT")
+    assert (fee, slip) == (0.1, 0.02) and "Costes (cripto): comisión 0,1 % y deslizamiento 0,02 % por lado" in out
+    assert costs("OANDA:EURUSD")[:2] == (0.005, 0.005)
+    assert costs("CME_MINI:NQ1!")[:2] == (0.01, 0.005)
+    assert costs("OANDA:XAUUSD")[:2] == (0.02, 0.01) and costs("NASDAQ:AAPL")[:2] == (0.02, 0.01)
+    own = costs("BINANCE:BTCUSDT", {"costes": "Personalizados", "comision_propia": 0.04, "desliz_propio": 0.01})
+    assert own[:2] == (0.04, 0.01) and "Costes (personalizados)" in own[2]
+
+
 class RecordingSandbox:
     def __init__(self) -> None:
         self.calls: list[dict] = []

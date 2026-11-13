@@ -312,12 +312,15 @@ corren en un proceso aparte con límite de tiempo y de memoria. En Linux se suma
 deja en la terminal una línea con las que están activas. Terminal: `scripts`, `run <script> btc 1h`.
 
 **Noticias en los scripts**: `noticias.cerca(30, 30)` marca las velas a menos de 30 minutos (antes o después) de una
-noticia principal del calendario de NEXUS: IPC, informe de empleo y decisiones de la Fed, con fechas oficiales
-pasadas desde febrero de 2024 para que el backtest las vea. Úsalo como filtro de «no operar»:
-`strategy.entry("Compra", "long", when=senal & ~noticias.cerca(30, 30))`. Los demás eventos del calendario
-(`eventos="alto"`) solo existen desde noviembre de 2026, y las noticias no programadas (discursos, geopolítica) nunca
-están. Los ejemplos «Rangos de sesión: Sídney → Asia, Londres → NY» y «Rango de sesión: barrida o ruptura
-(estrategia)» lo usan; compara el backtest con y sin el filtro: evitar noticias no garantiza ganar más.
+noticia principal del calendario de NEXUS: IPC, informe de empleo y decisiones de la Fed, con fechas oficiales pasadas
+desde febrero de 2024 para que el backtest las vea. Úsalo como filtro de «no operar»: `strategy.entry("Compra",
+"long", when=senal & ~noticias.cerca(30, 30))`. Los demás eventos del calendario (`eventos="alto"`) solo existen desde
+noviembre de 2026, y las noticias no programadas (discursos, geopolítica) nunca están. Los ejemplos «Rangos de sesión:
+Sídney → Asia, Londres → NY» y «Rango de sesión: barrida o ruptura (estrategia)» lo usan; compara el backtest con y
+sin el filtro: evitar noticias no garantiza ganar más. La estrategia usa por defecto los costes del tipo de mercado
+del símbolo (cripto 0,1 % de comisión y 0,02 % de deslizamiento por lado; forex 0,005 % y 0,005 %; futuros 0,01 % y
+0,005 %; CFD, metales y acciones 0,02 % y 0,01 %): en intradía los costes deciden el resultado, así que con
+«Personalizados» pon los de tu bróker.
 
 ### 8. Aprendizaje y validación
 

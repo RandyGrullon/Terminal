@@ -20,13 +20,47 @@
 #  activas, cierra lo abierto antes de cada publicación. Compara el backtest con
 #  y sin el filtro: que filtre no garantiza que mejore.
 #
+#  Costes: por defecto los de cada tipo de mercado, según la bolsa del símbolo
+#  (cripto 0,1 % de comisión + 0,02 % de deslizamiento por lado; forex 0,005 %
+#  + 0,005 %; futuros 0,01 % + 0,005 %; CFD, metales y acciones 0,02 % +
+#  0,01 %). En intradía los costes deciden: con «Personalizados» pon los de tu
+#  bróker.
+#
 #  Son reglas para medir, no una predicción: si el backtest no gana más que
 #  sus costes con al menos 30 operaciones, no hay nada que operar.
 #  Horas en la zona elegida («Nueva York» aplica su horario de verano).
+#  Sídney y Londres cambian la hora en otras fechas que Nueva York (Sídney de
+#  octubre a abril, Londres del último domingo de marzo al de octubre): con las
+#  horas fijas en Nueva York, su sesión real se corre 1 h (Londres, unas semanas
+#  en marzo y en octubre-noviembre) o hasta 2 h (Sídney) en parte del año.
+#  Ajusta las horas si quieres seguir su hora local.
 # ─────────────────────────────────────────────────────────────────────────────
 import numpy as np
 
-strategy("Rango de sesión: barrida o ruptura", initial_capital=10000, risk_pct=1, fee_pct=0.01, slippage_pct=0.005)
+costes = input.select("Según el mercado", "Costes", options=["Según el mercado", "Personalizados"])
+comision_propia = input.float(0.1, "Comisión por lado (%), si son personalizados", minval=0, maxval=2, step=0.005)
+desliz_propio = input.float(0.02, "Deslizamiento por lado (%), si son personalizados", minval=0, maxval=2, step=0.005)
+
+# Tipo de mercado por la bolsa del símbolo (los costes por lado de la app para cada tipo, aproximados)
+CRIPTO = ("BINANCE", "BYBIT", "OKX", "COINBASE", "KRAKEN", "KUCOIN", "BITGET", "BITSTAMP", "GEMINI", "GATEIO",
+          "MEXC", "BITFINEX", "BINGX", "HTX", "BITMEX", "DERIBIT", "CRYPTO", "SIM")
+DIVISAS = ("USD", "EUR", "GBP", "JPY", "CHF", "AUD", "CAD", "NZD", "MXN", "SEK", "NOK", "DKK", "PLN", "ZAR", "TRY",
+           "SGD", "HKD", "CNH")
+prefijo = syminfo.prefix.upper()
+ticker = syminfo.ticker.upper()
+if costes == "Personalizados":
+    mercado, comision, desliz = "personalizados", comision_propia, desliz_propio
+elif prefijo in CRIPTO:
+    mercado, comision, desliz = "cripto", 0.1, 0.02
+elif prefijo.startswith(("CME", "CBOT", "NYMEX", "COMEX", "EUREX", "ICE")) or ticker.endswith("!"):
+    mercado, comision, desliz = "futuros", 0.01, 0.005
+elif len(ticker) == 6 and ticker[:3] in DIVISAS and ticker[3:] in DIVISAS:
+    mercado, comision, desliz = "forex", 0.005, 0.005
+else:
+    mercado, comision, desliz = "CFD, metales o acciones", 0.02, 0.01
+
+strategy("Rango de sesión: barrida o ruptura", initial_capital=10000, risk_pct=1, fee_pct=comision,
+         slippage_pct=desliz)
 
 sesion = input.select("Londres → NY", "Sesión", options=["Londres → NY", "Sídney → Asia"])
 modo = input.select("Barrida (reversión)", "Qué operar", options=["Barrida (reversión)", "Ruptura (continuación)"])
@@ -218,4 +252,5 @@ if evitar_noticias:
     print("Descartadas por noticias:", int(np.sum(bloqueada)))
 if senales < 30:
     print("Menos de 30 operaciones: el resultado del backtest todavía no dice nada. Carga más historial.")
-print("Costes por defecto (comisión 0,01 % y deslizamiento 0,005 % por lado): ajústalos a tu bróker en strategy(...).")
+print("Costes (" + mercado + "): comisión " + str(comision).replace(".", ",") + " % y deslizamiento "
+      + str(desliz).replace(".", ",") + " % por lado. Si tu bróker cobra otra cosa, elige «Personalizados».")

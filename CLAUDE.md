@@ -73,11 +73,11 @@ uv pip install --python backend/.tmp/pgenv/Scripts/python.exe pgserver
 backend/.tmp/pgenv/Scripts/python.exe tools/pg_start.py backend/.tmp/pgdata   # imprime la URI
 ```
 
-Estado tras «NEXUS automática» con acciones (cuenta de efectivo de 1.000 $ y freno de pérdidas), futuros de índices y
-opciones teóricas (06/11/2026, en Windows): backend 1974 passed / 27 skipped sobre SQLite y 1985 passed / 16 skipped
-sobre PostgreSQL (las omisiones son las de PostgreSQL, red, solo Linux / POSIX y el lock exacto); UI 250 pruebas en 9
-suites; `tsc` sin errores; contrato 130 comprobaciones · 0 fallos · 6 avisos (sin red, `--symbol SIM:NEXUS` y base
-nueva, como en CI: los avisos son listas vacías y ningún informe de validación guardado). La prueba más lenta es
+Estado tras los rangos de sesión y las noticias de PyChart (PR #1, con los costes por mercado en su estrategia;
+13/11/2026, en Windows): backend 1997 passed / 27 skipped sobre SQLite y 2008 passed / 16 skipped sobre PostgreSQL
+(las omisiones son las de PostgreSQL, red, solo Linux / POSIX y el lock exacto); UI 250 pruebas en 9 suites; `tsc` sin
+errores; contrato 130 comprobaciones · 0 fallos · 6 avisos (sin red, `--symbol SIM:NEXUS` y base nueva, como en CI:
+los avisos son listas vacías y ningún informe de validación guardado). La prueba más lenta es
 `tests/test_imp_engine_repaint_history.py` (regresión de repintado: 300 cierres, ~2,5 min). Si la suite sobre
 PostgreSQL local se vuelve muy lenta (miles de esquemas creados y borrados por las pruebas), arranca
 `tools/pg_start.py` con una carpeta nueva.

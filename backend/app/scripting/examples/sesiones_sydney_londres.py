@@ -23,6 +23,11 @@
 #  Horas en la zona elegida. «Nueva York» aplica su horario de verano (2.º
 #  domingo de marzo → 1.er domingo de noviembre). En noviembre-marzo la hora de
 #  Santo Domingo (UTC−4) es una hora MÁS que la de Nueva York.
+#  Sídney y Londres cambian la hora en otras fechas que Nueva York (Sídney de
+#  octubre a abril, Londres del último domingo de marzo al de octubre): con las
+#  horas fijas en Nueva York, su sesión real se corre 1 h (Londres, unas semanas
+#  en marzo y en octubre-noviembre) o hasta 2 h (Sídney) en parte del año.
+#  Ajusta las horas si quieres seguir su hora local.
 #  Todo es causal: cada vela solo usa velas ya cerradas. Pensado para 1–15 min.
 # ─────────────────────────────────────────────────────────────────────────────
 import numpy as np
