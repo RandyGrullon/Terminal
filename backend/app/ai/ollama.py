@@ -49,10 +49,14 @@ class OllamaClient:
             raise OllamaError("Ollama respondió algo que no es JSON al pedir sus modelos.") from None
         return [str(m["name"]) for m in (data.get("models") or []) if isinstance(m, dict) and m.get("name")]
 
-    async def chat(self, model: str, messages: list[dict], tools: list[dict] | None = None) -> dict:
-        """One chat turn: {"message": {"role", "content", "tool_calls"?}, ...}."""
-        body: dict[str, Any] = {"model": model, "messages": messages, "stream": False,
-                                "options": {"temperature": 0.2}}
+    async def chat(self, model: str, messages: list[dict], tools: list[dict] | None = None, *,
+                   num_ctx: int | None = None) -> dict:
+        """One chat turn: {"message": {"role", "content", "tool_calls"?}, ...}. num_ctx: the context window Ollama
+        reserves (its own default, often 4096 tokens, cuts long conversations with tools silently)."""
+        options: dict[str, Any] = {"temperature": 0.2}
+        if num_ctx:
+            options["num_ctx"] = int(num_ctx)
+        body: dict[str, Any] = {"model": model, "messages": messages, "stream": False, "options": options}
         if tools:
             body["tools"] = tools
         url = self._url("/api/chat")

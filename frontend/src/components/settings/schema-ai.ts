@@ -58,6 +58,16 @@ export const GROUPS_EXT: GroupDef[] = [
         step: 10,
         help: 'Un modelo grande en CPU puede tardar minutos; si se corta, súbelo o usa un modelo más pequeño.',
       },
+      {
+        key: 'ai.context_length',
+        label: 'Memoria de la conversación',
+        kind: 'int',
+        min: 2048,
+        max: 131072,
+        step: 1024,
+        unit: 'tokens',
+        help: 'Lo que Ollama reserva para la conversación (num_ctx). 16 384 basta para el laboratorio de estrategias; súbelo si pierde el hilo, bájalo si el modelo no cabe en tu GPU.',
+      },
     ],
   },
 ]

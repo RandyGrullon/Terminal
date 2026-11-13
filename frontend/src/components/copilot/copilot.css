@@ -51,6 +51,30 @@
   word-break: break-word;
   line-height: 1.45;
 }
+.cp-code {
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.cp-code-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.cp-code pre {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 420px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+}
 .cp-input {
   display: flex;
   gap: 8px;

@@ -12,7 +12,7 @@ import pytest
 
 from app.ai import ollama as ollama_mod
 from app.ai import tools as tools_mod
-from app.ai.service import AIError, AIService, clean_messages
+from app.ai.service import MAX_ROUNDS, AIError, AIService, clean_messages
 from app.sim import paper as pp
 from tests.test_imp_autopilot import SYM, BarNexus, _engine, no_background  # noqa: F401 (fixture)
 from tests.test_sim_fakes import make_current
@@ -142,7 +142,7 @@ def test_ollama_down_no_model_and_endless_tool_calls(runtime_factory, no_backgro
             loop = FakeOllama([_call("semaforo_y_noticias")] * 10)
             loop.install(monkeypatch)
             res = await ai.chat([{"role": "user", "content": "hola"}])
-            assert res["reply"].startswith("No pude terminar la respuesta") and len(loop.chats) == 4
+            assert res["reply"].startswith("No pude terminar la respuesta") and len(loop.chats) == MAX_ROUNDS
             await rt.settings.update({"ai.model": "llama3.1:8b"})
             missing = FakeOllama()
             missing.install(monkeypatch)

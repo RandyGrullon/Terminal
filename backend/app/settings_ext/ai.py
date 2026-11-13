@@ -9,4 +9,5 @@ DEFAULTS: dict = {
     "ai.search_provider": "none",  # none | brave (Brave Search API, with ai.brave_api_key)
     "ai.brave_api_key": "",  # a secret: masked in the terminal, never logged
     "ai.timeout_s": 120,  # seconds a local model may take to answer
+    "ai.context_length": 16384,  # Ollama's num_ctx: the reference + a strategy test need more than its 4096 default
 }

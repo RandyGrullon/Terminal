@@ -402,6 +402,16 @@ nunca como órdenes. Puede equivocarse y no es asesoría financiera.
 2. En *Ajustes → Copiloto IA (Ollama)* actívalo; si Ollama corre en otro equipo, pon su dirección.
 3. Abre la sección **Copiloto** o escribe en la terminal `ia ¿cómo va NEXUS automática?`.
 
+**Laboratorio de estrategias.** Pídele «crea y prueba una estrategia de cruce de medias en BTC 1h»: consulta la
+referencia de PyChart, escribe el script, lo prueba en el sandbox (el mismo aislamiento que el editor) y, si da error,
+lo corrige. Te muestra el script y el resultado en dos periodos: **desarrollo** (el primer 70 % de las velas) y
+**comprobación** (el último 30 %), cada uno como «x de n» y frente a entrar al azar con la misma dirección, duración y
+costes. Con menos de 30 operaciones no hay conclusiones. Si se ajustan reglas mirando el resultado, la comprobación
+deja de ser independiente, y cada variante probada es otra oportunidad de acertar por suerte: confírmala en otros
+mercados. Con **Abrir en PyChart** el script pasa al editor como borrador; lo guardas tú. Probar no abre operaciones.
+Si las respuestas pierden el hilo, sube *Memoria de la conversación* en Ajustes (bájala si el modelo no cabe en tu
+GPU).
+
 ### 12. Terminal
 
 Ábrela con el botón de la cabecera o ``Ctrl+` ``. Muestra en vivo todo lo que pasa (señales, operaciones, escaneos,

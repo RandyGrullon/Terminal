@@ -14,6 +14,8 @@ TOOL_LABEL = {
     "comparacion_con_el_azar": "comparación con el azar",
     "analisis_nexus": "análisis de NEXUS",
     "semaforo_y_noticias": "semáforo y noticias",
+    "referencia_pychart": "referencia de PyChart",
+    "probar_estrategia": "prueba de estrategia",
     "buscar_en_internet": "búsqueda en internet",
 }
 

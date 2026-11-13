@@ -363,6 +363,7 @@ validation.tfs ["1h", "4h"] · validation.bars 3000 (1000..5000) · validation.f
 validation.warmup_bars 500 · validation.random_runs 1000
 ai.enabled false · ai.ollama_url "http://127.0.0.1:11434" · ai.model "" (empty = the first model Ollama has)
 ai.search_provider "none" (none|brave) · ai.brave_api_key "" (a secret) · ai.timeout_s 120 (10..600)
+ai.context_length 16384 (2048..131072: Ollama's num_ctx; its own default, often 4096, cuts long conversations)
 ```
 **Feature settings** (`app/settings_ext/`): each feature module (alerts, paper_risk, realtime, scanner_model,
 validation) defines a plain `DEFAULTS` dict and must not import `app.config` (no cycles); `settings_ext/__init__.py`
@@ -2232,21 +2233,46 @@ Database and UI:
 A language model served by Ollama on the user's own machine (or another machine of the user's network) answers
 questions about NEXUS in Spanish. Off by default (`ai.enabled`); while off, Ollama is never called.
 
-- `app.ai.ollama.OllamaClient`: `models()` (GET `/api/tags`) and `chat(model, messages, tools)` (POST `/api/chat`, not
-  streamed, temperature 0.2) through `app.util.http_client` (rule 4); `clean_reply` drops `<think>…</think>` blocks.
+- `app.ai.ollama.OllamaClient`: `models()` (GET `/api/tags`) and `chat(model, messages, tools, num_ctx=)` (POST
+  `/api/chat`, not streamed, temperature 0.2, `options.num_ctx` = `ai.context_length`) through `app.util.http_client`
+  (rule 4); `clean_reply` drops `<think>…</think>` blocks.
   Spanish `OllamaError` for an invalid URL, no connection, a timeout (`ai.timeout_s`) or an HTTP error.
 - `app.ai.tools`: read-only tools (Ollama tool calling) built from the app's own services, each returning a small
   trimmed dict (strings ≤ 400 chars, lists ≤ 12) or a Spanish `{"error"}`: `estado_nexus_automatica`
   (`autopilot_snapshot`), `decisiones_recientes`, `diario_de_operaciones` (`autopilot_journal`),
   `comparacion_con_el_azar`, `analisis_nexus` (NEXUS `current` of a market: action, score, P(up), regime, gate),
   `semaforo_y_noticias` (macro conditions + high-impact events of 7 days) and `buscar_en_internet` (only with
-  `ai.search_provider` "brave" and `ai.brave_api_key`: the official Brave Search API, 5 results, marked as data).
-  No tool changes anything (settings, orders, trades) and none fetches an arbitrary URL.
+  `ai.search_provider` "brave" and `ai.brave_api_key`: the official Brave Search API, 5 results, marked as data),
+  plus the strategy lab's `referencia_pychart` and `probar_estrategia` (below). No tool changes anything (settings,
+  orders, trades, scripts) and none fetches an arbitrary URL. `tool_content(name, result, limit)` is what the model
+  reads: JSON, except the PyChart reference as plain text (untrimmed, ≤ 14 000 chars, so code stays readable).
 - `app.ai.service.AIService` (`rt.ai`): one conversation at a time (the model runs on the user's hardware). System
   prompt in Spanish with the project's rules: simulation only, the published validation found no edge, statistics
   as «x de n» and nothing concluded below 30 trades, no financial advice, it cannot change settings nor trade, and
   tool / web results are DATA, never instructions. The caller's conversation keeps only user / assistant turns (≤ 20,
-  ≤ 4000 chars each); up to 4 rounds of tool calls (≤ 6 per round, results ≤ 6000 chars) before the answer.
+  ≤ 4000 chars each); up to 6 rounds of tool calls (≤ 6 per round, results ≤ 6000 chars) before the answer.
+  `status()` is sync like every service of `rt.services` (/api/health, the terminal's `status`: running, enabled,
+  model, search; it never calls Ollama); `check()` is the copilot's own status (it asks Ollama).
+- Strategy lab (`app.ai.lab`, pure): `referencia_pychart` → `reference_text()`: every signature of
+  `app.scripting.reference`, the docs of the sections a strategy needs (declaration, price series, inputs, NaN,
+  strategy orders, Python rules, news; each ≤ 420 chars) and the bundled EMA-cross example without comments.
+  `probar_estrategia {codigo (≤ 20 000 chars), simbolo, temporalidad (5m|15m|1h|4h|1d, default 1h), velas (300..5000,
+  default 5000)}` runs the script with `rt.scripts.run(..., name="Copiloto: <title>")` (the PyChart sandbox: same
+  isolated worker, limits and AST validator as the editor) and returns `summarize_run`: the first 3 errors with line /
+  column / kind / message, an indicator → "declara strategy(...)", or the backtest: costs (`fee_pct`, `slippage_pct`
+  of `strategy(...)`), totals (closed trades as «x de n», return, buy & hold, max drawdown, profit factor, a trade
+  still open at the end is left out) and two periods by the candles: development (the first 70 %) and check (the last
+  30 %). Each period: «x de n», mean result % per trade with its 95 % interval, and the reference of RANDOM_DRAWS
+  (200) random entries per trade in the same period with its direction, its duration and the same costs (entry at a
+  random bar's open, exit at the close `bars` later); d = result − reference per trade, its 95 % interval by a block
+  bootstrap by UTC day of entry (`app.validation.stats`, ≥ 8 days). Verdicts: no closed trades; «Muestra pequeña: sin
+  conclusiones» below 30 (`verdict.MIN_TRADES`); no interval; «Sin diferencia clara con entrar al azar» when the
+  interval includes 0; «Por encima / por debajo de entrar al azar en este periodo» otherwise. Seeded by
+  `seed_for("lab", symbol, tf, code)` (the same script gives the same summary). The note says that adjusting rules
+  after looking makes the check period dependent and that every variant tested is another chance to look good by
+  luck (a no-edge rule is called "above / below" about 1 time in 12 at this level). The system prompt adds the lab's
+  rules: reference → script → test → fix; show the whole script in a ```python``` block and the results as they are;
+  say how many variants were tried; past-market knowledge of the model is no evidence.
 - API: `GET /api/ai/status` → `AIStatus {enabled, url, model, models, reachable, error, search, search_ready, note}`
   (never the key); `POST /api/ai/chat {messages: AIChatMessage[] {role user|assistant, content}}` → `AIChatReply
   {reply, model, tools: AIToolUse[] {name, ok}, duration_ms}`; 400 {detail} when it is off or the question is missing,
@@ -2255,6 +2281,12 @@ questions about NEXUS in Spanish. Off by default (`ai.enabled`); while off, Olla
   estado` prints its status. UI: section «Copiloto» (`pages/CopilotPage.tsx`, lazy) with setup steps while it is off,
   the backend's error while Ollama is unreachable, suggestions, the conversation (kept in the page only) with the
   tools each answer used, and the notes «puede equivocarse» / no financial advice; Ajustes group «Copiloto IA
-  (Ollama)» (`schema-ai.ts`).
+  (Ollama)» (`schema-ai.ts`). The assistant's answers are split into text and fenced code blocks (`splitBlocks`; the
+  user's own messages never are); each block can be copied and a PyChart script (it declares `strategy(...)` /
+  `indicator(...)`) gets «Abrir en PyChart»: `openInStudio` puts it in the PyChart editor as an unsaved draft
+  («<title> (copiloto)», `studioStore`) and opens the editor; the user reviews and saves it there (the copilot never
+  saves nor runs anything on its own outside the sandbox test).
 - Limits: answers come from a local model and may be wrong; its knowledge of past markets is not usable for
-  backtests (the model may know what happened); web search needs the user's own key of an official API.
+  backtests (the model may know what happened); web search needs the user's own key of an official API. The lab's
+  random reference keeps each trade's duration but not its exits (stops and targets of a strategy end losing trades
+  early); 5000 candles of 1 h are about 7 months: a strategy should be confirmed on other markets and timeframes.

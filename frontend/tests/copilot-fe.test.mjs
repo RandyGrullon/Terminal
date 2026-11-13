@@ -27,7 +27,9 @@ globalThis.localStorage ??= {
 
 const ENTRY = `
 export { api } from './api/client'
-export { default as CopilotPage, CopilotView, SUGGESTIONS, TOOL_LABEL, historyFor, normalizeAIStatus, normalizeReply } from './pages/CopilotPage'
+export { default as CopilotPage, CopilotView, SUGGESTIONS, TOOL_LABEL, historyFor, isPyChart, normalizeAIStatus, normalizeReply, openInStudio, scriptTitle, splitBlocks } from './pages/CopilotPage'
+export { useStudio } from './components/studio/studioStore'
+export { useApp } from './store'
 export { GROUPS, FIELD_BY_KEY } from './components/settings/schema'
 export { createElement } from 'react'
 export { renderToStaticMarkup } from 'react-dom/server.browser'
@@ -138,7 +140,51 @@ test('ready: suggestions, then the conversation with the tools it used, its mode
 test('settings: the copilot group with its secret search key and a select of providers', () => {
   const group = M.GROUPS.find((g) => g.id === 'ai')
   assert.ok(group && group.title === 'Copiloto IA (Ollama)')
-  assert.deepEqual(group.fields.map((f) => f.key), ['ai.enabled', 'ai.ollama_url', 'ai.model', 'ai.search_provider', 'ai.brave_api_key', 'ai.timeout_s'])
+  assert.deepEqual(group.fields.map((f) => f.key), ['ai.enabled', 'ai.ollama_url', 'ai.model', 'ai.search_provider', 'ai.brave_api_key', 'ai.timeout_s', 'ai.context_length'])
+  const ctx = M.FIELD_BY_KEY['ai.context_length']
+  assert.equal(ctx.kind, 'int')
+  assert.deepEqual([ctx.min, ctx.max], [2048, 131072])
   assert.equal(M.FIELD_BY_KEY['ai.brave_api_key'].kind, 'secret')
   assert.deepEqual(M.FIELD_BY_KEY['ai.search_provider'].options.map((o) => o.value), ['none', 'brave'])
+})
+
+test('lab: code blocks in an answer, with copy and «Abrir en PyChart» for a PyChart script only', () => {
+  const code = 'strategy("Cruce rápido", initial_capital=10000)\nstrategy.entry("L", "long", when=ta.crossover(close, ta.ema(close, 20)))'
+  const reply = `Aquí está:\n\n\`\`\`python\n${code}\n\`\`\`\nDesarrollo: 12 de 40 (muestra pequeña).\n\`\`\`\nx = 1\n\`\`\``
+  assert.deepEqual(M.splitBlocks(reply), [
+    { kind: 'text', text: 'Aquí está:', lang: '' },
+    { kind: 'code', text: code, lang: 'python' },
+    { kind: 'text', text: 'Desarrollo: 12 de 40 (muestra pequeña).', lang: '' },
+    { kind: 'code', text: 'x = 1', lang: '' },
+  ])
+  // a fence the model left open runs to the end; plain text stays one block
+  assert.deepEqual(M.splitBlocks('Mira:\n```py\nprint(1)\n'), [{ kind: 'text', text: 'Mira:', lang: '' }, { kind: 'code', text: 'print(1)', lang: 'py' }])
+  assert.deepEqual(M.splitBlocks('Sin código'), [{ kind: 'text', text: 'Sin código', lang: '' }])
+  assert.ok(M.isPyChart(code) && !M.isPyChart('x = 1') && M.isPyChart('indicator("RSI")\nplot(close)'))
+  assert.equal(M.scriptTitle(code), 'Cruce rápido')
+  assert.equal(M.scriptTitle('x = 1'), 'Estrategia')
+  const turns = [{ role: 'user', content: 'Crea una estrategia' }, { role: 'assistant', content: reply, tools: [{ name: 'probar_estrategia', ok: true }] }]
+  const html = view({ turns, onOpenCode: noop })
+  assert.ok(html.includes('Consultó: prueba de estrategia') && html.includes('class="cp-code"'), html)
+  assert.equal(html.split('Abrir en PyChart').length - 1, 1, 'only the PyChart script gets the button')
+  assert.equal(html.split('>Copiar<').length - 1, 2, 'every code block can be copied')
+  assert.ok(html.includes('strategy(&quot;Cruce rápido&quot;') && !html.includes('```'), 'the code is shown escaped, without its fences')
+  // the user's own messages are never parsed as code
+  const mine = view({ turns: [{ role: 'user', content: '```python\nstrategy("x")\n```' }], onOpenCode: noop })
+  assert.ok(!mine.includes('cp-code') && mine.includes('```python'), mine)
+  // without onOpenCode (e.g. the terminal) there is no button
+  assert.ok(!view({ turns }).includes('Abrir en PyChart'))
+})
+
+test('lab: «Abrir en PyChart» opens the script as an unsaved draft in the editor', () => {
+  const code = 'strategy("Ruptura de Donchian")\nstrategy.entry("L", "long", when=close > ta.highest(high, 20))'
+  M.openInStudio(code)
+  const st = M.useStudio.getState()
+  const draft = st.drafts[st.active]
+  assert.ok(st.active.startsWith('new:'), st.active)
+  assert.equal(draft.name, 'Ruptura de Donchian (copiloto)')
+  assert.equal(draft.code, `${code}\n`)
+  assert.equal(draft.isNew, true)
+  assert.ok(draft.description.includes('revísalo y pruébalo'))
+  assert.equal(M.useApp.getState().page, 'studio')
 })

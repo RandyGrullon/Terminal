@@ -2,10 +2,13 @@
 // tools (NEXUS automática's status, decisions and journal, the comparison with random entries, NEXUS's read of a market,
 // the semáforo and news, and web search when the user configured a key) and never changes settings nor trades. The
 // conversation lives in this page only (nothing is stored). Off by default: the page explains how to set it up.
+// Strategy lab: the copilot writes PyChart scripts and tests them in the sandbox; its code blocks can be copied or
+// opened in PyChart as an unsaved draft (the user saves it there).
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
-import { Bot, RefreshCw, Send, Settings as SettingsIcon, Sparkles } from 'lucide-react'
+import { Bot, Check, Copy, FileCode, RefreshCw, Send, Settings as SettingsIcon, Sparkles } from 'lucide-react'
 import { api, errorMessage } from '../api/client'
 import type { AIChatMessage, AIChatReply, AIStatus } from '../api/types'
+import { newKey, useStudio } from '../components/studio/studioStore'
 import { Badge, Button, Card, Disclaimer, ErrorBox, Loading } from '../components/ui'
 import { useApp } from '../store'
 import '../components/copilot/copilot.css'
@@ -18,6 +21,8 @@ export const TOOL_LABEL: Record<string, string> = {
   comparacion_con_el_azar: 'comparación con el azar',
   analisis_nexus: 'análisis de NEXUS',
   semaforo_y_noticias: 'semáforo y noticias',
+  referencia_pychart: 'referencia de PyChart',
+  probar_estrategia: 'prueba de estrategia',
   buscar_en_internet: 'búsqueda en internet',
 }
 
@@ -27,6 +32,7 @@ export const SUGGESTIONS = [
   '¿Qué dice su diario de operaciones?',
   '¿Qué ve NEXUS ahora en BTC?',
   '¿Qué noticias importantes hay esta semana?',
+  'Crea y prueba una estrategia de cruce de medias en BTC 1h',
 ]
 
 const MAX_HISTORY = 20
@@ -72,6 +78,104 @@ export function normalizeReply(raw: unknown): AIChatReply | null {
   return { reply: o.reply, model: isStr(o.model) ? o.model : '', tools, duration_ms: typeof o.duration_ms === 'number' ? o.duration_ms : 0 }
 }
 
+/** A piece of an answer: plain text or a fenced code block (```lang … ```). */
+export interface Block {
+  kind: 'text' | 'code'
+  text: string
+  lang: string
+}
+
+const FENCE_RE = /```([\w+-]*)[^\n]*\n([\s\S]*?)(?:```|$)/g
+
+/** Splits an answer into text and code blocks (a fence left open by the model runs to the end). */
+export function splitBlocks(text: string): Block[] {
+  const out: Block[] = []
+  let last = 0
+  for (const m of text.matchAll(FENCE_RE)) {
+    const at = m.index ?? 0
+    if (at > last) out.push({ kind: 'text', text: text.slice(last, at).replace(/^\n+|\n+$/g, ''), lang: '' })
+    out.push({ kind: 'code', text: m[2].replace(/\n+$/, ''), lang: m[1].toLowerCase() })
+    last = at + m[0].length
+  }
+  if (last < text.length) out.push({ kind: 'text', text: text.slice(last).replace(/^\n+|\n+$/g, ''), lang: '' })
+  return out.filter((b) => b.kind === 'code' || b.text.trim() !== '')
+}
+
+/** A PyChart script: it declares strategy(...) or indicator(...). */
+export const isPyChart = (code: string): boolean => /^\s*(?:strategy|indicator)\s*\(/m.test(code)
+
+/** The title of its strategy(...) / indicator(...) declaration ("Estrategia" without one). */
+export function scriptTitle(code: string): string {
+  const m = code.match(/^\s*(?:strategy|indicator)\(\s*(['"])(.+?)\1/m)
+  return m ? m[2].trim().slice(0, 80) : 'Estrategia'
+}
+
+/** Opens a script of the copilot in PyChart as an unsaved draft (the user reviews and saves it there). */
+export function openInStudio(code: string): void {
+  const st = useStudio.getState()
+  const key = newKey()
+  st.putDraft(key, {
+    name: `${scriptTitle(code)} (copiloto)`,
+    code: code.endsWith('\n') ? code : `${code}\n`,
+    description: 'Creado con el copiloto: revísalo y pruébalo antes de usarlo.',
+    isNew: true,
+    updatedAt: Date.now(),
+  })
+  st.setActive(key)
+  useApp.getState().setPage('studio')
+}
+
+function CodeBlock({ code, lang, onOpen }: { code: string; lang: string; onOpen?: (code: string) => void }) {
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    const done = () => {
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    }
+    try {
+      void navigator.clipboard?.writeText(code).then(done, () => undefined)
+    } catch {
+      // no clipboard (an insecure context): the code can still be selected by hand
+    }
+  }
+  return (
+    <div className="cp-code">
+      <div className="cp-code-head">
+        <span className="tiny muted">{lang || 'código'}</span>
+        <span className="header-spacer" />
+        <Button size="sm" variant="ghost" icon={copied ? <Check size={12} /> : <Copy size={12} />} onClick={copy} title="Copiar el código">
+          {copied ? 'Copiado' : 'Copiar'}
+        </Button>
+        {onOpen && isPyChart(code) && (
+          <Button size="sm" icon={<FileCode size={12} />} onClick={() => onOpen(code)} title="Abrirlo en PyChart como borrador sin guardar">
+            Abrir en PyChart
+          </Button>
+        )}
+      </div>
+      <pre>
+        <code>{code}</code>
+      </pre>
+    </div>
+  )
+}
+
+/** An answer of the copilot: its text and its code blocks. */
+function MessageBody({ text, onOpenCode }: { text: string; onOpenCode?: (code: string) => void }) {
+  return (
+    <>
+      {splitBlocks(text).map((b, i) =>
+        b.kind === 'code' ? (
+          <CodeBlock key={i} code={b.text} lang={b.lang} onOpen={onOpenCode} />
+        ) : (
+          <div key={i} className="cp-text">
+            {b.text}
+          </div>
+        ),
+      )}
+    </>
+  )
+}
+
 /** What the backend gets: the user / assistant turns (never the error notes), the newest MAX_HISTORY. */
 export function historyFor(turns: ChatTurn[]): AIChatMessage[] {
   return turns
@@ -90,6 +194,8 @@ export interface CopilotViewProps {
   onSend: (text: string) => void
   onRetry: () => void
   onSettings: () => void
+  /** Opens a PyChart script of an answer in the editor (absent: no button). */
+  onOpenCode?: (code: string) => void
 }
 
 function SetupNotice({ onSettings }: { onSettings: () => void }) {
@@ -113,7 +219,7 @@ function SetupNotice({ onSettings }: { onSettings: () => void }) {
 
 /** The page without its state (rendered by the tests). */
 export function CopilotView(props: CopilotViewProps) {
-  const { status, statusError, turns, input, sending, onInput, onSend, onRetry, onSettings } = props
+  const { status, statusError, turns, input, sending, onInput, onSend, onRetry, onSettings, onOpenCode } = props
   const ready = !!status && status.enabled && status.reachable && !status.error
   const model = status ? status.model || status.models[0] || '' : ''
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -153,7 +259,10 @@ export function CopilotView(props: CopilotViewProps) {
           {turns.length === 0 ? (
             <div className="cp-empty">
               <Bot size={22} />
-              <p className="small muted">Pregúntale por NEXUS automática, sus decisiones y errores, un mercado o las noticias.</p>
+              <p className="small muted">
+                Pregúntale por NEXUS automática, sus decisiones y errores, un mercado o las noticias, o pídele que cree y pruebe una
+                estrategia de PyChart.
+              </p>
               <div className="cp-suggest">
                 {SUGGESTIONS.map((s) => (
                   <button key={s} type="button" className="btn btn-sm" onClick={() => onSend(s)} disabled={sending}>
@@ -169,7 +278,7 @@ export function CopilotView(props: CopilotViewProps) {
                   {t.role === 'assistant' && t.tools && t.tools.length > 0 && (
                     <div className="tiny muted">Consultó: {t.tools.map((x) => TOOL_LABEL[x.name] ?? x.name).join(', ')}</div>
                   )}
-                  <div className="cp-text">{t.content}</div>
+                  {t.role === 'assistant' ? <MessageBody text={t.content} onOpenCode={onOpenCode} /> : <div className="cp-text">{t.content}</div>}
                   {t.role === 'assistant' && t.model && (
                     <div className="tiny muted">
                       {t.model}
@@ -267,6 +376,7 @@ export default function CopilotPage() {
       onSend={(t) => void send(t)}
       onRetry={() => void check()}
       onSettings={() => useApp.getState().setPage('settings')}
+      onOpenCode={openInStudio}
     />
   )
 }
