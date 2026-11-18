@@ -390,6 +390,8 @@ def main() -> int:
         check_obj(rep, ifaces, "PaperAccount", d.get("account"), "paper.autopilot.account")
         st = d.get("autopilot")
         check_obj(rep, ifaces, "AutopilotStatus", st, "paper.autopilot.status")
+        if d.get("challenges"):  # its challenge accounts (none on a fresh database)
+            check_list(rep, ifaces, "AutopilotChallenge", d["challenges"], "paper.autopilot.challenges", 3)
         if d.get("risk"):
             check_obj(rep, ifaces, "PaperRisk", d["risk"], "paper.autopilot.risk")
         if isinstance(st, dict):
@@ -409,6 +411,14 @@ def main() -> int:
                 check_list(rep, ifaces, "AutopilotPausedContext", st["paused_contexts"], "paper.autopilot.paused", 2)
             if st.get("scripts"):  # the PyChart strategies it follows (none on a fresh database)
                 check_list(rep, ifaces, "AutopilotScript", st["scripts"], "paper.autopilot.scripts", 2)
+            if st.get("goal"):  # its running challenge (none on a fresh database)
+                check_obj(rep, ifaces, "AutopilotGoal", st["goal"], "paper.autopilot.goal")
+            if st.get("goal_last"):
+                check_obj(rep, ifaces, "AutopilotGoalResult", st["goal_last"], "paper.autopilot.goal_last")
+            if st.get("session"):  # the New York session and its aggressive mode
+                check_obj(rep, ifaces, "AutopilotSession", st["session"], "paper.autopilot.session")
+            if st.get("markets"):
+                check_list(rep, ifaces, "AutopilotMarket", st["markets"], "paper.autopilot.markets", 3)
     d = call("GET", "/api/paper/autopilot/compare")  # against random entries (a computation, read-only)
     if d:
         check_obj(rep, ifaces, "AutopilotComparison", d, "paper.autopilot.compare")

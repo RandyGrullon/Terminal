@@ -52,6 +52,7 @@ _LIMITERS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, RateL
 # provider -> (min seconds between requests, max concurrent requests); conservative vs. the public limits
 LIMITS: dict[str, tuple[float, int]] = {
     "binance": (0.12, 3),
+    "binance_um": (0.12, 2),  # USDⓈ-M futures: 2 400 weight/min, 5 per 1 000-bar page
     "okx": (0.12, 2),
     "coinbase": (0.15, 2),
     "kraken": (1.05, 1),

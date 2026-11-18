@@ -523,6 +523,37 @@ class ScriptService:
             self._run_events(result, sym, tf_key, name)
         return result
 
+    async def run_on(self, code: Any, candles: list[dict], symbol: str, tf: str, *,
+                     timeout: float = RUN_TIMEOUT_S) -> dict:
+        """Run a script on candles the caller already has (app.sim.research: long imported history, up to the
+        sandbox's MAX_BARS, the newest kept) -> ScriptRunResult. Quiet (no events) and with its own time limit; the
+        same sandbox, validator and limits as `run`."""
+        text = _clean_code(code)
+        try:
+            tf_key = normalize_tf(tf or "1h")
+        except ValueError as exc:
+            raise ScriptServiceError(400, str(exc)) from None
+        if not candles:
+            raise ScriptServiceError(400, f"Sin velas para {symbol} {tf_key}")
+        run_script = _load_sandbox()
+        news = self._news(candles)
+        extra = {"news": news} if news is not None else {}
+        started = time.perf_counter()
+        async with self._run_sem:
+            try:
+                raw = await asyncio.wait_for(
+                    asyncio.to_thread(run_script, text, candles, {}, symbol=symbol, tf=tf_key, timeout=float(timeout),
+                                      **extra),
+                    timeout=float(timeout) + 20,
+                )
+            except asyncio.TimeoutError:
+                raw = {"ok": False, "errors": [_internal_error(f"El script superó el tiempo máximo ({timeout:.0f} s)",
+                                                               "timeout")]}
+            except Exception as exc:
+                raw = {"ok": False, "errors": [_internal_error(f"Error interno del sandbox: {type(exc).__name__}: {exc}",
+                                                               "runtime")]}
+        return _normalize_run(raw, candles, int(round((time.perf_counter() - started) * 1000)))
+
     def _news(self, candles: list[dict]) -> dict | None:
         """Economic calendar for `noticias` over the candles' dates (± NEWS_MARGIN_S), from the macro module. None
         when the module is not loaded or fails: the script then runs without news (noticias.disponible = False)."""

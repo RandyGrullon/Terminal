@@ -1,11 +1,32 @@
 // "NEXUS automática": NEXUS's own demo account (account 3), which trades on its own with NEXUS's closed-bar signals and
 // the Trade Gate. The view shows what it is doing (watched symbols, latest scan, decision log), its open positions and
 // history, its stats (winners as "x de n", never a bare percentage), how it trades (on/off, source, timeframe, limits)
-// and a reset. Simulated only: never real money (BrokerCard: the optional mirror in an Alpaca PAPER account). Live updates come from the default WS 'paper' topic as
+// and a reset. Simulated only: never real money (BrokerCard: the optional mirrors in an Alpaca PAPER account and on Binance's testnets). Live updates come from the default WS 'paper' topic as
 // {type: 'paper_autopilot'} (the user's {type: 'paper'} messages are account 1 and never feed this view); a GET every
 // 30 s while the page is visible is the fallback.
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { BookOpen, Bot, CalendarDays, Info, PowerOff, Radar, RefreshCw, RotateCcw, Scale, ScrollText, SlidersHorizontal, TriangleAlert, Wallet, X } from 'lucide-react'
+import {
+  Activity,
+  BookOpen,
+  Bot,
+  CalendarDays,
+  History as HistoryIcon,
+  Info,
+  LayoutDashboard,
+  ListChecks,
+  Pause,
+  Play,
+  PowerOff,
+  Radar,
+  RefreshCw,
+  RotateCcw,
+  Scale,
+  ScrollText,
+  SlidersHorizontal,
+  TriangleAlert,
+  Wallet,
+  X,
+} from 'lucide-react'
 import { api, errorMessage } from '../../api/client'
 import type {
   AutopilotBrake,
@@ -34,20 +55,27 @@ import { TIMEFRAMES } from '../../api/types'
 import { socket } from '../../api/ws'
 import { actionTone, DIRECTION_LABEL, fmtAgo, fmtDateTime, fmtInt, fmtNum, fmtR, splitSymbol, type Tone } from '../../lib/format'
 import { isOne, plural } from '../../lib/plural'
+import { STYLE_LABEL, STYLE_ORDER, STYLE_WORD, sortTfs, styleOf, styleSummary, type TradeStyle } from '../../lib/tradeStyle'
 import { useApp } from '../../store'
-import { Badge, Button, Card, Disclaimer, Empty, ErrorBox, Field, Loading, Modal, NumberInput, Select, Spinner, Toggle } from '../ui'
+import { Badge, Button, Card, Disclaimer, Empty, ErrorBox, Field, Loading, Modal, NumberInput, Select, Spinner, Toggle, useFieldId } from '../ui'
 import SymbolSearch from '../SymbolSearch'
-import { asTimeframe, fmtMoney, isNum, useInterval } from '../markets/opsUtils'
+import { asTimeframe, fmtMoney, isNum, useInterval, usePersistentState } from '../markets/opsUtils'
 import AutopilotScripts, { normalizeScripts } from './AutopilotScripts'
+import AutopilotGoalCard, { normalizeGoal, normalizeGoalResult } from './AutopilotGoal'
+import AutopilotSessionCard, { normalizeMarkets, normalizeSession } from './AutopilotSession'
+import AutopilotChallengesCard, { normalizeChallenges } from './AutopilotChallenges'
+import TradeDetailModal from './TradeDetailModal'
 import BrokerCard from './BrokerCard'
+import PortfolioCard from './PortfolioCard'
 import PaperStats from './PaperStats'
 import PositionsTable from './PositionsTable'
 import HistoryTable from './HistoryTable'
 import RiskPanel from './RiskPanel'
 import { normalizeRisk } from './ordersUtils'
 import { isAccount, marketOf, normalizePositions } from './paperUtils'
-import { useMediaQuery } from './useMediaQuery'
+import { AccountHero, ActivityFeed, Block, Figure, SectionTabs, TradeTile, activityOf, unitsOf, type SectionTab } from './DemoKit'
 import './autopilot.css'
+import './demo.css'
 
 /** NEXUS's own demo account (contract: account_id 3). */
 export const AUTOPILOT_ACCOUNT_ID = 3
@@ -57,7 +85,7 @@ const MAX_SYMBOLS = 30 // same limit as the server
 const MIN_BALANCE = 100
 const MAX_BALANCE = 100_000_000
 const BALANCE_PRESETS = [1_000, 10_000, 50_000, 100_000]
-const TF_OPTIONS = TIMEFRAMES.map((t) => ({ value: t, label: t }))
+const MAX_TFS = 3 // quick, measured and long-term trades at once (app.sim.paper.MAX_AUTOPILOT_TFS)
 /** Origin label of NEXUS's positions in the shared position / history tables. */
 const ORIGIN_LABELS: Record<string, string> = { autopilot: 'NEXUS' }
 
@@ -132,6 +160,13 @@ function normalizeScan(raw: unknown): AutopilotScan | null {
   return { id: o.id, finished_at: isNum(o.finished_at) ? o.finished_at : null, opportunities: Math.max(0, numOr(o.opportunities, 0)) }
 }
 
+/** Its timeframes, fastest first and without repeats; [tf] when the server sent none. */
+function normalizeTfs(raw: unknown, tf: Timeframe): Timeframe[] {
+  const list = Array.isArray(raw) ? raw.map((t) => asTimeframe(isStr(t) ? t : null)).filter((t): t is Timeframe => t !== null) : []
+  const unique = sortTfs([...new Set(list)]).slice(0, MAX_TFS)
+  return unique.length ? unique : [tf]
+}
+
 export function normalizeStatus(raw: unknown): AutopilotStatus | null {
   if (!raw || typeof raw !== 'object') return null
   const o = raw as Record<string, unknown>
@@ -141,9 +176,20 @@ export function normalizeStatus(raw: unknown): AutopilotStatus | null {
     account_id: numOr(o.account_id, AUTOPILOT_ACCOUNT_ID),
     source: o.source === 'list' || o.source === 'both' ? o.source : 'scanner',
     tf: asTimeframe(isStr(o.tf) ? o.tf : null) ?? '1h',
+    tfs: normalizeTfs(o.tfs, asTimeframe(isStr(o.tf) ? o.tf : null) ?? '1h'),
+    hold_pct: numOr(o.hold_pct, 0),
+    hold_basket: Array.isArray(o.hold_basket)
+      ? o.hold_basket
+          .filter((x): x is { symbol: string; weight: number } => !!x && typeof x === 'object' && isStr((x as { symbol?: unknown }).symbol) && isNum((x as { weight?: unknown }).weight))
+          .map((x) => ({ symbol: x.symbol, weight: x.weight }))
+      : [],
+    hold_stop_pct: numOr(o.hold_stop_pct, 50),
     symbols: Array.isArray(o.symbols) ? o.symbols.filter((s): s is string => isStr(s) && s !== '') : [],
     max_positions: numOr(o.max_positions, 5),
     risk_pct: numOr(o.risk_pct, 1),
+    lots: o.lots === true,
+    per_tf_positions: o.per_tf_positions === true,
+    lot_max_risk_pct: numOr(o.lot_max_risk_pct, 5),
     scanner_top: numOr(o.scanner_top, 10),
     watching: normalizeWatch(o.watching),
     scan: normalizeScan(o.scan),
@@ -164,6 +210,11 @@ export function normalizeStatus(raw: unknown): AutopilotStatus | null {
     health: normalizeHealth(o.health),
     weekly: normalizeWeekly(o.weekly),
     brake: normalizeBrake(o.brake),
+    goal: normalizeGoal(o.goal),
+    goal_last: normalizeGoalResult(o.goal_last),
+    session_aggressive: o.session_aggressive === true,
+    session: normalizeSession(o.session, o.session_aggressive === true),
+    markets: normalizeMarkets(o.markets),
     note: isStr(o.note) ? o.note : '',
   }
 }
@@ -181,6 +232,7 @@ export function normalizeAutopilot(raw: unknown): AutopilotSnapshot | null {
     history: normalizePositions(o.history),
     risk: normalizeRisk(o.risk),
     autopilot,
+    challenges: normalizeChallenges(o.challenges, normalizeLog, normalizeBrake),
   }
 }
 
@@ -406,6 +458,11 @@ export function MoneyCard({ status, dailyLossPct }: { status: AutopilotStatus; d
   const pct = (v: number, d = 1) => `${fmtNum(v, Number.isInteger(v) ? 0 : d)} %`
   const rules = [
     `Arriesga el ${pct(status.risk_pct)} de su capital en cada operación: lo que perdería si salta el stop.`,
+    ...(status.lots
+      ? [
+          `Opera en lotes de MT5, en pasos de 0,01 lote (oro: 1 lote = 100 oz; cripto: 1 moneda; acciones: 1 acción). Si su riesgo pide menos de 0,01 lote, abre 0,01 solo si arriesga como mucho el ${pct(status.lot_max_risk_pct)} de su capital; si no, no opera ese mercado.`,
+        ]
+      : []),
     `Como mucho ${plural(status.max_positions, 'posición', 'posiciones')} a la vez, una por símbolo, y con el límite de posiciones por grupo correlacionado de tu riesgo de cartera.`,
     status.max_exposure_pct > 0
       ? `Cuenta de efectivo: no tiene invertido más del ${pct(status.max_exposure_pct, 0)} de su capital en acciones, fondos, cripto y primas de opciones (si no cabe entera, compra menos).`
@@ -417,7 +474,7 @@ export function MoneyCard({ status, dailyLossPct }: { status: AutopilotStatus; d
       : 'No opera futuros (margen máximo en futuros: 0 %).',
     stocksRule(status, pct),
     status.learn_guard
-      ? 'Aprende de sus pérdidas: deja de operar en un contexto (sesión, régimen, noticias, puntuación del filtro, dirección o mercado) donde sus operaciones de los últimos 90 días pierden con evidencia fuerte (30 o más y el intervalo del 99 % bajo cero).'
+      ? 'Aprende de sus pérdidas: deja de operar en un contexto (sesión, régimen, noticias, puntuación del filtro, dirección, mercado, estrategia o temporalidad) donde sus operaciones de los últimos 90 días pierden con evidencia fuerte (30 o más y el intervalo del 99 % bajo cero).'
       : 'No aprende de sus pérdidas: «Aprender de sus pérdidas» está desactivado.',
     status.max_drawdown_pct > 0
       ? `Se frena si pierde un ${pct(status.max_drawdown_pct, 0)} desde su saldo inicial${dailyLossPct ? ` o un ${pct(dailyLossPct)} en el día` : ''}.`
@@ -612,8 +669,12 @@ export interface AutopilotDraft {
   source: AutopilotSource
   symbols: string[]
   tf: Timeframe
+  /** Every timeframe it trades at once (1..3, fastest first). */
+  tfs: Timeframe[]
   max_positions: number | null
   risk_pct: number | null
+  /** MT5 lots: the most the minimum lot (0.01) may risk at its stop, % of equity. */
+  lot_max_risk_pct: number | null
   scanner_top: number | null
   max_exposure_pct: number | null
   max_drawdown_pct: number | null
@@ -625,6 +686,7 @@ export interface AutopilotDraft {
 type NumField =
   | 'max_positions'
   | 'risk_pct'
+  | 'lot_max_risk_pct'
   | 'scanner_top'
   | 'max_exposure_pct'
   | 'max_drawdown_pct'
@@ -635,6 +697,7 @@ type NumField =
 const RANGES: Record<NumField, { lo: number; hi: number; int: boolean; what: string }> = {
   max_positions: { lo: 1, hi: 20, int: true, what: 'El máximo de posiciones' },
   risk_pct: { lo: 0.1, hi: 5, int: false, what: 'El riesgo por operación (%)' },
+  lot_max_risk_pct: { lo: 0.5, hi: 25, int: false, what: 'El tope del lote mínimo (%)' },
   scanner_top: { lo: 1, hi: 30, int: true, what: 'El número de candidatos del escáner' },
   max_exposure_pct: { lo: 0, hi: 500, int: false, what: 'La exposición máxima (%)' },
   max_drawdown_pct: { lo: 0, hi: 90, int: false, what: 'El freno de pérdidas (%)' },
@@ -650,6 +713,7 @@ const usesScanner = (source: AutopilotSource) => source !== 'list'
 const numFields = (source: AutopilotSource): NumField[] => [
   'max_positions',
   'risk_pct',
+  'lot_max_risk_pct',
   ...(usesScanner(source) ? (['scanner_top'] as NumField[]) : []),
   'max_exposure_pct',
   'max_drawdown_pct',
@@ -662,8 +726,10 @@ export function draftFrom(s: AutopilotStatus): AutopilotDraft {
     source: s.source,
     symbols: [...s.symbols],
     tf: s.tf,
+    tfs: Array.isArray(s.tfs) && s.tfs.length ? [...s.tfs] : [s.tf], // one timeframe when the server sent none
     max_positions: s.max_positions,
     risk_pct: s.risk_pct,
+    lot_max_risk_pct: s.lot_max_risk_pct ?? 5, // an older server sends none
     scanner_top: s.scanner_top,
     max_exposure_pct: s.max_exposure_pct,
     max_drawdown_pct: s.max_drawdown_pct,
@@ -680,7 +746,10 @@ const sameList = (a: string[], b: string[]) => a.length === b.length && a.every(
 export function draftChanges(d: AutopilotDraft, saved: AutopilotDraft): AutopilotUpdate {
   const out: AutopilotUpdate = {}
   if (d.source !== saved.source) out.source = d.source
-  if (d.tf !== saved.tf) out.tf = d.tf
+  if (!sameList(d.tfs, saved.tfs) && d.tfs.length > 0) {
+    if (d.tfs.length > 1) out.tfs = [...d.tfs]
+    else out.tf = d.tfs[0] // one timeframe again
+  } else if (d.tf !== saved.tf) out.tf = d.tf
   if (d.stock_instrument !== saved.stock_instrument) out.stock_instrument = d.stock_instrument
   for (const k of numFields(d.source)) {
     const v = d[k]
@@ -705,6 +774,7 @@ export function validateDraft(d: AutopilotDraft): string | null {
       return `${r.what} debe ser ${r.int ? 'un número entero' : 'un número'} entre ${fmtNum(r.lo, digits)} y ${fmtNum(r.hi, digits)}.`
     }
   }
+  if (d.tfs.length < 1 || d.tfs.length > MAX_TFS) return `Elige de 1 a ${MAX_TFS} temporalidades.`
   if (usesList(d.source) && d.symbols.length > MAX_SYMBOLS) return `Como máximo ${MAX_SYMBOLS} símbolos en la lista.`
   return null
 }
@@ -723,6 +793,38 @@ export interface AutopilotControlsProps {
 }
 
 /** How NEXUS's account trades. The on/off switch applies at once; the other fields are a draft saved with "Guardar". */
+/** 1..3 timeframes at once, each with its speed; inside a <Field> its first button carries the label's id. */
+function TfPicker({ tfs, onChange }: { tfs: Timeframe[]; onChange: (next: Timeframe[]) => void }) {
+  const fieldId = useFieldId()
+  return (
+    <>
+      <div className="tabs pills ap-tfs" role="group" aria-label="Temporalidades en las que decide">
+        {TIMEFRAMES.map((t, i) => {
+          const on = tfs.includes(t)
+          return (
+            <button
+              key={t}
+              id={i === 0 ? fieldId : undefined}
+              type="button"
+              aria-pressed={on}
+              className={`tab ${on ? 'active' : ''}`}
+              title={`Velas de ${t}: operaciones ${STYLE_WORD[styleOf(t)]}s`}
+              disabled={!on && tfs.length >= MAX_TFS}
+              onClick={() => {
+                const next = sortTfs(on ? tfs.filter((x) => x !== t) : [...tfs, t])
+                if (next.length) onChange(next) // at least one
+              }}
+            >
+              {t}
+            </button>
+          )
+        })}
+      </div>
+      <span className="tiny muted">{tfs.map((t) => `${t}: ${STYLE_WORD[styleOf(t)]}`).join(' · ')}</span>
+    </>
+  )
+}
+
 export const AutopilotControls = memo(function AutopilotControls({ status, saving, error, onSave }: AutopilotControlsProps) {
   const key = settingsKey(status)
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -731,6 +833,8 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
   const [turning, setTurning] = useState<boolean | null>(null) // on / off being saved, shown at once
   const [alerting, setAlerting] = useState<boolean | null>(null) // its alerts switch being saved
   const [learning, setLearning] = useState<boolean | null>(null) // its learn-from-losses switch being saved
+  const [lotting, setLotting] = useState<boolean | null>(null) // its MT5-lots switch being saved
+  const [stacking, setStacking] = useState<boolean | null>(null) // its one-per-timeframe switch being saved
   const [submitting, setSubmitting] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
   const prevSaved = useRef(saved)
@@ -749,6 +853,8 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
   const enabled = turning ?? status.enabled
   const alertsOn = alerting ?? status.alerts
   const learnOn = learning ?? status.learn_guard
+  const lotsOn = lotting ?? status.lots
+  const stackOn = stacking ?? status.per_tf_positions === true
   const shownError = localError ?? error
 
   const patch = (p: Partial<AutopilotDraft>) => {
@@ -783,6 +889,26 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
       await onSave({ learn_guard: next })
     } finally {
       setLearning(null)
+    }
+  }
+
+  const turnLots = async (next: boolean) => {
+    setLocalError(null)
+    setLotting(next)
+    try {
+      await onSave({ lots: next })
+    } finally {
+      setLotting(null)
+    }
+  }
+
+  const turnStacking = async (next: boolean) => {
+    setLocalError(null)
+    setStacking(next)
+    try {
+      await onSave({ per_tf_positions: next })
+    } finally {
+      setStacking(null)
     }
   }
 
@@ -850,6 +976,28 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
             : 'Desactivado: opera en todos los contextos aunque pierda en alguno.'}
         </div>
 
+        <Toggle
+          checked={lotsOn}
+          onChange={(v) => void turnLots(v)}
+          label={<span className={lotsOn ? 'bold' : 'text-2'}>Operar en lotes de MT5 (mínimo 0,01)</span>}
+        />
+        <div className="tiny muted">
+          {lotsOn
+            ? `Tamaños en pasos de 0,01 lote (oro: 1 lote = 100 oz; cripto: 1 moneda; acciones: 1 acción). Si su riesgo pide menos de 0,01 lote, abre 0,01 solo si arriesga como mucho el ${fmtNum(status.lot_max_risk_pct, 1)} % de su capital; si no, no opera ese mercado.`
+            : 'Desactivado: el tamaño sale exacto de su riesgo por operación, sin redondear a lotes.'}
+        </div>
+
+        <Toggle
+          checked={stackOn}
+          onChange={(v) => void turnStacking(v)}
+          label={<span className={stackOn ? 'bold' : 'text-2'}>Una operación por temporalidad en cada mercado</span>}
+        />
+        <div className="tiny muted">
+          {stackOn
+            ? 'Puede tener a la vez una operación del mismo mercado en cada temporalidad (por ejemplo tres de oro: en 5m, 15m y 1h), dentro de los límites de riesgo de cartera.'
+            : 'Desactivado: como mucho una operación abierta por mercado.'}
+        </div>
+
         <div className="field">
           <span className="label" id={sourceLabelId}>
             Qué vigila
@@ -903,14 +1051,17 @@ export const AutopilotControls = memo(function AutopilotControls({ status, savin
         )}
 
         <div className="ap-grid2">
-          <Field label="Temporalidad" hint="Velas en las que decide">
-            <Select value={draft.tf} onChange={(tf) => patch({ tf })} options={TF_OPTIONS} />
+          <Field label="Temporalidades" hint="Hasta 3 a la vez: rápidas, medidas y a largo plazo">
+            <TfPicker tfs={draft.tfs} onChange={(next) => patch({ tfs: next, tf: next[0] })} />
           </Field>
           <Field label="Máximo de posiciones" hint="De 1 a 20, una por símbolo">
             <NumberInput value={draft.max_positions} onChange={(v) => patch({ max_positions: v })} min={1} max={20} step={1} />
           </Field>
           <Field label="Riesgo por operación (%)" hint="Del capital, hasta el stop: de 0,1 a 5">
             <NumberInput value={draft.risk_pct} onChange={(v) => patch({ risk_pct: v })} min={0.1} max={5} step={0.1} />
+          </Field>
+          <Field label="Tope del lote mínimo (%)" hint="Con lotes de MT5: lo más que puede arriesgar 0,01 lote hasta el stop, del capital: de 0,5 a 25">
+            <NumberInput value={draft.lot_max_risk_pct} onChange={(v) => patch({ lot_max_risk_pct: v })} min={0.5} max={25} step={0.5} />
           </Field>
           {usesScanner(draft.source) && (
             <Field label="Candidatos del escáner" hint="Oportunidades del último escaneo que vigila: de 1 a 30">
@@ -1234,8 +1385,16 @@ export function AutopilotResetModal(props: {
 
 // ----------------------------------------------------------------------------- the view
 
-/** `initial`: a snapshot shown before the first answer (the view always loads its own as well). */
-export default function AutopilotView({ initial = null }: { initial?: AutopilotSnapshot | null }) {
+/** The sections of the view (remembered per browser): a friendly summary first, the details behind their tabs. */
+export type AutopilotSection = 'resumen' | 'operaciones' | 'actividad' | 'analisis' | 'ajustes'
+const SECTION_KEY = 'nexus.paper.autopilot.section.v1'
+const SECTIONS: AutopilotSection[] = ['resumen', 'operaciones', 'actividad', 'analisis', 'ajustes']
+const isAutopilotSection = (v: unknown): v is AutopilotSection => typeof v === 'string' && (SECTIONS as string[]).includes(v)
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+
+/** `initial`: a snapshot shown before the first answer (the view always loads its own as well). `section`: the section
+ *  to show instead of the remembered one (tests). */
+export default function AutopilotView({ initial = null, section }: { initial?: AutopilotSnapshot | null; section?: AutopilotSection }) {
   const notify = useApp((s) => s.notify)
   const [snap, setSnapState] = useState<AutopilotSnapshot | null>(initial)
   const [loading, setLoading] = useState(!initial)
@@ -1330,7 +1489,10 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
   // ------------------------------------------------------------------ actions
   const openSymbol = useCallback((symbol: string) => useApp.getState().openChart(symbol, snapRef.current?.autopilot.tf), [])
   // an option opens the chart of its stock
-  const openPosition = useCallback((p: Position) => useApp.getState().openChart(marketOf(p).chart, asTimeframe(p.tf)), [])
+  const openPosition = useCallback((p: Position) => useApp.getState().showTrade(p), [])
+  // the trade whose detail is open (by id: it follows the live snapshot while it stays open)
+  const [detailId, setDetailId] = useState<number | null>(null)
+  const showDetail = useCallback((p: Position) => setDetailId(p.id), [])
 
   const save = useCallback(
     async (update: AutopilotUpdate): Promise<AutopilotStatus | null> => {
@@ -1445,39 +1607,131 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
     }
   }, [])
   const closedCount = snap ? snap.account.trades : null
+  const [styleTab, setStyleTab] = useState<'all' | TradeStyle>('all')
+  const [storedSection, setSection] = usePersistentState<AutopilotSection>(SECTION_KEY, 'resumen', isAutopilotSection)
+  const shown = section ?? storedSection
+  // the buy-and-hold portfolio has its own card: the trades tables and tabs leave its holdings out
+  const holdings = useMemo(() => positions.filter((p) => p.hold), [positions])
+  const trades = useMemo(() => positions.filter((p) => !p.hold), [positions])
+  const tradeHistory = useMemo(() => history.filter((p) => !p.hold), [history])
+  const tabPositions = useMemo(
+    () => (styleTab === 'all' ? trades : trades.filter((p) => styleOf(p.tf) === styleTab)),
+    [trades, styleTab],
+  )
+  const tabHistory = useMemo(
+    () => (styleTab === 'all' ? tradeHistory : tradeHistory.filter((p) => styleOf(p.tf) === styleTab)),
+    [tradeHistory, styleTab],
+  )
   useEffect(() => {
     if (closedCount !== null) {
       void loadCmp(false)
       void loadJournal(false)
     }
   }, [closedCount, loadCmp, loadJournal])
-  const wide = useMediaQuery('(min-width: 1700px)')
-
   // ------------------------------------------------------------------ blocks
+  const tfsOf = (style: TradeStyle) => (Array.isArray(status?.tfs) ? status.tfs : status ? [status.tf] : []).filter((t) => styleOf(t) === style)
+  const allTfs = Array.isArray(status?.tfs) && status.tfs.length ? status.tfs : status ? [status.tf] : []
+  const tagOf = (p: Position) => `${capitalize(STYLE_WORD[styleOf(p.tf)])} · ${p.tf}`
+  const speedChoice = (id: 'all' | TradeStyle, label: string, hint: string) => {
+    const s = styleSummary(trades, tradeHistory, id === 'all' ? null : id)
+    return (
+      <button key={id} type="button" className={`dk-speed${styleTab === id ? ' active' : ''}`} aria-pressed={styleTab === id} onClick={() => setStyleTab(id)}>
+        <b>
+          {label} <span className="dk-count">{fmtInt(s.open)}</span>
+        </b>
+        <span>{hint}</span>
+        <span>
+          {s.closed > 0 ? (
+            <>
+              ganadoras {fmtInt(s.wins)} de {fmtInt(s.closed)} ·{' '}
+              <b className={`mono ${s.pnl > 0 ? 'pos' : s.pnl < 0 ? 'neg' : ''}`} style={{ display: 'inline' }}>
+                {fmtMoney(s.pnl, true)}
+              </b>
+            </>
+          ) : (
+            'sin cerradas todavía'
+          )}
+        </span>
+      </button>
+    )
+  }
+  const tabSum = styleSummary(trades, tradeHistory, styleTab === 'all' ? null : styleTab)
+  const speedFilter = (
+    <div className="dk-stack" style={{ gap: 6 }}>
+      <div className="dk-speeds" role="group" aria-label="Operaciones por velocidad">
+        {speedChoice('all', 'Todas', `velas de ${allTfs.join(' · ') || '—'}`)}
+        {STYLE_ORDER.map((st) => {
+          const tfs = tfsOf(st)
+          return speedChoice(st, STYLE_LABEL[st], tfs.length ? `velas de ${tfs.join(', ')}` : 'ahora no opera en esta velocidad')
+        })}
+      </div>
+      {tabSum.closed > 0 && tabSum.closed < 30 && (
+        <span className="tiny muted">Menos de 30 operaciones cerradas: todavía sin conclusiones sobre esta velocidad.</span>
+      )}
+    </div>
+  )
+  // the portfolio is shown while it is on or still holds something (off and empty it would only say «apagada»)
+  const portfolioCard = status && ((isNum(status.hold_pct) && status.hold_pct > 0) || holdings.length > 0) ? (
+    <PortfolioCard
+      basket={Array.isArray(status.hold_basket) ? status.hold_basket : []}
+      holdPct={isNum(status.hold_pct) ? status.hold_pct : 0}
+      stopPct={isNum(status.hold_stop_pct) ? status.hold_stop_pct : 50}
+      holdings={holdings}
+      closingId={closingId}
+      onSell={(p) => void closePosition(p)}
+      onShow={openPosition}
+    />
+  ) : null
+  const emptyTrades = status?.enabled
+    ? 'NEXUS abrirá una cuando su señal al cierre de una vela sea COMPRAR o VENDER y el filtro diga TOMAR.'
+    : 'Pausada: pulsa «Activar» arriba para que NEXUS empiece a operar.'
+  const closeAllButton =
+    trades.length > 1 ? (
+      <Button size="sm" variant="ghost" onClick={() => setConfirmAll(true)} disabled={closingId !== null || closingAll}>
+        Cerrar todas
+      </Button>
+    ) : undefined
+  const tradeTiles = (
+    <Block
+      title={
+        <span className="row gap-2">
+          <Activity size={16} /> Operaciones abiertas <Badge tone={trades.length ? 'accent' : 'muted'}>{fmtInt(trades.length)}</Badge>
+        </span>
+      }
+      sub="NEXUS las abre y las cierra sola con su stop y sus objetivos. Puedes cerrarlas tú cuando quieras (a mercado, simulado)."
+      actions={closeAllButton}
+    >
+      {speedFilter}
+      {tabPositions.length > 0 ? (
+        <div className="dk-tiles">
+          {tabPositions.map((p) => (
+            <TradeTile key={p.id} p={p} closingId={closingId} tag={tagOf(p)} onClose={(x) => void closePosition(x)} onShow={openPosition} onDetail={showDetail} />
+          ))}
+        </div>
+      ) : (
+        <div className="dk-empty">
+          <b>Sin operaciones abiertas{styleTab === 'all' ? '' : ' en esta velocidad'}</b>
+          {emptyTrades}
+        </div>
+      )}
+    </Block>
+  )
   const positionsCard = (
     <Card
       flush
       title={
         <>
-          Posiciones abiertas <Badge tone={positions.length ? 'accent' : 'muted'}>{fmtInt(positions.length)}</Badge>
+          Posiciones abiertas <Badge tone={trades.length ? 'accent' : 'muted'}>{fmtInt(trades.length)}</Badge>
         </>
       }
       sub="Abiertas por NEXUS. Puedes cerrarlas a mano (a mercado, simulado): el resultado cuenta en esta cuenta."
-      actions={
-        positions.length > 1 ? (
-          <Button size="sm" variant="ghost" onClick={() => setConfirmAll(true)} disabled={closingId !== null || closingAll}>
-            Cerrar todas
-          </Button>
-        ) : undefined
-      }
+      actions={closeAllButton}
     >
-      {positions.length > 0 ? (
-        <PositionsTable positions={positions} closingId={closingId} onClose={closePosition} onOpenChart={openPosition} originLabels={ORIGIN_LABELS} />
+      {tabPositions.length > 0 ? (
+        <PositionsTable positions={tabPositions} closingId={closingId} onClose={closePosition} onOpenChart={openPosition} originLabels={ORIGIN_LABELS} onDetail={showDetail} />
       ) : (
         <Empty icon={<Wallet size={22} />} title="Sin posiciones abiertas">
-          {status?.enabled
-            ? 'NEXUS abrirá una cuando su señal al cierre de una vela sea COMPRAR o VENDER y el filtro diga TOMAR.'
-            : 'Pausada: actívala en «Cómo opera» para que NEXUS empiece a operar.'}
+          {emptyTrades}
         </Empty>
       )}
     </Card>
@@ -1488,17 +1742,61 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
       flush
       title={
         <>
-          Historial <Badge tone="muted">{fmtInt(history.length)}</Badge>
+          Historial <Badge tone="muted">{fmtInt(tabHistory.length)}</Badge>
         </>
       }
       sub="Operaciones cerradas de NEXUS: motivo de salida, R y P&L"
     >
-      {history.length > 0 ? (
-        <HistoryTable history={history} onOpenChart={openPosition} originLabels={ORIGIN_LABELS} />
+      {tabHistory.length > 0 ? (
+        <HistoryTable history={tabHistory} onOpenChart={openPosition} originLabels={ORIGIN_LABELS} onDetail={showDetail} />
       ) : (
         <Empty title="Sin operaciones cerradas todavía">Cuando NEXUS cierre operaciones verás aquí su resultado.</Empty>
       )}
     </Card>
+  )
+
+  const activity = useMemo(() => activityOf(positions, history, 10), [positions, history])
+  const lastNote = status?.log[0] ?? null
+  const nowBlock = status ? (
+    <Block
+      title={
+        <span className="row gap-2">
+          <Radar size={16} /> Qué hace ahora
+        </span>
+      }
+      actions={
+        <Button size="sm" variant="ghost" onClick={() => setSection('actividad')}>
+          Ver todo
+        </Button>
+      }
+    >
+      <div className="dk-now">
+        <p>
+          {status.enabled
+            ? `Vigila ${plural(status.watching.length, 'mercado', 'mercados')} y decide al cierre de cada vela de ${allTfs.join(' · ')}.`
+            : 'En pausa: no abre operaciones nuevas; las abiertas siguen con su stop y sus objetivos.'}
+        </p>
+        {lastNote && (
+          <p className="dk-now-last">
+            <Badge tone={(KIND_INFO[lastNote.kind] ?? KIND_INFO.info).tone}>{(KIND_INFO[lastNote.kind] ?? KIND_INFO.info).label}</Badge>{' '}
+            {lastNote.symbol && lastNote.symbol !== '—' ? <b>{splitSymbol(lastNote.symbol).ticker} </b> : null}
+            <span>{lastNote.text}</span> <span className="muted">· {fmtAgo(lastNote.ts)}</span>
+          </p>
+        )}
+      </div>
+    </Block>
+  ) : null
+  const feedBlock = (
+    <Block
+      title={
+        <span className="row gap-2">
+          <HistoryIcon size={16} /> Últimos movimientos
+        </span>
+      }
+      sub="Toca uno para verlo en el gráfico"
+    >
+      <ActivityFeed items={activity} onShow={openPosition} empty="Todavía no ha comprado ni vendido nada en esta cuenta." />
+    </Block>
   )
 
   const compareCard = <CompareCard cmp={cmp} loading={cmpLoading} error={cmpError} onRefresh={() => void loadCmp(true)} />
@@ -1509,43 +1807,135 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
   const weeklyCard = status ? <WeeklyCard weekly={status.weekly} /> : null
   const watchCard = status ? <WatchCard status={status} onOpenChart={openSymbol} /> : null
   const logCard = status ? <DecisionLog log={status.log} onOpenChart={openSymbol} /> : null
+  const holdValue = holdings.reduce((s, p) => s + unitsOf(p) * (isNum(p.price) ? p.price : p.entry_price), 0)
+
+  const sectionTabs: SectionTab<AutopilotSection>[] = [
+    { id: 'resumen', label: 'Resumen', icon: <LayoutDashboard size={15} /> },
+    { id: 'operaciones', label: 'Operaciones', icon: <ListChecks size={15} />, count: trades.length },
+    { id: 'actividad', label: 'Actividad', icon: <Radar size={15} /> },
+    { id: 'analisis', label: 'Análisis', icon: <Scale size={15} /> },
+    { id: 'ajustes', label: 'Ajustes', icon: <SlidersHorizontal size={15} /> },
+  ]
+
+  const body = (() => {
+    if (!snap) return null
+    switch (shown) {
+      case 'operaciones':
+        return (
+          <div className="dk-stack">
+            {speedFilter}
+            {positionsCard}
+            {historyCard}
+          </div>
+        )
+      case 'actividad':
+        return (
+          <div className="dk-cols">
+            <div className="dk-stack">{watchCard}</div>
+            <div className="dk-stack">{logCard}</div>
+          </div>
+        )
+      case 'analisis':
+        return (
+          <div className="dk-stack">
+            <PaperStats account={snap.account} winTally />
+            <div className="dk-cols">
+              <div className="dk-stack">
+                {compareCard}
+                {journalCard}
+              </div>
+              <div className="dk-stack">
+                {moneyCard}
+                {weeklyCard}
+                <RiskPanel risk={snap.risk} />
+              </div>
+            </div>
+          </div>
+        )
+      case 'ajustes':
+        return (
+          <div className="dk-cols">
+            <div className="dk-stack">
+              {controls}
+              {scriptsCard}
+            </div>
+            <div className="dk-stack">
+              <BrokerCard />
+              <BrokerCard venue="binance" />
+            </div>
+          </div>
+        )
+      default:
+        return (
+          <div className="dk-overview">
+            <div className="dk-overview-main">
+              {portfolioCard}
+              {tradeTiles}
+            </div>
+            <div className="dk-overview-side">
+              {nowBlock}
+              {feedBlock}
+            </div>
+          </div>
+        )
+    }
+  })()
 
   // ------------------------------------------------------------------ render
   return (
     <>
-      <div className="page-header">
-        <div className="col gap-0">
-          <h1 className="pp-title row gap-2">
-            <Bot size={18} /> NEXUS automática
+      <header className="dk-head">
+        <div className="col gap-0" style={{ minWidth: 0 }}>
+          <h1 className="pp-title">
+            <Bot size={20} /> NEXUS automática
             {status && <Badge tone={status.enabled ? 'pos' : 'muted'}>{status.enabled ? 'Activa' : 'Pausada'}</Badge>}
           </h1>
           <span className="sub">
-            Cuenta demo de NEXUS (simulada){loadedAt ? ` · actualizado ${fmtAgo(loadedAt)}` : ''}
+            Su propia cuenta demo: opera sola con sus señales (simulada){loadedAt ? ` · actualizado ${fmtAgo(loadedAt)}` : ''}
           </span>
         </div>
-        <span className="header-spacer" />
-        <Button icon={<RefreshCw size={14} />} onClick={() => void load()} loading={loading && !!snap} title="Recargar la cuenta de NEXUS">
-          Actualizar
-        </Button>
-        <Button icon={<RotateCcw size={14} />} variant="ghost" onClick={() => setResetOpen(true)} disabled={!snap} title="Empezar de cero con un balance nuevo">
-          Reiniciar cuenta
-        </Button>
-      </div>
+        <div className="dk-head-actions">
+          {status && (
+            <Button
+              variant={status.enabled ? 'default' : 'primary'}
+              icon={status.enabled ? <Pause size={14} /> : <Play size={14} />}
+              onClick={() => void save({ enabled: !status.enabled })}
+              disabled={saving}
+              title={status.enabled ? 'Pausar: no abre operaciones nuevas (las abiertas siguen con su stop y sus objetivos)' : 'Activar: NEXUS empieza a operar sola en su cuenta demo'}
+            >
+              {status.enabled ? 'Pausar' : 'Activar'}
+            </Button>
+          )}
+          <Button icon={<RefreshCw size={14} />} variant="ghost" onClick={() => void load()} loading={loading && !!snap} title="Recargar la cuenta de NEXUS">
+            Actualizar
+          </Button>
+          <Button icon={<RotateCcw size={14} />} variant="ghost" onClick={() => setResetOpen(true)} disabled={!snap} title="Empezar de cero con un balance nuevo">
+            Reiniciar
+          </Button>
+        </div>
+      </header>
 
-      <div className="ap-intro">
-        <p className="ap-explain">
-          Cuenta 100 % simulada que <b>opera sola</b>: NEXUS abre una posición solo cuando su señal al cierre de una vela es COMPRAR o
-          VENDER y el filtro dice TOMAR, y la cierra con sus reglas de salida. Usa los mismos stops «hasta aquí», objetivos y límites de
-          riesgo de cartera que tu cuenta demo. Solo opera mientras el servidor de NEXUS está en marcha y nunca usa dinero real: si
-          activas el espejo, repite sus posiciones en tu cuenta de práctica de Alpaca, también sin dinero real.
-        </p>
-        {status?.note ? (
-          <div className="notice ap-note" role="note">
-            <Info size={15} style={{ flex: 'none', marginTop: 1 }} />
-            <span>{status.note}</span>
-          </div>
-        ) : null}
-      </div>
+      <details className="dk-how">
+        <summary>
+          <Info size={15} />
+          <span>¿Cómo funciona? Todo es simulado: nunca usa dinero real.</span>
+          <b>Ver explicación</b>
+        </summary>
+        <div className="dk-how-body">
+          <p className="ap-explain">
+            Cuenta 100 % simulada que <b>opera sola</b>: NEXUS abre una posición solo cuando su señal al cierre de una vela es COMPRAR o
+            VENDER y el filtro dice TOMAR, y la cierra con sus reglas de salida. Usa los mismos stops «hasta aquí», objetivos y límites de
+            riesgo de cartera que tu cuenta demo. Solo opera mientras el servidor de NEXUS está en marcha y nunca usa dinero real: si
+            activas el espejo, repite sus posiciones en tu cuenta de práctica de Alpaca, también sin dinero real.
+          </p>
+          {status?.note ? (
+            <div className="notice ap-note" role="note">
+              <Info size={15} style={{ flex: 'none', marginTop: 1 }} />
+              <span>{status.note}</span>
+            </div>
+          ) : null}
+        </div>
+      </details>
 
       {!snap ? (
         error ? (
@@ -1557,54 +1947,43 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
         <>
           {error && <ErrorBox error={`${error} · mostrando los últimos datos conocidos`} onRetry={() => void load()} />}
           <BrakeNotice brake={status?.brake ?? null} />
+          {status && <AutopilotGoalCard status={status} onSnapshot={showFresh} />}
+          {status && <AutopilotSessionCard status={status} saving={saving} onToggle={(on) => void save({ session_aggressive: on })} />}
+          {status && <AutopilotChallengesCard challenges={snap.challenges} enabled={status.enabled} onSnapshot={showFresh} />}
           {status && <HealthNotice health={status.health} enabled={status.enabled} />}
           {status && <LearnedNotice contexts={status.paused_contexts} enabled={status.learn_guard} />}
-          <PaperStats account={snap.account} winTally />
-          {wide ? (
-            <div className="pp-layout">
-              <div className="pp-main">
-                {positionsCard}
-                {compareCard}
-                {journalCard}
-                {logCard}
-                {historyCard}
-              </div>
-              <div className="pp-side">
-                {controls}
-                {scriptsCard}
-                {moneyCard}
-                {weeklyCard}
-                <BrokerCard />
-                {watchCard}
-                <RiskPanel risk={snap.risk} />
-              </div>
-            </div>
-          ) : (
-            <>
-              {positionsCard}
-              {compareCard}
-              {journalCard}
-              <div className="ap-cols">
-                <div className="ap-col">
-                  {controls}
-                  {scriptsCard}
-                  {moneyCard}
-                  {weeklyCard}
-                  <BrokerCard />
-                </div>
-                <div className="ap-col">
-                  {watchCard}
-                  {logCard}
-                </div>
-              </div>
-              <RiskPanel risk={snap.risk} />
-              {historyCard}
-            </>
-          )}
+          <AccountHero
+            account={snap.account}
+            history={history}
+            label="Valor de la cuenta de NEXUS"
+            extra={holdings.length > 0 ? <Figure label="En cartera" value={fmtMoney(holdValue)} hint={plural(holdings.length, 'activo', 'activos')} /> : null}
+            footer={
+              <>
+                <Info size={13} /> Simulado, sin dinero real. La validación no encontró ventaja: puede ganar o perder, y con poco capital los
+                resultados son de céntimos.
+              </>
+            }
+          />
+          <SectionTabs label="Secciones de NEXUS automática" tabs={sectionTabs} value={shown} onChange={setSection} />
+          {body}
         </>
       )}
 
       <Disclaimer />
+
+      <TradeDetailModal
+        p={
+          detailId === null || !snap
+            ? null
+            : (snap.positions.find((x) => x.id === detailId) ?? snap.history.find((x) => x.id === detailId) ??
+                snap.challenges.flatMap((c) => [...c.positions, ...c.history]).find((x) => x.id === detailId) ?? null)
+        }
+        onClose={() => setDetailId(null)}
+        onOpenChart={(p) => {
+          setDetailId(null)
+          openPosition(p)
+        }}
+      />
 
       <AutopilotResetModal
         open={resetOpen}
@@ -1618,23 +1997,24 @@ export default function AutopilotView({ initial = null }: { initial?: AutopilotS
         open={confirmAll}
         onClose={() => (closingAll ? undefined : setConfirmAll(false))}
         width={440}
-        title="Cerrar todas las posiciones de NEXUS"
+        title="Cerrar todas las operaciones de NEXUS"
         footer={
           <>
             <Button onClick={() => setConfirmAll(false)} disabled={closingAll}>
               Cancelar
             </Button>
             <Button variant="danger" onClick={() => void closeAll()} loading={closingAll}>
-              Cerrar {fmtInt(positions.length)}
+              Cerrar {fmtInt(trades.length)}
             </Button>
           </>
         }
       >
         <p className="small" style={{ margin: 0 }}>
-          {isOne(positions.length)
-            ? 'Se cerrará a precio de mercado la posición abierta de la cuenta de NEXUS (operación simulada).'
-            : `Se cerrarán a precio de mercado las ${fmtInt(positions.length)} posiciones abiertas de la cuenta de NEXUS (operación simulada).`}{' '}
-          El resultado cuenta en su cuenta; tu cuenta no cambia.
+          {isOne(trades.length)
+            ? 'Se cerrará a precio de mercado la operación abierta de la cuenta de NEXUS (simulada).'
+            : `Se cerrarán a precio de mercado las ${fmtInt(trades.length)} operaciones abiertas de la cuenta de NEXUS (simuladas).`}{' '}
+          Su cartera de comprar y mantener no se toca (cada activo se vende con su botón «Vender»). El resultado cuenta en su
+          cuenta; tu cuenta no cambia.
         </p>
       </Modal>
     </>

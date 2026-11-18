@@ -1,6 +1,6 @@
 // Global UI state (zustand). Per-viewer conveniences are mirrored to localStorage (wrapped in try/catch).
 import { create } from 'zustand'
-import type { Page, Timeframe, UiAction } from './api/types'
+import type { Page, Position, Timeframe, UiAction } from './api/types'
 import { TIMEFRAMES } from './api/types'
 import type { WsStatus } from './api/ws'
 
@@ -58,6 +58,12 @@ export interface AppState {
   setTf: (tf: Timeframe) => void
   /** Switch to the chart page showing `symbol` (and optionally `tf`). */
   openChart: (symbol: string, tf?: Timeframe) => void
+  /** «Ver operación»: the demo-account position drawn on the chart (lib/tradeView), or null. */
+  trade: Position | null
+  /** Open the chart on a position's market and timeframe with the position drawn on it. */
+  showTrade: (p: Position) => void
+  /** Replace the drawn position with a fresher copy of itself (same id), or hide it (null). */
+  setTrade: (p: Position | null) => void
   terminalOpen: boolean
   terminalHeight: number
   toggleTerminal: () => void
@@ -87,6 +93,15 @@ export const useApp = create<AppState>((set, get) => ({
     set({ symbol: symbol.toUpperCase(), ...(tf ? { tf } : {}) })
     get().setPage('chart')
   },
+  trade: null,
+  showTrade: (p) => {
+    const tf = TIMEFRAMES.includes(p.tf as Timeframe) ? (p.tf as Timeframe) : undefined
+    // an option is drawn on its stock's chart without levels (they are premiums): the stock is its market
+    const symbol = p.instrument?.kind === 'option' && p.instrument.underlying ? p.instrument.underlying : p.symbol
+    set({ trade: p })
+    get().openChart(symbol, tf)
+  },
+  setTrade: (trade) => set({ trade }),
   terminalOpen: saved.terminalOpen ?? true,
   terminalHeight: Math.min(Math.max(saved.terminalHeight ?? 240, 120), 800),
   toggleTerminal: () => set((s) => ({ terminalOpen: !s.terminalOpen })),

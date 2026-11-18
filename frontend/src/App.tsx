@@ -49,6 +49,7 @@ import './components/scanner/scanner.css'
 import './components/settings/settings.css'
 import './components/sim/sim.css'
 import './components/studio/studio.css'
+import TradeAlerts from './components/paper/TradeAlerts'
 import { runUiAction, useApp } from './store'
 
 const NAV: { page: Page; label: string; icon: LucideIcon }[] = [
@@ -244,6 +245,8 @@ export default function App() {
     const offUi = socket.on('ui', (m) => runUiAction(m))
     const offEv = socket.on('event', ({ event }) => {
       if (event.level !== 'signal' && event.level !== 'trade') return
+      // NEXUS automática's openings and closes get their own side card (TradeAlerts): no plain toast for them
+      if (/^NEXUS automática · (Abierto|Cerrado)/.test(event.message)) return
       const now = Date.now()
       if (now - last < 2500) return
       last = now
@@ -398,6 +401,7 @@ export default function App() {
       </main>
 
       <div className="toasts" aria-live="polite">
+        <TradeAlerts />
         {toasts.map((t) => (
           <div key={t.id} className={`toast ${t.level}`}>
             <div className="grow">{t.message}</div>

@@ -32,7 +32,7 @@ BOOTSTRAP_RUNS = 2000
 MAX_INSIGHTS = 6
 # what it learns from its losses: the pre-trade dimensions, a stricter interval (many groups are looked at at once: at
 # 95 % one of them would come out negative by chance) and at least MIN_TRADES trades in the group
-GUARD_DIMS = ("regime", "session", "news", "gate", "side", "market", "source")
+GUARD_DIMS = ("regime", "session", "news", "gate", "side", "market", "source", "tf")
 SOURCE_NEXUS = "nexus"  # the entry came from NEXUS's own signal; "script:<id>:<name>" from a PyChart strategy
 GUARD_LEVEL = 0.99
 NEXUS_EXITS = ("EARLY", "REVERSE", "SIGNAL", "TIME")
@@ -243,6 +243,7 @@ DIMENSIONS: tuple[tuple[str, str, Callable[[dict], str | None], Callable[[str], 
     ("side", "Dirección", _bet, lambda k: SIDE_LABEL.get(k, k)),
     ("market", "Mercado", lambda t: asset_class(str(t.get("symbol") or "")), lambda k: MARKET_LABEL.get(k, k)),
     ("source", "Fuente de la señal", _source_key, source_label),
+    ("tf", "Temporalidad", lambda t: _tf_key(t.get("tf")), lambda k: tf_label(k)),
 )
 
 
@@ -312,8 +313,24 @@ def _insights(trades: list[dict], groups: list[dict]) -> list[str]:
     return out[:MAX_INSIGHTS]
 
 
+def _tf_key(tf: Any) -> str | None:
+    """A trade's timeframe as a group key ('5m', '1h'…); None for trades saved without one."""
+    return str(tf).strip() if isinstance(tf, str) and tf.strip() else None
+
+
+def tf_label(tf: str) -> str:
+    """'5m (rápida)' / '1h (medida)' / '4h (largo plazo)'."""
+    from app.util import tf_seconds
+
+    try:
+        s = tf_seconds(tf)
+    except ValueError:
+        return tf
+    return f"{tf} ({'rápida' if s <= 300 else 'medida' if s <= 7200 else 'largo plazo'})"
+
+
 def context_keys(*, regime: Any, ts: int, gate_score: Any, bet: str, symbol: str,
-                 source: Any = SOURCE_NEXUS) -> dict[str, str | None]:
+                 source: Any = SOURCE_NEXUS, tf: Any = None) -> dict[str, str | None]:
     """The group keys of a decision about to open, per pre-trade dimension (the keys `analyze` groups trades by)."""
     m = news_minutes(int(ts))
     g = safe_float(gate_score)
@@ -325,6 +342,7 @@ def context_keys(*, regime: Any, ts: int, gate_score: Any, bet: str, symbol: str
         "side": "short" if bet == "short" else "long",
         "market": asset_class(symbol),
         "source": source_key(source),
+        "tf": _tf_key(tf),
     }
 
 

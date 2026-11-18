@@ -1,6 +1,7 @@
-// "Espejo en Alpaca (práctica)": NEXUS automática repeated in the user's Alpaca PAPER account (backend app.broker):
-// whether it is on and connected, the practice account, what it mirrored (or why not) and the price difference with
-// the simulation (positive = the practice fill was worse). Never real money. Polls GET /api/broker/status every 30 s.
+// "Espejo en Alpaca (práctica)" and "Espejo en el testnet de Binance (práctica)": NEXUS automática repeated in the
+// user's PRACTICE accounts (backend app.broker): whether it is on and connected, the practice account, what it mirrored
+// (or why not) and the price difference with the simulation (positive = the practice fill was worse). Never real money.
+// Polls GET /api/broker/status (or /api/broker/binance/status) every 30 s.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ArrowLeftRight, RefreshCw, Settings as SettingsIcon } from 'lucide-react'
 import { api, errorMessage } from '../../api/client'
@@ -12,6 +13,33 @@ import { fmtMoney, isNum, useInterval } from '../markets/opsUtils'
 
 const POLL_MS = 30_000
 const SHOW = 8
+
+export type BrokerVenue = 'alpaca' | 'binance'
+
+/** The texts and endpoints of each practice venue. */
+const VENUES: Record<
+  BrokerVenue,
+  { title: string; sub: string; intro: string; fill: string; load: () => Promise<unknown>; sync: () => Promise<unknown> }
+> = {
+  alpaca: {
+    title: 'Espejo en Alpaca (práctica)',
+    sub: 'Repite sus posiciones en tu cuenta de práctica: sin dinero real',
+    intro:
+      'Si tienes una cuenta de práctica (paper trading) de Alpaca, NEXUS automática puede repetir en ella sus posiciones de acciones y ETF de EE. UU. y de cripto en dólares. Así ves la diferencia entre el precio simulado y el de una orden con cotizaciones reales. Nunca usa dinero real.',
+    fill: 'Alpaca',
+    load: () => api.broker.status(),
+    sync: () => api.broker.sync(),
+  },
+  binance: {
+    title: 'Espejo en el testnet de Binance (práctica)',
+    sub: 'Repite su cripto al contado y sus perpetuos con fondos de prueba: sin dinero real',
+    intro:
+      'Con las claves del testnet de contado y de Demo Trading de futuros de Binance, NEXUS automática puede repetir sus compras de cripto al contado y sus perpetuos en largo y en corto, con su apalancamiento, con fondos de prueba. Así ves la diferencia entre el precio simulado y el de una orden en un libro de órdenes. Nunca usa dinero real.',
+    fill: 'Binance',
+    load: () => api.brokerBinance.status(),
+    sync: () => api.brokerBinance.sync(),
+  },
+}
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback)
@@ -82,6 +110,7 @@ export function normalizeBroker(raw: unknown): BrokerStatus | null {
     last_sync_ms: num(o.last_sync_ms),
     mirror_stocks: o.mirror_stocks !== false,
     mirror_crypto: o.mirror_crypto !== false,
+    mirror_perps: o.mirror_perps === true,
     entries: Array.isArray(o.entries) ? o.entries.map(normalizeEntry).filter((e): e is BrokerMirrorEntry => e !== null) : [],
     stats: normalizeStats(o.stats),
     note: str(o.note),
@@ -110,10 +139,16 @@ export interface BrokerViewProps {
   syncing: boolean
   onSync: () => void
   onSettings: () => void
+  venue?: BrokerVenue
 }
 
+/** "100.000,00 $" for an account in dollars, "15.000,50 USDT" for any other currency. */
+const money = (v: number | null, currency: string): string =>
+  currency === 'USD' || !currency ? fmtMoney(v) : isNum(v) ? `${fmtNum(v, 2)} ${currency}` : '—'
+
 /** The card without its state (rendered by the tests). */
-export function BrokerView({ status, error, syncing, onSync, onSettings }: BrokerViewProps) {
+export function BrokerView({ status, error, syncing, onSync, onSettings, venue = 'alpaca' }: BrokerViewProps) {
+  const v = VENUES[venue]
   const on = !!status?.enabled
   const badge = !status ? null : !on ? (
     <Badge tone="muted">Desactivado</Badge>
@@ -127,10 +162,10 @@ export function BrokerView({ status, error, syncing, onSync, onSettings }: Broke
       className="ap-broker"
       title={
         <span className="row gap-2">
-          <ArrowLeftRight size={15} /> Espejo en Alpaca (práctica) {badge}
+          <ArrowLeftRight size={15} /> {v.title} {badge}
         </span>
       }
-      sub="Repite sus posiciones en tu cuenta de práctica: sin dinero real"
+      sub={v.sub}
       actions={
         on ? (
           <Button size="sm" variant="ghost" icon={<RefreshCw size={13} />} onClick={onSync} loading={syncing} title="Sincronizar ahora con NEXUS automática">
@@ -143,9 +178,7 @@ export function BrokerView({ status, error, syncing, onSync, onSettings }: Broke
       {!status ? null : !on ? (
         <div className="col gap-2">
           <p className="small muted" style={{ margin: 0 }}>
-            Si tienes una cuenta de práctica (paper trading) de Alpaca, NEXUS automática puede repetir en ella sus posiciones de acciones y
-            ETF de EE. UU. y de cripto en dólares. Así ves la diferencia entre el precio simulado y el de una orden con cotizaciones reales.
-            Nunca usa dinero real.
+            {v.intro}
           </p>
           <Button size="sm" icon={<SettingsIcon size={13} />} onClick={onSettings}>
             Configurarlo en Ajustes
@@ -156,7 +189,8 @@ export function BrokerView({ status, error, syncing, onSync, onSettings }: Broke
           {status.error && <div className="notice ap-brake small">{status.error}</div>}
           {status.account && (
             <div className="small">
-              Capital de práctica <b>{fmtMoney(status.account.equity)}</b> · efectivo {fmtMoney(status.account.cash)}
+              Capital de práctica <b>{money(status.account.equity, status.account.currency)}</b> · efectivo{' '}
+              {money(status.account.cash, status.account.currency)}
               {status.last_sync_ms ? <span className="muted"> · sincronizado {fmtAgo(status.last_sync_ms)}</span> : null}
             </div>
           )}
@@ -174,10 +208,10 @@ export function BrokerView({ status, error, syncing, onSync, onSettings }: Broke
                   </div>
                   {e.fill_entry !== null ? (
                     <div className="muted">
-                      Entrada NEXUS {fmtPrice(e.sim_entry)} · Alpaca {fmtPrice(e.fill_entry)} ({fmtBps(e.slip_entry_bps)})
+                      Entrada NEXUS {fmtPrice(e.sim_entry)} · {v.fill} {fmtPrice(e.fill_entry)} ({fmtBps(e.slip_entry_bps)})
                       {e.fill_exit !== null ? ` · salida ${fmtPrice(e.sim_exit)} / ${fmtPrice(e.fill_exit)} (${fmtBps(e.slip_exit_bps)})` : ''}
                       {e.mirror_result_pct !== null && e.sim_result_pct !== null
-                        ? ` · resultado ${fmtPct(e.sim_result_pct)} simulado, ${fmtPct(e.mirror_result_pct)} en Alpaca`
+                        ? ` · resultado ${fmtPct(e.sim_result_pct)} simulado, ${fmtPct(e.mirror_result_pct)} en ${v.fill}`
                         : ''}
                     </div>
                   ) : null}
@@ -193,7 +227,8 @@ export function BrokerView({ status, error, syncing, onSync, onSettings }: Broke
   )
 }
 
-export default function BrokerCard() {
+export default function BrokerCard({ venue = 'alpaca' }: { venue?: BrokerVenue }) {
+  const v = VENUES[venue]
   const [status, setStatus] = useState<BrokerStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [syncing, setSyncing] = useState(false)
@@ -208,7 +243,7 @@ export default function BrokerCard() {
 
   const load = useCallback(async () => {
     try {
-      const s = normalizeBroker(await api.broker.status())
+      const s = normalizeBroker(await v.load())
       if (!alive.current) return
       if (!s) throw new Error('Respuesta del espejo no válida')
       setStatus(s)
@@ -216,7 +251,7 @@ export default function BrokerCard() {
     } catch (err) {
       if (alive.current) setError(errorMessage(err))
     }
-  }, [])
+  }, [v])
 
   useEffect(() => {
     void load()
@@ -226,7 +261,7 @@ export default function BrokerCard() {
   const sync = useCallback(async () => {
     setSyncing(true)
     try {
-      const s = normalizeBroker(await api.broker.sync())
+      const s = normalizeBroker(await v.sync())
       if (alive.current && s) {
         setStatus(s)
         setError(null)
@@ -236,7 +271,16 @@ export default function BrokerCard() {
     } finally {
       if (alive.current) setSyncing(false)
     }
-  }, [])
+  }, [v])
 
-  return <BrokerView status={status} error={error} syncing={syncing} onSync={() => void sync()} onSettings={() => useApp.getState().setPage('settings')} />
+  return (
+    <BrokerView
+      status={status}
+      error={error}
+      syncing={syncing}
+      venue={venue}
+      onSync={() => void sync()}
+      onSettings={() => useApp.getState().setPage('settings')}
+    />
+  )
 }

@@ -98,15 +98,15 @@ UNIVERSE_TV_COLUMNS = {
 }
 QUOTE_FIELDS = ("price", "change_pct", "change", "volume", "high", "low", "open")
 # optional Quote fields (types-realtime.ts): where the price comes from and how fresh it is
-QUOTE_SOURCES = frozenset({"binance", "okx", "coinbase", "kraken", "kucoin", "twelvedata", "polygon", "alphavantage",
-                           "tradingview", "cache"})
+QUOTE_SOURCES = frozenset({"binance", "binance_um", "okx", "coinbase", "kraken", "kucoin", "twelvedata", "polygon",
+                           "alphavantage", "tradingview", "cache"})
 KEYED_SETTINGS = (
     ("twelvedata", "providers.twelvedata_key", S.twelvedata_params),
     ("polygon", "providers.polygon_key", S.polygon_ticker),
     ("alphavantage", "providers.alphavantage_key", S.alphavantage_spec),
 )
 PROVIDER_LABELS = {
-    "binance": "Binance", "okx": "OKX", "coinbase": "Coinbase", "kraken": "Kraken", "kucoin": "KuCoin",
+    "binance": "Binance", "binance_um": "Binance Futuros", "okx": "OKX", "coinbase": "Coinbase", "kraken": "Kraken", "kucoin": "KuCoin",
     "twelvedata": "Twelve Data", "alphavantage": "Alpha Vantage", "polygon": "Polygon",
     "recorder": "grabador local", "synthetic": "mercado sintético", "tradingview": "TradingView",
 }
@@ -118,7 +118,7 @@ _ASSET_TYPES = {
 }
 # Native instrument ids of the official exchange APIs (used when app.data.providers has no helper for it).
 _NATIVE_FORMATS = {
-    "binance": "{base}{quote}", "okx": "{base}-{quote}", "coinbase": "{base}-{quote}",
+    "binance": "{base}{quote}", "binance_um": "{base}{quote}", "okx": "{base}-{quote}", "coinbase": "{base}-{quote}",
     "kraken": "{base}{quote}", "kucoin": "{base}-{quote}",
 }
 
@@ -661,7 +661,7 @@ class MarketDataHub:
         provider = venue.provider if fetched or not sources else (sources[-1] or venue.provider)
         shown = venue if venue.provider == provider else self._venue_of(route, provider)
         note = None
-        if shown is not None and not (route.native and route.venues and shown == route.venues[0]):
+        if shown is not None and not (route.native and route.venues and shown == route.venues[0])                 and shown.tv_symbol != symbol:
             note = f"Datos de {shown.tv_symbol} vía {provider_label(shown.provider)} (par equivalente)"
         if error:
             note = f"No se pudo actualizar ({error}); se muestran los datos guardados"

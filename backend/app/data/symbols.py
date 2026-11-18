@@ -30,6 +30,11 @@ DIRECT_CEX: dict[str, str] = {
     "KUCOIN": "kucoin",
 }
 PROVIDER_EXCHANGE: dict[str, str] = {v: k for k, v in DIRECT_CEX.items()}
+# Binance USDⓈ-M futures: the candles of a Binance perpetual that has no spot pair (gold XAUUSDT, a «TradFi»
+# perpetual). Not a crypto provider to choose in Ajustes: route_symbol adds it only to perpetual routes.
+FUTURES_PROVIDER = "binance_um"
+FUTURES_QUOTES = frozenset({"USDT", "USDC"})
+PROVIDER_EXCHANGE[FUTURES_PROVIDER] = "BINANCE"
 CEX_PROVIDERS: tuple[str, ...] = ("binance", "okx", "coinbase", "kraken", "kucoin")
 
 # Other centralized crypto venues listed on TradingView (served through an equivalent pair).
@@ -299,7 +304,8 @@ class Venue:
 
     @property
     def tv_symbol(self) -> str:
-        return f"{self.exchange}:{self.base}{self.quote}"
+        suffix = ".P" if self.provider == FUTURES_PROVIDER else ""
+        return f"{self.exchange}:{self.base}{self.quote}{suffix}"
 
     @property
     def native(self) -> str:
@@ -332,7 +338,7 @@ def native_symbol(provider: str, base: str, quote: str) -> str:
 
 def route_note(route: Route, venue: Venue) -> str | None:
     """Spanish note shown when the candles come from an equivalent pair instead of the symbol itself."""
-    if route.native and route.venues and venue == route.venues[0]:
+    if (route.native and route.venues and venue == route.venues[0]) or venue.tv_symbol == route.symbol:
         return None
     return f"Datos de {venue.tv_symbol} (par equivalente)"
 
@@ -448,7 +454,12 @@ def route_symbol(symbol: str, info: dict | None = None, preferred: str = "binanc
             if direct and not derivative:
                 venues = crypto_venues(direct, base, quote, preferred)
                 return Route(symbol, "crypto", "crypto", tuple(venues), native=True)
-            return Route(symbol, "crypto", "crypto", tuple(crypto_venues(None, base, quote, preferred)), native=False)
+            venues = crypto_venues(None, base, quote, preferred)
+            if derivative and ticker.upper().endswith(".P") and quote in FUTURES_QUOTES:
+                # the perpetual itself on Binance futures, right after the first spot pair: a coin with a spot pair
+                # keeps its spot candles, a perpetual without one (XAUUSDT) is served on the second try
+                venues.insert(1, Venue(FUTURES_PROVIDER, base, quote))
+            return Route(symbol, "crypto", "crypto", tuple(venues), native=False)
     return Route(symbol, "other", aclass if aclass != "crypto" else "other")
 
 

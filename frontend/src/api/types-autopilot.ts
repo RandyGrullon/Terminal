@@ -47,14 +47,26 @@ export interface AutopilotScan {
   opportunities: number // TOMAR opportunities (gate TOMAR + NEXUS signal) in that scan
 }
 
+/** One asset of the buy-and-hold portfolio and its target share (%). */
+export interface AutopilotHoldItem {
+  symbol: string
+  weight: number
+}
+
 export interface AutopilotStatus {
   enabled: boolean
   account_id: number // 3
   source: AutopilotSource
-  tf: Timeframe
+  tf: Timeframe // its main (fastest) timeframe
+  tfs: Timeframe[] // every timeframe it trades at once, fastest first (1..3: quick / measured / long-term trades)
+  hold_pct: number // buy-and-hold portfolio: % of its equity (0 = off)
+  hold_basket: AutopilotHoldItem[] // its assets and target shares (weights add up to 100)
+  hold_stop_pct: number // emergency stop of each holding, % below its purchase
   symbols: string[] // used when source = 'list'
   max_positions: number // 1..20
   risk_pct: number // % of equity risked per trade, 0.1..5
+  lots: boolean // sizes its trades in MT5 lots (steps of 0.01 lot: gold 100 oz, crypto 1 coin, stocks 1 share)
+  lot_max_risk_pct: number // 0.5..25: the most the minimum lot (0.01) may risk at its stop, % of equity
   scanner_top: number // 1..30: how many opportunities of the latest scan it may watch
   watching: AutopilotWatch[]
   scan: AutopilotScan | null
@@ -75,7 +87,83 @@ export interface AutopilotStatus {
   health: AutopilotHealth // its health: decisions arriving, stops of the server / PC detected
   weekly: AutopilotWeekly | null // its last weekly report (Mondays), null until the first one
   brake: AutopilotBrake | null // null outside a snapshot
+  goal: AutopilotGoal | null // its running challenge (null when none, and outside a snapshot)
+  goal_last: AutopilotGoalResult | null // how its last challenge ended (null until the first one)
+  session_aggressive: boolean // its aggressive mode during the New York stock session only (setting)
+  per_tf_positions: boolean // one position per market and timeframe (else one per market)
+  session: AutopilotSession // the New York session now and whether that mode applies
+  markets: AutopilotMarket[] // market hours: crypto and gold 24/7, the New York exchange, CME index futures
   note: string // honest Spanish note from the backend: shown verbatim
+}
+
+/** Its challenge («reto»): reach `target` equity, by `until` if set. The server itself closes its trades (never its
+ * portfolio) at the target or the deadline, then goes back to its saved settings (`then` 'normal') or pauses. The
+ * aggressive mode overrides some settings while it lasts (described by `mode_text`); the saved ones never change. */
+export interface AutopilotGoal {
+  target: number
+  until: number | null // deadline, unix seconds (null = none)
+  started_at: number // unix seconds
+  start_equity: number
+  aggressive: boolean
+  then: 'normal' | 'pause'
+  equity: number // the account's equity now
+  pnl: number // equity - start_equity
+  remaining: number // what is left to the target (≥ 0)
+  progress_pct: number // 0..100, from start_equity to target
+  seconds_left: number | null // to the deadline (null without one)
+  mode_text: string | null // Spanish, the aggressive mode's settings (null when off): shown verbatim
+  note: string // Spanish honesty note: shown verbatim
+}
+
+/** How a challenge ended: reached (target), time (deadline; `late` when the server was off then) or cancelled. */
+export interface AutopilotGoalResult {
+  outcome: 'reached' | 'time' | 'cancelled' | 'brake' // brake: challenge accounts only
+  target: number
+  until: number | null
+  started_at: number
+  ended_at: number // unix seconds
+  start_equity: number
+  end_equity: number
+  pnl: number
+  pnl_pct: number
+  trades: number // its trades closed during the challenge (the ones closed at its end included)
+  wins: number
+  losses: number
+  closed: number // trades it closed when it ended
+  aggressive: boolean
+  late: boolean
+  text: string // Spanish summary: shown verbatim
+}
+
+/** The New York stock session (Mon–Fri 9:30–16:00 New York time, NYSE holidays and early closes). Open: the times of
+ * this session; closed: those of the next one. `active`: its aggressive mode applies now (enabled and open). */
+export interface AutopilotSession {
+  enabled: boolean
+  active: boolean
+  open: boolean
+  opens_at: number // unix seconds
+  closes_at: number // unix seconds
+  early_close: boolean // that session closes at 13:00
+  known: boolean // false past the holiday lists of the server
+  mode_text: string // Spanish, the aggressive mode's settings: shown verbatim
+}
+
+/** One market NEXUS automática may trade and its hours now: opens_at while closed, closes_at while open (null: never). */
+export interface AutopilotMarket {
+  key: 'crypto' | 'ny' | 'cme'
+  label: string // Spanish
+  open: boolean
+  opens_at: number | null // unix seconds
+  closes_at: number | null // unix seconds
+  note: string // Spanish: its schedule, shown verbatim
+}
+
+/** POST /api/paper/autopilot/goal: start a challenge (400 {detail} in Spanish on a bad value or while one runs). */
+export interface AutopilotGoalRequest {
+  target_equity: number
+  until?: number | null // unix seconds
+  aggressive?: boolean
+  then?: 'normal' | 'pause'
 }
 
 /** Its loss brake: equity `limit_pct` % below the initial balance stops new entries (open ones keep their exits). */
@@ -92,6 +180,41 @@ export interface AutopilotSnapshot {
   history: Position[] // closed positions, newest first
   risk: PaperRisk | null // the portfolio risk rules also apply to account 3
   autopilot: AutopilotStatus
+  challenges: AutopilotChallenge[] // its challenge accounts: running first, then the newest
+}
+
+/** A challenge account («cuenta de reto»): its own balance, target, optional deadline and loss brake, traded by NEXUS's
+ * brain (account 3's candidates and signals) in the aggressive mode and sized on its own equity. The server ends it by
+ * itself: reached (target), time (deadline), brake (brake on with nothing open) or cancelled (by hand). */
+export interface AutopilotChallenge {
+  id: number // its paper account id (101…)
+  name: string
+  status: 'running' | 'reached' | 'time' | 'brake' | 'cancelled'
+  initial: number
+  target: number
+  until: number | null // unix seconds
+  brake_pct: number
+  aggressive: boolean
+  started_at: number // unix seconds
+  ended_at: number | null
+  account: PaperAccount
+  positions: Position[] // open
+  history: Position[] // its last 10 closed, newest first
+  log: AutopilotLogEntry[] // its last 15 decisions, newest first
+  brake: AutopilotBrake
+  progress_pct: number // 0..100 from initial to target
+  remaining: number // to the target (≥ 0)
+  seconds_left: number | null // to its deadline while it runs
+  result: AutopilotGoalResult | null // how it ended
+}
+
+/** POST /api/paper/autopilot/challenges (400 {detail} in Spanish on a bad value). */
+export interface AutopilotChallengeRequest {
+  initial_balance: number
+  target_equity: number
+  until?: number | null // unix seconds
+  brake_pct?: number | null // 5..95 (default 50)
+  name?: string | null
 }
 
 /** Honest verdict of the comparison with random entries (app.sim.autopilot_compare, rules of app.validation). */
@@ -237,4 +360,9 @@ export interface AutopilotUpdate {
   learn_guard?: boolean
   script_ids?: number[] // [] = none
   script_gate?: boolean
+  tfs?: Timeframe[] // 1..3 timeframes at once; `tf` alone goes back to one
+  lots?: boolean // MT5 lots on / off
+  lot_max_risk_pct?: number // 0.5..25
+  session_aggressive?: boolean // aggressive mode during the New York session only
+  per_tf_positions?: boolean // one position per market and timeframe
 }

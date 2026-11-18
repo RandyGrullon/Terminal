@@ -25,6 +25,8 @@ export const SERVICE_LABEL: Record<string, string> = {
   validation: 'Validación walk-forward',
   ai: 'Copiloto IA (Ollama)',
   broker: 'Espejo en Alpaca (práctica)',
+  broker_binance: 'Espejo en el testnet de Binance (práctica)',
+  research: 'Investigación de estrategias',
   auth: 'Autenticación',
 }
 

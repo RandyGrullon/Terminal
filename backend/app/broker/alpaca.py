@@ -11,18 +11,15 @@ from typing import Any
 
 import httpx
 
+from app.broker.common import BrokerError
 from app.util import http_client
 
 PAPER_URL = "https://paper-api.alpaca.markets"
 TIMEOUT_S = 15.0
 
 
-class AlpacaError(Exception):
+class AlpacaError(BrokerError):
     """A Spanish message for the user; `status` is the HTTP status (0 = no answer)."""
-
-    def __init__(self, message: str, status: int = 0):
-        super().__init__(message)
-        self.status = int(status)
 
 
 def qty_text(qty: float) -> str:

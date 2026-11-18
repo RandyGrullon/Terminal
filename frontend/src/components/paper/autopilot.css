@@ -242,3 +242,146 @@
   gap: 4px;
   color: var(--warn);
 }
+
+/* «Operaciones por velocidad» and the timeframes picker */
+.ap-tfs {
+  flex-wrap: wrap;
+}
+.ap-style-sum {
+  margin-top: 8px;
+}
+
+/* "Reto" (AutopilotGoal.tsx): a target equity by a deadline that the server closes by itself */
+.ap-goal {
+  margin-bottom: 12px;
+}
+.ap-goal-run {
+  display: grid;
+  gap: 8px;
+}
+.ap-goal-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+.ap-goal-figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  color: var(--text-2);
+}
+.ap-goal-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px 14px;
+  align-items: start;
+}
+.ap-goal-last {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* "Horario de mercados" (AutopilotSession.tsx): open / closed markets and the New York session mode */
+.ap-session {
+  margin-bottom: 12px;
+}
+.ap-session-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.ap-markets {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.ap-markets li {
+  display: grid;
+  grid-template-columns: auto minmax(160px, 1fr) auto;
+  align-items: center;
+  gap: 2px 10px;
+}
+.ap-markets li .muted {
+  grid-column: 2 / -1;
+}
+.ap-market-name {
+  font-size: 12.5px;
+}
+@media (max-width: 640px) {
+  .ap-markets li {
+    grid-template-columns: auto 1fr;
+  }
+  .ap-markets li > :nth-child(3),
+  .ap-markets li .muted {
+    grid-column: 2 / -1;
+  }
+}
+
+/* "Cuentas de reto" (AutopilotChallenges.tsx): several accounts, each with its balance, target and brake */
+.ap-challenges {
+  margin-bottom: 12px;
+}
+.ap-ch-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+.ap-ch {
+  display: grid;
+  gap: 6px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.ap-ch:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.ap-ch-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.ap-ch-name {
+  font-size: 13px;
+}
+.ap-ch-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+.ap-ch-figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  color: var(--text-2);
+}
+.ap-ch-more summary {
+  cursor: pointer;
+  color: var(--text-2);
+}
+.ap-ch-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 6px;
+}
+.ap-ch-table td {
+  padding: 2px 6px 2px 0;
+}
+.ap-ch-log {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 3px;
+}

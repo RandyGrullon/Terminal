@@ -22,6 +22,7 @@ import ChartMacro from '../components/chart/ChartMacro'
 import IndicatorsDialog from '../components/chart/IndicatorsDialog'
 import NexusChart, { type ChartToggles, type NexusChartHandle } from '../components/chart/NexusChart'
 import QuoteFreshness from '../components/chart/QuoteFreshness'
+import TradeFocusCard from '../components/chart/TradeFocusCard'
 import TradingViewWidget from '../components/chart/TradingViewWidget'
 import { isFiniteNumber } from '../components/chart/chartUtils'
 import { DETAIL_REFRESH_MS, ROLLOVER_DELAY_MS, msToNextUtcDay, priceChange } from '../components/chart/dailyChange'
@@ -32,6 +33,7 @@ import TradeCheck from '../components/nexus/TradeCheck'
 import Watchlist from '../components/nexus/Watchlist'
 import { Badge, Button, Empty, ErrorBox, IconButton, Loading, Spinner } from '../components/ui'
 import { VERDICT_LABEL, fmtPct, fmtPrice, signTone, splitSymbol, verdictTone, type Tone } from '../lib/format'
+import { tradeOf } from '../lib/tradeView'
 import { useApp } from '../store'
 import '../components/chart/chart.css'
 
@@ -256,6 +258,34 @@ export default function ChartPage() {
 
   const { ticker, exchange } = splitSymbol(symbol)
   const lastCandle = candles && candles.length ? candles[candles.length - 1] : null
+
+  // «Ver operación»: a demo position drawn on its market, refreshed every 15 s (its stop and targets can move)
+  const tradePos = useApp((s) => s.trade)
+  const tradeView = useMemo(() => {
+    const t = tradeOf(tradePos)
+    return t && t.symbol === symbol.toUpperCase() ? t : null
+  }, [tradePos, symbol])
+  const tradeId = tradePos?.id ?? null
+  const tradeAccount = tradePos?.account_id ?? null
+  useEffect(() => {
+    if (tradeId === null || (tradeAccount !== 1 && tradeAccount !== 3)) return
+    let alive = true
+    const refresh = async () => {
+      try {
+        const snap = tradeAccount === 3 ? await api.paper.autopilot.get() : await api.paper.account()
+        const fresh = [...(snap?.positions ?? []), ...(snap?.history ?? [])].find((p) => p.id === tradeId)
+        if (alive && fresh && useApp.getState().trade?.id === tradeId) useApp.getState().setTrade(fresh)
+      } catch {
+        /* keep the last copy: the next round tries again */
+      }
+    }
+    void refresh()
+    const id = window.setInterval(() => void refresh(), 15_000)
+    return () => {
+      alive = false
+      window.clearInterval(id)
+    }
+  }, [tradeId, tradeAccount])
   const quote = detail?.quote ?? null
   const price = md.live?.price ?? lastCandle?.close ?? (isFiniteNumber(quote?.price) ? quote.price : null)
 
@@ -431,6 +461,15 @@ export default function ChartPage() {
       <div className="chart-main">
         <div className="chart-area">
           <div className="chart-stage" style={{ display: isNexusView ? 'flex' : 'none' }}>
+            {tradePos && (
+              <TradeFocusCard
+                position={tradePos}
+                chartSymbol={symbol}
+                price={price}
+                onShowChart={() => useApp.getState().showTrade(tradePos)}
+                onClose={() => useApp.getState().setTrade(null)}
+              />
+            )}
             <NexusChart
               ref={chartRef}
               viewKey={`${symbol}|${tf}`}
@@ -440,6 +479,7 @@ export default function ChartPage() {
               indicators={indicatorItems}
               toggles={prefs.toggles}
               preview={preview}
+              trade={tradeView}
               entryThreshold={entryThreshold}
               onEditIndicator={openIndicators}
               onRemoveIndicator={ind.remove}

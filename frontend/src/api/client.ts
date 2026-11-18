@@ -11,6 +11,8 @@ import type {
   AutopilotComparison,
   BrokerStatus,
   AutopilotJournal,
+  AutopilotChallengeRequest,
+  AutopilotGoalRequest,
   AutopilotSnapshot,
   AutopilotUpdate,
   BacktestResult,
@@ -266,10 +268,14 @@ export const api = {
     chat: (messages: AIChatMessage[]) => post<AIChatReply>('/api/ai/chat', { messages }),
   },
 
-  // ------------------------------------------------------------------ practice-broker mirror (Alpaca paper)
+  // ------------------------------------------------------------------ practice-broker mirrors (Alpaca paper, Binance testnets)
   broker: {
     status: (refresh = false) => get<BrokerStatus>('/api/broker/status', refresh ? { refresh: true } : undefined),
     sync: () => post<BrokerStatus>('/api/broker/sync'),
+  },
+  brokerBinance: {
+    status: (refresh = false) => get<BrokerStatus>('/api/broker/binance/status', refresh ? { refresh: true } : undefined),
+    sync: () => post<BrokerStatus>('/api/broker/binance/sync'),
   },
 
   // ------------------------------------------------------------------ paper trading
@@ -303,7 +309,14 @@ export const api = {
       get: () => get<AutopilotSnapshot>('/api/paper/autopilot'),
       update: (body: AutopilotUpdate) => post<AutopilotSnapshot>('/api/paper/autopilot', body),
       reset: (initial_balance?: number) => post<AutopilotSnapshot>('/api/paper/autopilot/reset', { initial_balance }),
-      close: (body: { position_id?: number; all?: boolean }) => post<AutopilotSnapshot>('/api/paper/autopilot/close', body),
+      close: (body: { position_id?: number; all?: boolean; account_id?: number }) => post<AutopilotSnapshot>('/api/paper/autopilot/close', body),
+      // Its challenge: the server closes its trades at the target or the deadline; stop ends it now (close = also its trades)
+      startGoal: (body: AutopilotGoalRequest) => post<AutopilotSnapshot>('/api/paper/autopilot/goal', body),
+      stopGoal: (close = false) => post<AutopilotSnapshot>('/api/paper/autopilot/goal/stop', { close }),
+      // Its challenge accounts: create, end now (close = its trades too) and delete with their trades
+      createChallenge: (body: AutopilotChallengeRequest) => post<AutopilotSnapshot>('/api/paper/autopilot/challenges', body),
+      stopChallenge: (id: number, close = true) => post<AutopilotSnapshot>(`/api/paper/autopilot/challenges/${id}/stop`, { close }),
+      deleteChallenge: (id: number) => del<AutopilotSnapshot>(`/api/paper/autopilot/challenges/${id}`),
       // Against random entries in the same markets (computed on demand, cached by the server; fresh = recompute)
       compare: (fresh = false) => get<AutopilotComparison>('/api/paper/autopilot/compare', fresh ? { fresh: true } : undefined),
       journal: (fresh = false) => get<AutopilotJournal>('/api/paper/autopilot/journal', fresh ? { fresh: true } : undefined),

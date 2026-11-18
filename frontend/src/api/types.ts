@@ -50,7 +50,7 @@ export interface SymbolInfo {
   currency: string
   pricescale: number | null
   logoid: string | null
-  provider: string // binance | okx | coinbase | kraken | kucoin | twelvedata | alphavantage | polygon | recorder | synthetic
+  provider: string // binance | binance_um (Binance futures) | okx | coinbase | kraken | kucoin | twelvedata | alphavantage | polygon | recorder | synthetic
   history: HistoryKind
 }
 
@@ -67,7 +67,7 @@ export interface Quote {
   stale?: boolean // true when the price is older than ~2 min: never show or use it as a live price
   // Optional freshness fields (absent on older servers and on SIM quotes; see types-realtime.ts and
   // components/markets/freshness.ts for how the UI words them):
-  source?: string // binance | okx | coinbase | kraken | kucoin | twelvedata | polygon | alphavantage | tradingview | cache
+  source?: string // binance | binance_um | okx | coinbase | kraken | kucoin | twelvedata | polygon | alphavantage | tradingview | cache
   realtime?: boolean // true only when the source serves real-time data on the user's plan and the price is recent
   delay_s?: number // delay of the price in seconds: announced by TradingView or measured for an API-key price
   market_open?: boolean // as reported by the provider; false = the last price of a closed market
@@ -520,8 +520,11 @@ export interface PositionInstrument {
   name: string // "Micro E-mini Russell 2000" · "AAPL 230 C 18/12/2026"
   multiplier: number // units per contract: future $ per point · option 100 shares
   contracts: number // whole contracts at the open (qty / multiplier)
-  root?: string // future: MES, M2K…
+  root?: string // future: MES, M2K… · a crypto perpetual: its ticker (BTCUSDT.P)
   margin?: number // future: approximate initial margin per contract ($), never a broker's number
+  perpetual?: boolean // a crypto perpetual (no expiry): its margin is notional / leverage at the entry
+  leverage?: number // perpetual: autopilot.perp_leverage at the entry
+  liquidation?: number // perpetual: approximate isolated-margin liquidation price at the entry
   underlying?: string // option: the stock (EXCHANGE:TICKER)
   right?: 'call' | 'put' // option
   strike?: number // option
@@ -529,6 +532,13 @@ export interface PositionInstrument {
   sigma?: number // option: annual historical volatility of its theoretical price
   delta?: number // option: |delta| at the entry (Black-Scholes)
   spot?: number // option: the stock's price at the entry
+}
+
+/** A position's size in MT5 lots (app.engine.lots): lots = qty / size. */
+export interface PositionLot {
+  lots: number // at the open (qty / size)
+  size: number // units in 1 lot: gold 100 (oz), crypto 1 (coin), stocks 1 (share), forex 100 000
+  unit: string // 'oz' · the coin ('BTC') · 'acción' · the base currency ('EUR') · 'unidad'
 }
 
 export interface PaperAccount {
@@ -577,12 +587,31 @@ export interface Position {
   exit_label: string | null
   origin: 'manual' | 'auto' | 'sim' | 'script' | 'autopilot' // autopilot = NEXUS's own account (3)
   instrument?: PositionInstrument | null // a future or an option (NEXUS automática); null for shares, crypto…
+  lot?: PositionLot | null // its size in MT5 lots; null for options and index futures (whole contracts)
+  hold?: boolean // a holding of NEXUS automática's buy-and-hold portfolio (no exits by signal, no targets)
   gate_verdict: Verdict | null
   gate_score: number | null
   // Live NEXUS advice for this position: "Cerrar ya: …" only when NEXUS itself leaves this side (EXIT_* or the opposite
   // entry); a negative EV of holding is "Vigila la salida: …", a warning, not an order to close.
   advice: string | null
   warnings: NexusWarning[]
+  plan?: PositionPlan | null // NEXUS automática's trades: why it opened and its target, or why it has none
+}
+
+/** Why one of NEXUS automática's trades opened and its next pending target, or, when it has none, why not (always
+ * one of the two). Spanish texts, shown verbatim. */
+export interface PositionPlan {
+  why: string
+  target: number | null // the next target still pending (tp1, then tp2, tp3)
+  target_r: number | null // its distance from the entry in R
+  no_target: string | null // why there is no target (a strategy that closes on its own rule, a holding…)
+  params?: PlanParam[] // what it took at its entry (signal, filter, regime, risk, stop, size, leverage…)
+}
+
+/** One parameter of a trade's entry, both texts in Spanish (shown verbatim in its detail). */
+export interface PlanParam {
+  label: string
+  value: string
 }
 
 export interface PaperSnapshot {

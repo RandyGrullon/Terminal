@@ -1,19 +1,20 @@
 // Cuenta demo, with an account switch at the top (remembered per browser): "Mi cuenta" and "NEXUS automática".
-// Mi cuenta: simulated (paper) trading account 1. Stats, open positions with the live NEXUS advice, pending limit /
-// stop orders, history, the portfolio-risk panel, a new order ticket that shows the Trade Gate verdict before opening,
-// auto-trading and account reset. Live updates arrive over the socket ('paper' topic: account, positions and the
+// Mi cuenta: simulated (paper) trading account 1, friendly first (components/paper/DemoKit): the value of the account in
+// big, then three sections (remembered per browser): «Resumen» (a tile per open position with its path to the target,
+// pending orders and the latest moves), «Operar» (the order ticket with the Trade Gate verdict before opening,
+// auto-trading, the portfolio risk) and «Detalle» (stats, the full tables of positions, orders and history). Reset. Live updates arrive over the socket ('paper' topic: account, positions and the
 // optional `orders` / `risk`); the account is also polled every 20 s as a fallback.
 // NEXUS automática: NEXUS's own demo account (id 3, components/paper/AutopilotView), which trades on its own. Only
 // the selected account is mounted, so only its requests, polling and socket listener run.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Bot, Hourglass, OctagonAlert, RefreshCw, RotateCcw, Wallet } from 'lucide-react'
+import { Bot, CirclePlus, History as HistoryIcon, Hourglass, LayoutDashboard, ListChecks, OctagonAlert, RefreshCw, RotateCcw, Wallet } from 'lucide-react'
 import { api, errorMessage } from '../api/client'
 import type { PaperLiveExtra, PaperOrder, PaperRisk, PaperSnapshot, Position } from '../api/types'
 import { socket } from '../api/ws'
 import { fmtAgo, fmtInt, fmtR, splitSymbol } from '../lib/format'
 import { isOne, plural } from '../lib/plural'
 import { useApp } from '../store'
-import { Badge, Button, Card, Disclaimer, Empty, ErrorBox, Loading, Modal, Tabs } from '../components/ui'
+import { Badge, Button, Card, Disclaimer, Empty, ErrorBox, Loading, Modal } from '../components/ui'
 import { asTimeframe, fmtMoney, useInterval, usePersistentState } from '../components/markets/opsUtils'
 import PaperStats from '../components/paper/PaperStats'
 import PositionsTable from '../components/paper/PositionsTable'
@@ -26,9 +27,10 @@ import RiskPanel from '../components/paper/RiskPanel'
 import { paperOrdersApi } from '../components/paper/ordersApi'
 import { normalizeOrders, normalizeRisk } from '../components/paper/ordersUtils'
 import { adviceLevel, isAccount, normalizePositions, normalizeSnapshot } from '../components/paper/paperUtils'
-import { useMediaQuery } from '../components/paper/useMediaQuery'
+import { AccountHero, ActivityFeed, Block, SectionTabs, TradeTile, activityOf, type SectionTab } from '../components/paper/DemoKit'
 import AutopilotView from '../components/paper/AutopilotView'
 import '../components/paper/paper.css'
+import '../components/paper/demo.css'
 
 const POLL_MS = 20_000
 const RELOAD_DEBOUNCE_MS = 600
@@ -41,43 +43,49 @@ export type PaperAccountView = 'mine' | 'nexus'
 const PAPER_ACCOUNT_KEY = 'nexus.paper.account.v1'
 const isAccountView = (v: unknown): v is PaperAccountView => v === 'mine' || v === 'nexus'
 
-const ACCOUNT_TABS: { id: PaperAccountView; label: ReactNode }[] = [
-  {
-    id: 'mine',
-    label: (
-      <>
-        <Wallet size={14} /> Mi cuenta
-      </>
-    ),
-  },
-  {
-    id: 'nexus',
-    label: (
-      <>
-        <Bot size={14} /> NEXUS automática
-      </>
-    ),
-  },
+const ACCOUNTS: { id: PaperAccountView; label: string; sub: string; icon: ReactNode }[] = [
+  { id: 'mine', label: 'Mi cuenta', sub: 'Tú decides cada operación', icon: <Wallet size={17} /> },
+  { id: 'nexus', label: 'NEXUS automática', sub: 'Opera sola con sus señales', icon: <Bot size={17} /> },
 ]
+
+function AccountSwitch({ value, onChange }: { value: PaperAccountView; onChange: (v: PaperAccountView) => void }) {
+  return (
+    <div className="col gap-1">
+      <div className="dk-switch" role="tablist" aria-label="Cuenta demo">
+        {ACCOUNTS.map((a) => (
+          <button key={a.id} type="button" role="tab" aria-selected={a.id === value} className={`dk-switch-btn${a.id === value ? ' active' : ''}`} onClick={() => onChange(a.id)}>
+            <span className="dk-switch-icon">{a.icon}</span>
+            <span className="dk-switch-text">
+              <b>{a.label}</b>
+              <span>{a.sub}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+      <p className="dk-switch-note">Dos cuentas demo separadas y simuladas: lo que NEXUS hace en la suya nunca toca la tuya.</p>
+    </div>
+  )
+}
 
 export default function PaperPage() {
   const [view, setView] = usePersistentState<PaperAccountView>(PAPER_ACCOUNT_KEY, 'mine', isAccountView)
   return (
     <div className="page pp-page">
-      <div className="ap-switch">
-        <Tabs<PaperAccountView> pills tabs={ACCOUNT_TABS} value={view} onChange={setView} />
-        <span className="ap-switch-note">
-          Dos cuentas demo separadas y simuladas: lo que NEXUS hace en la suya nunca toca la tuya.
-        </span>
-      </div>
+      <AccountSwitch value={view} onChange={setView} />
       {view === 'nexus' ? <AutopilotView /> : <MyAccount />}
     </div>
   )
 }
 
+/** Sections of «Mi cuenta» (remembered per browser). */
+export type MyAccountSection = 'resumen' | 'operar' | 'detalle'
+const MY_SECTION_KEY = 'nexus.paper.mine.section.v1'
+const isMySection = (v: unknown): v is MyAccountSection => v === 'resumen' || v === 'operar' || v === 'detalle'
+const ORIGIN_TAG: Record<string, string> = { manual: 'Manual', auto: 'Auto-trading', sim: 'Simulación', script: 'Script' }
+
 // ----------------------------------------------------------------------------- Mi cuenta (account 1)
 
-function MyAccount() {
+export function MyAccount({ section }: { section?: MyAccountSection } = {}) {
   const notify = useApp((s) => s.notify)
   const [snap, setSnapState] = useState<PaperSnapshot | null>(null)
   const [loading, setLoading] = useState(true)
@@ -93,6 +101,8 @@ function MyAccount() {
   const [cancellingId, setCancellingId] = useState<number | null>(null)
   const [confirmCancelAll, setConfirmCancelAll] = useState(false)
   const [, setTick] = useState(0)
+  const [storedSection, setSection] = usePersistentState<MyAccountSection>(MY_SECTION_KEY, 'resumen', isMySection)
+  const shown = section ?? storedSection
   const ordersRef = useRef<PaperOrder[]>([])
 
   const setOrders = useCallback((next: PaperOrder[]) => {
@@ -193,7 +203,7 @@ function MyAccount() {
   }, [scheduleReload, setSnap, setOrders])
 
   // ------------------------------------------------------------------ actions
-  const openChart = useCallback((p: Position) => useApp.getState().openChart(p.symbol, asTimeframe(p.tf)), [])
+  const openChart = useCallback((p: Position) => useApp.getState().showTrade(p), [])
 
   const closePosition = useCallback(
     async (p: Position) => {
@@ -292,7 +302,7 @@ function MyAccount() {
   const positions = snap?.positions ?? []
   const history = snap?.history ?? []
   const toClose = useMemo(() => positions.filter((p) => adviceLevel(p) === 'close').length, [positions])
-  const wide = useMediaQuery('(min-width: 1700px)')
+  const activity = useMemo(() => activityOf(positions, history, 10), [positions, history])
 
   // ------------------------------------------------------------------ blocks
   const positionsCard = (
@@ -368,34 +378,124 @@ function MyAccount() {
       </Card>
     ) : null
 
-  const tickets = snap ? (
-    <>
-      <OrderCard onOpened={onOpened} />
-      <AutoTradeCard account={snap.account} onChanged={onAutoChanged} />
-    </>
-  ) : null
+  const closeAllButton =
+    positions.length > 1 ? (
+      <Button size="sm" variant="ghost" onClick={() => setConfirmAll(true)} disabled={closingId !== null || closingAll}>
+        Cerrar todas
+      </Button>
+    ) : undefined
+  const tiles = (
+    <Block
+      title={
+        <span className="row gap-2">
+          <Wallet size={16} /> Posiciones abiertas <Badge tone={positions.length ? 'accent' : 'muted'}>{fmtInt(positions.length)}</Badge>
+          {toClose > 0 && (
+            <Badge tone="neg" title="Posiciones en las que NEXUS recomienda cerrar ya">
+              <OctagonAlert size={11} /> {toClose} para cerrar
+            </Badge>
+          )}
+        </span>
+      }
+      sub="Cada una con su camino del stop al objetivo y el consejo de NEXUS en vivo."
+      actions={closeAllButton}
+    >
+      {positions.length > 0 ? (
+        <div className="dk-tiles">
+          {positions.map((p) => (
+            <TradeTile key={p.id} p={p} closingId={closingId} tag={`${ORIGIN_TAG[p.origin] ?? 'Manual'} · ${p.tf}`} onClose={(x) => void closePosition(x)} onShow={openChart} />
+          ))}
+        </div>
+      ) : (
+        <div className="dk-empty">
+          <b>Sin posiciones abiertas</b>
+          Abre una orden demo en «Operar», con el filtro como guía, o activa el auto-trading.
+          <div style={{ marginTop: 10 }}>
+            <Button variant="primary" size="sm" icon={<CirclePlus size={14} />} onClick={() => setSection('operar')}>
+              Abrir una operación
+            </Button>
+          </div>
+        </div>
+      )}
+    </Block>
+  )
+
+  const sectionTabs: SectionTab<MyAccountSection>[] = [
+    { id: 'resumen', label: 'Resumen', icon: <LayoutDashboard size={15} />, count: positions.length },
+    { id: 'operar', label: 'Operar', icon: <CirclePlus size={15} /> },
+    { id: 'detalle', label: 'Detalle', icon: <ListChecks size={15} />, count: orders.length },
+  ]
+
+  let body: ReactNode = null
+  if (snap && shown === 'operar') {
+    body = (
+      <div className="dk-cols">
+        <div className="dk-stack">
+          <OrderCard onOpened={onOpened} />
+        </div>
+        <div className="dk-stack">
+          <AutoTradeCard account={snap.account} onChanged={onAutoChanged} />
+          <RiskPanel risk={risk} />
+        </div>
+      </div>
+    )
+  } else if (snap && shown === 'detalle') {
+    body = (
+      <div className="dk-stack">
+        <PaperStats account={snap.account} />
+        {positionsCard}
+        {ordersCard}
+        <RiskPanel risk={risk} />
+        {historyCard}
+      </div>
+    )
+  } else if (snap) {
+    body = (
+      <div className="dk-overview">
+        <div className="dk-overview-main">
+          {tiles}
+          {ordersCard}
+        </div>
+        <div className="dk-overview-side">
+          <Block
+            title={
+              <span className="row gap-2">
+                <HistoryIcon size={16} /> Últimos movimientos
+              </span>
+            }
+            sub="Toca uno para verlo en el gráfico"
+          >
+            <ActivityFeed items={activity} onShow={openChart} empty="Todavía no has abierto ninguna operación en esta cuenta." />
+          </Block>
+        </div>
+      </div>
+    )
+  }
 
   // ------------------------------------------------------------------ render (inside PaperPage's .page container)
   return (
     <>
-      <div className="page-header">
-        <div className="col gap-0">
-          <h1 className="pp-title row gap-2">
-            <Wallet size={18} /> Cuenta demo
+      <header className="dk-head">
+        <div className="col gap-0" style={{ minWidth: 0 }}>
+          <h1 className="pp-title">
+            <Wallet size={20} /> Cuenta demo
           </h1>
           <span className="sub">
             Operaciones simuladas (papel){snap ? ` · cuenta ${snap.account.name || 'Principal'}` : ''}
             {loadedAt ? ` · actualizado ${fmtAgo(loadedAt)}` : ''}
           </span>
         </div>
-        <span className="header-spacer" />
-        <Button icon={<RefreshCw size={14} />} onClick={() => void load()} loading={loading && !!snap} title="Recargar la cuenta">
-          Actualizar
-        </Button>
-        <Button icon={<RotateCcw size={14} />} variant="ghost" onClick={() => setResetOpen(true)} disabled={!snap} title="Empezar de cero con un balance nuevo">
-          Reiniciar cuenta
-        </Button>
-      </div>
+        <div className="dk-head-actions">
+          <Button variant="primary" icon={<CirclePlus size={14} />} onClick={() => setSection('operar')} disabled={!snap} title="Abrir una orden demo">
+            Nueva orden
+          </Button>
+          <Button icon={<RefreshCw size={14} />} variant="ghost" onClick={() => void load()} loading={loading && !!snap} title="Recargar la cuenta">
+            Actualizar
+          </Button>
+          <Button icon={<RotateCcw size={14} />} variant="ghost" onClick={() => setResetOpen(true)} disabled={!snap} title="Empezar de cero con un balance nuevo">
+            Reiniciar cuenta
+          </Button>
+        </div>
+      </header>
 
       {!snap ? (
         error ? (
@@ -406,29 +506,9 @@ function MyAccount() {
       ) : (
         <>
           {error && <ErrorBox error={`${error} · mostrando los últimos datos conocidos`} onRetry={() => void load()} />}
-          <PaperStats account={snap.account} />
-
-          {wide ? (
-            <div className="pp-layout">
-              <div className="pp-main">
-                {positionsCard}
-                {ordersCard}
-                {historyCard}
-              </div>
-              <div className="pp-side">
-                <RiskPanel risk={risk} />
-                {tickets}
-              </div>
-            </div>
-          ) : (
-            <>
-              {positionsCard}
-              {ordersCard}
-              <RiskPanel risk={risk} />
-              <div className="pp-tickets">{tickets}</div>
-              {historyCard}
-            </>
-          )}
+          <AccountHero account={snap.account} history={history} label="Valor de tu cuenta demo" />
+          <SectionTabs label="Secciones de tu cuenta demo" tabs={sectionTabs} value={shown} onChange={setSection} />
+          {body}
         </>
       )}
 

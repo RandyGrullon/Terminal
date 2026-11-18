@@ -76,7 +76,9 @@ class Maintenance:
         ms = int(now) if now is not None else now_ms()
         s = ms // 1000
         for tf, days in CANDLE_RETENTION_DAYS.items():
-            await db.execute("DELETE FROM candles WHERE tf = ? AND time < ?", (tf, s - days * DAY))
+            # imported history (app.data.importer, source 'import') is kept: it is what long backtests run on
+            await db.execute("DELETE FROM candles WHERE tf = ? AND time < ? AND (source IS NULL OR source <> 'import')",
+                             (tf, s - days * DAY))
         await db.execute("DELETE FROM candles WHERE symbol LIKE 'SIM:%' AND time < ?", (s - SIM_CANDLE_DAYS * DAY,))
         await db.execute("DELETE FROM events WHERE ts < ?", (ms - EVENT_DAYS * DAY * 1000,))
         await self._prune_predictions(ms)

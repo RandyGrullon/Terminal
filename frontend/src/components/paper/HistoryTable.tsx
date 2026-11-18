@@ -1,12 +1,14 @@
 // Closed demo positions (exit reason, R, P&L) plus a breakdown of results by the gate verdict each trade had when it
 // was opened, so the user can see what ignoring the filter costs.
 import { memo, useMemo, useState } from 'react'
+import { ChartCandlestick } from 'lucide-react'
 import type { Position } from '../../api/types'
 import { fmtBarTime, fmtDuration, fmtPct, fmtPrice, fmtProb, fmtR, signTone, toneColor } from '../../lib/format'
 import { plural } from '../../lib/plural'
-import { Badge, Button, VerdictBadge } from '../ui'
+import { Badge, Button, IconButton, VerdictBadge } from '../ui'
 import { ORIGIN_LABEL, fmtMoney, fmtQty, isNum } from '../markets/opsUtils'
-import { contractsText, exitInfo, marketOf, verdictBreakdown } from './paperUtils'
+import { contractsText, exitInfo, lotSizeText, lotsText, marketOf, verdictBreakdown } from './paperUtils'
+import { detailProps } from './TradeDetailModal'
 
 const PAGE = 50
 
@@ -37,9 +39,11 @@ function HistoryTable({
   history,
   onOpenChart,
   originLabels,
+  onDetail,
 }: {
   history: Position[]
   onOpenChart: (p: Position) => void
+  onDetail?: (p: Position) => void
   originLabels?: Record<string, string>
 }) {
   const [limit, setLimit] = useState(PAGE)
@@ -66,6 +70,7 @@ function HistoryTable({
               <th>Origen</th>
               <th title="Veredicto del filtro al abrir">Filtro</th>
               <th className="num">Duración</th>
+              <th />
             </tr>
           </thead>
           <tbody>
@@ -74,7 +79,7 @@ function HistoryTable({
               const ex = exitInfo(p)
               const dur = isNum(p.exit_time) && isNum(p.entry_time) ? Math.max(0, p.exit_time - p.entry_time) : null
               return (
-                <tr key={p.id}>
+                <tr key={p.id} className={onDetail ? 'pp-row-click' : undefined} {...detailProps(p, onDetail)}>
                   <td>
                     <div className="pp-sym">
                       <button type="button" onClick={() => onOpenChart(p)} title={`Abrir ${market.chart} en el gráfico`}>
@@ -88,7 +93,9 @@ function HistoryTable({
                   <td>
                     <Badge tone={market.sideTone}>{market.side}</Badge>
                   </td>
-                  <td className="num mono">{contractsText(p, p.qty) ?? fmtQty(p.qty)}</td>
+                  <td className="num mono" title={lotSizeText(p) ?? undefined}>
+                    {(!p.hold ? lotsText(p, p.qty) : null) ?? contractsText(p, p.qty) ?? fmtQty(p.qty)}
+                  </td>
                   <td className="num mono">
                     <div className="pp-stack">
                       <span>{fmtPrice(p.entry_price)}</span>
@@ -120,6 +127,14 @@ function HistoryTable({
                   </td>
                   <td>{p.gate_verdict ? <VerdictBadge verdict={p.gate_verdict} score={p.gate_score} /> : <span className="tiny muted">—</span>}</td>
                   <td className="num mono text-2">{dur !== null ? fmtDuration(dur) : '—'}</td>
+                  <td>
+                    <IconButton
+                      icon={<ChartCandlestick size={14} />}
+                      title="Ver la operación en el gráfico: dónde abrió y dónde terminó"
+                      size="sm"
+                      onClick={() => onOpenChart(p)}
+                    />
+                  </td>
                 </tr>
               )
             })}

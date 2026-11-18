@@ -12,7 +12,8 @@ salidas anticipadas), filtro «¿Tomo esta operación?» (TOMAR / ESPERAR / NO T
 de esta semana y la próxima, futuros, volatilidad), escáner, simulador y backtests, cuenta demo (a mercado, órdenes
 límite / stop, riesgo de cartera, auto-trading), la cuenta propia de NEXUS («NEXUS automática», cuenta 3, 1.000 $
 simulados: opera sola con sus señales y el filtro TOMAR en cripto, acciones, futuros de índices y opciones con precio
-teórico; apagada por defecto; con un espejo opcional en una cuenta de práctica de Alpaca, nunca con dinero real),
+teórico; apagada por defecto; con espejos opcionales en una cuenta de práctica de Alpaca y en los testnets de
+Binance, nunca con dinero real),
 alertas por Telegram y correo, validación walk-forward, PyChart (scripts Python estilo Pine en un sandbox), un copiloto
 local con Ollama (con laboratorio de estrategias) y una terminal de comandos. Base de datos local SQLite
 (`data/nexus.db`) o PostgreSQL/Supabase en modo nube. La validación publicada concluye «sin evidencia de ventaja»
@@ -102,7 +103,9 @@ pruebas), arranca `tools/pg_start.py` con una carpeta nueva.
     (escáner público), grabador de velas.
   - `sim/`: cuenta demo (`paper.py`: órdenes límite / stop pendientes, riesgo de cartera; cuentas 1 «Principal», 2
     «Simulación» y 3 «NEXUS automática», que opera sola con un `AutoProfile` como el auto-trading;
-    `autopilot_compare.py` la compara con entrar al azar con el método de la validación; `journal.py` = su diario:
+    `autopilot_compare.py` la compara con entrar al azar con el método de la validación; `research.py` investigación de
+    estrategias en historial largo (importado con `data/importer.py`: CSV de data/import o volcados de Binance) con
+    desarrollo / comprobación frente al azar, comandos en `research_commands.py`; `journal.py` = su diario:
     contexto al abrir, causa y excursiones al cerrar, grupos en «x de n» también por fuente de la señal: NEXUS o una
     estrategia de PyChart, que la cuenta 3 puede seguir con `autopilot.script_ids`), escáner, evaluador de predicciones
     (habilidad frente a la referencia, repetición offline), backtest, simulador, Monte Carlo.
@@ -120,9 +123,11 @@ pruebas), arranca `tools/pg_start.py` con una carpeta nueva.
     búsqueda con la API oficial de Brave si hay clave, `service.py` conversación con las reglas del proyecto,
     `lab.py` laboratorio de estrategias: referencia de PyChart para el modelo y resumen honesto de un backtest en
     desarrollo / comprobación frente a entrar al azar, `commands.py` comando `ia`); apagado por defecto.
-  - `broker/`: espejo de NEXUS automática en una cuenta de práctica de Alpaca (`alpaca.py` cliente solo de la API de
-    práctica, `mirror.py` reconciliación cada 15 s y diferencias de precio con la simulación, `commands.py` comando
-    `espejo`); apagado por defecto.
+  - `broker/`: espejos de NEXUS automática en cuentas de práctica (`alpaca.py` cliente solo de la API de práctica de
+    Alpaca, `binance.py` cliente solo de los entornos de práctica de Binance: testnet de contado y Demo Trading de
+    futuros, peticiones firmadas; `mirror.py` reconciliación cada 15 s, diferencias de precio con la simulación y base
+    de los espejos; `binance_mirror.py` cripto al contado y perpetuos; `common.py` `BrokerError`; `commands.py` comando
+    `espejo` / `espejo binance`); apagados por defecto.
   - `api/`: routers REST.
 - `frontend/src/`: `api/` (`client.ts`, `ws.ts`, `types.ts` = tipos canónicos; `types-*.ts` = tipos de cada módulo
   (alerts, paper-orders, realtime, validation), reexportados por `types.ts`), `pages/` (una por sección, cargada bajo
@@ -142,9 +147,10 @@ pruebas), arranca `tools/pg_start.py` con una carpeta nueva.
 2. Honestidad: nunca exagerar acierto, certeza ni protección. Estadísticas como «x de n», frente a una referencia;
    sin conclusiones con n < 30 o cuando el intervalo del 95 % incluye la referencia. Avisos de que no es asesoría
    financiera.
-3. Solo simulación / papel: nunca ejecutar órdenes reales ni conectar brokers con dinero real. El espejo de NEXUS
-   automática solo habla con la API de práctica de Alpaca (`app.broker.alpaca.PAPER_URL` es una constante, nunca un
-   ajuste).
+3. Solo simulación / papel: nunca ejecutar órdenes reales ni conectar brokers con dinero real. Los espejos de NEXUS
+   automática solo hablan con la API de práctica de Alpaca y con los entornos de práctica de Binance (testnet de
+   contado y Demo Trading): `app.broker.alpaca.PAPER_URL`, `app.broker.binance.TESTNET_SPOT_URL` y
+   `TESTNET_FUTURES_URL` son constantes, nunca ajustes.
 4. Red: solo endpoints oficiales o públicos, con peticiones normales a través de `app.util.http_client()`. Nunca
    falsificar User-Agent, cabeceras, cookies ni saltarse protecciones anti-bot (por eso Yahoo, Stooq y la búsqueda
    de símbolos de TradingView están excluidos). Una fuente que rechaza al cliente se registra y no se esquiva.

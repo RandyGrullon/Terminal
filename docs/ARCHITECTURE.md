@@ -348,11 +348,18 @@ alerts.email_from "" (empty = the SMTP user's address) · alerts.email_to "" (co
 paper.max_open_risk_pct 6.0 · paper.max_positions_per_group 3 · paper.crypto_one_group true
 paper.daily_loss_limit_pct 3.0                                       (the three numeric limits: 0 = off)
 autopilot.enabled false · autopilot.source "both" (scanner|list|both) · autopilot.symbols ["BINANCE:BTCUSDT",
-"BINANCE:ETHUSDT", "BINANCE:SOLUSDT"] · autopilot.tf "1h"
+"BINANCE:ETHUSDT", "BINANCE:SOLUSDT"] · autopilot.tf "1h" · autopilot.tfs [] (2..3 timeframes at once; [] = tf alone)
 autopilot.max_positions 5 (1..20) · autopilot.risk_pct 1.0 (0.1..5) · autopilot.scanner_top 10 (1..30)
+autopilot.lots false (true = its trades in MT5 lots, steps of 0.01) · autopilot.lot_max_risk_pct 5 (0.5..25; the most
+the minimum lot may risk at its stop, % of equity)
 autopilot.initial_balance 1000 · autopilot.max_exposure_pct 100 (0..500; 0 = off) · autopilot.max_drawdown_pct 20
 (0..90; 0 = off) · autopilot.source "both" = the list plus the scanner's candidates
-autopilot.futures_margin_pct 50 (0..100; 0 = it trades no futures)
+autopilot.futures_margin_pct 50 (0..100; 0 = it trades no futures; index futures and crypto perpetuals)
+autopilot.perp_leverage 10 (1..50; a crypto perpetual's margin = notional / this)
+autopilot.spot_short true (false = on crypto spot pairs it only buys and later sells; shorts go through perpetuals)
+autopilot.hold_pct 0 (0..90; % of its equity in a buy-and-hold portfolio; 0 = off) · autopilot.hold_basket
+[{symbol, weight}] (default SPY 25, QQQ 15, AAPL 10, NVDA 10, MSFT 10, AMZN 10, BTCUSDT 10, ETHUSDT 10) ·
+autopilot.hold_stop_pct 50 (5..90; emergency stop of each holding below its purchase)
 autopilot.stock_instrument "auto" (auto|shares|options) · autopilot.options_premium_pct 10 (0..50; 0 = no options)
 autopilot.learn_guard true (it learns from its losses)
 autopilot.script_ids [] (saved PyChart strategies that also give it entries; at most 3) · autopilot.script_gate true
@@ -366,6 +373,8 @@ ai.enabled false · ai.ollama_url "http://127.0.0.1:11434" · ai.model "" (empty
 ai.search_provider "none" (none|brave) · ai.brave_api_key "" (a secret) · ai.timeout_s 120 (10..600)
 ai.context_length 16384 (2048..131072: Ollama's num_ctx; its own default, often 4096, cuts long conversations)
 broker.alpaca_enabled false · broker.alpaca_key_id "" · broker.alpaca_secret_key "" (secrets: PAPER keys only)
+broker.binance_enabled false · broker.binance_spot_key / _spot_secret / _futures_key / _futures_secret "" (secrets:
+TESTNET keys only) · broker.binance_mirror_spot true · broker.binance_mirror_perps true (§20.1)
 broker.mirror_stocks true · broker.mirror_crypto true
 ```
 **Feature settings** (`app/settings_ext/`): each feature module (alerts, paper_risk, realtime, scanner_model,
@@ -514,7 +523,12 @@ DELETE /api/watchlist?symbol=                           -> {items}
 ```
 Numeric query params (`limit`, `offset`) reject NaN/±inf with 400 "El parámetro 'x' debe ser un número entero".
 `/api/candles` adds `"stale": true` only for a stale set (below); `provider` = real source of the newest rows
-(`candles.source`, or the venue stored in `symbols`).
+(`candles.source`, or the venue stored in `symbols`): binance | binance_um | okx | coinbase | kraken | kucoin (the crypto
+exchanges, official public APIs) | twelvedata | alphavantage | polygon | recorder | synthetic. `binance_um` = Binance
+USDⓈ-M futures (`fapi.binance.com/fapi/v1/klines`, provider label "Binance Futuros"): `app.data.symbols.route_symbol`
+puts it right after the first spot pair of a perpetual `.P` route in USDT / USDC, so a coin with a spot pair keeps its
+spot candles and a perpetual without one (gold `BINANCE:XAUUSDT.P`, a Binance «TradFi» perpetual) is served by its
+own futures market; that venue's `tv_symbol` is the `.P` symbol itself, so no «par equivalente» note.
 
 Hub python API (used by other modules):
 ```python
@@ -538,7 +552,7 @@ Freshness (I2) and data rules:
   (crypto, 24/7) or more than 6 days ago (markets with sessions). The note starts with "Datos desactualizados:
   última vela hace N días|horas|minutos". Consumers never present or use such a set as live (NEXUS ok=false §7,
   scanner skip §10, evaluator §10).
-- **Quotes** (optional `source` binance | okx | coinbase | kraken | kucoin | twelvedata | polygon | alphavantage |
+- **Quotes** (optional `source` binance | binance_um | okx | coinbase | kraken | kucoin | twelvedata | polygon | alphavantage |
   tradingview | cache, `realtime`, `delay_s`, `market_open`; SIM quotes keep exactly their 9 keys). Priority: the
   exchange's live price (crypto followed live, ≤ 15 s old) > a fresh real-time quote of an API-key provider
   (`hub.realtime`) > TradingView > the local live feed / DB cache. `last_price`: live feed > keyed real-time quote >
@@ -679,13 +693,27 @@ POST /api/paper/auto {enabled, symbols?, tf?} -> {auto: {enabled, symbols, tf}}
 GET  /api/paper/autopilot                   -> AutopilotSnapshot (account 3, "NEXUS automática")
 GET  /api/paper/autopilot/compare?fresh=     -> AutopilotComparison (vs random entries; cached, fresh = recompute)
 GET  /api/paper/autopilot/journal?fresh=     -> AutopilotJournal (its trade journal; cached, fresh = recompute)
-POST /api/paper/autopilot {enabled?, source?: scanner|list|both, symbols?, tf?, max_positions?, risk_pct?,
+POST /api/paper/autopilot {enabled?, source?: scanner|list|both, symbols?, tf?, tfs? (1..3; tf alone = one),
+                           max_positions?, risk_pct?, lots? (MT5 lots), lot_max_risk_pct? (0.5..25),
                            scanner_top?, alerts?, max_exposure_pct?, max_drawdown_pct?, futures_margin_pct?,
                            stock_instrument?: auto|shares|options, options_premium_pct?, learn_guard?,
-                           script_ids?: number[] (saved PyChart strategies; [] = none), script_gate?}
+                           script_ids?: number[] (saved PyChart strategies; [] = none), script_gate?,
+                           session_aggressive? (aggressive mode in the New York session only),
+                           per_tf_positions? (one position per market and timeframe)}
      -> AutopilotSnapshot (only the given fields change; 400 {detail} in Spanish on a bad value)
 POST /api/paper/autopilot/reset {initial_balance?}     -> AutopilotSnapshot (account 3 only)
-POST /api/paper/autopilot/close {position_id? | all?}  -> AutopilotSnapshot (400 when neither; 404 unknown id)
+POST /api/paper/autopilot/close {position_id? | all?, account_id? (a challenge account; default 3)}
+     -> AutopilotSnapshot (400 when neither or not one of NEXUS's accounts; 404 unknown id)
+POST /api/paper/autopilot/goal {target_equity, until? (unix s), aggressive? (false), then?: normal|pause}
+     -> AutopilotSnapshot (its challenge; 400 {detail} in Spanish: target not above the equity or over 10×, deadline
+        under 1 min or over 7 days ahead, one already running)
+POST /api/paper/autopilot/goal/stop {close? (false)}   -> AutopilotSnapshot (400 when none runs)
+POST /api/paper/autopilot/challenges {initial_balance, target_equity, until? (unix s), brake_pct? (5..95, 50),
+     name?} -> AutopilotSnapshot (a challenge account; 400 {detail} in Spanish: initial outside 1..10 000 000, target
+     not above it or over 100×, deadline under 1 min or over 90 days, brake outside 5..95, name over 40 characters or
+     taken, 12 already running)
+POST /api/paper/autopilot/challenges/{id}/stop {close? (true)} -> AutopilotSnapshot (400 unknown or already ended)
+DELETE /api/paper/autopilot/challenges/{id}            -> AutopilotSnapshot (deletes the account and its trades)
 POST /api/scanner/run {market, tf, limit, deep, deep_top} -> {run_id}
 GET  /api/scanner/results?run_id=        -> {run: ScanRun | null, results: ScanRow[]}   (default: latest)
 GET  /api/scanner/runs?limit=20          -> {runs: ScanRun[]}
@@ -704,7 +732,8 @@ GET  /api/learning/replay?days=&model_key=                       -> scanner repl
   `orders` (pending) and `risk`; `GET /api/paper/account` is unchanged.
 - **NEXUS's own demo account** (types in `types-autopilot.ts`; rules: §11): `AutopilotSnapshot {account: PaperAccount
   (id 3), positions, history: Position[], risk: PaperRisk | null, autopilot: AutopilotStatus}`; `AutopilotStatus
-  {enabled, account_id: 3, source, tf, symbols, max_positions, risk_pct, scanner_top, watching: AutopilotWatch[]
+  {enabled, account_id: 3, source, tf (its main, fastest timeframe), tfs (every one, fastest first), symbols,
+  max_positions, risk_pct, scanner_top, watching: AutopilotWatch[]
   {symbol, why: escáner|lista|posición abierta, direction?, last?: AutopilotLast {bar_time (ms, open time of the last
   decided bar), tf, action (null = no analysis), label} | null}, scan: AutopilotScan {id, finished_at (null while
   running; a failed scan is no source), opportunities} | null, log: AutopilotLogEntry[] {ts (ms), symbol ('—' = not
@@ -716,7 +745,19 @@ GET  /api/learning/replay?days=&model_key=                       -> scanner repl
   script_ids, script_gate, scripts: AutopilotScript[] {id, name, error, checked_at},
   health: AutopilotHealth {ok, last_decision (ms), stale: string[], downtime: AutopilotDowntime {from, to} | null,
   text}, weekly: AutopilotWeekly {week_start, week_end, trades, wins, total_r, mean_r, pnl, text, generated_at} |
-  null, brake: AutopilotBrake {limit_pct, drawdown_pct, active} | null, note}`. 400 texts: 'Fuente no válida: usa
+  null, brake: AutopilotBrake {limit_pct, drawdown_pct, active} | null, goal: AutopilotGoal {target, until,
+  started_at, start_equity, aggressive, then, equity, pnl, remaining, progress_pct, seconds_left, mode_text, note} |
+  null, goal_last: AutopilotGoalResult {outcome: reached|time|cancelled, target, until, started_at, ended_at,
+  start_equity, end_equity, pnl, pnl_pct, trades, wins, losses, closed, aggressive, late, text} | null,
+  session_aggressive, per_tf_positions (one position per market and timeframe, setting
+  `autopilot.per_tf_positions`: `_auto_check` then lets this account's trades of the market on its other timeframes
+  stand, within the portfolio risk limits), session: AutopilotSession {enabled, active, open, opens_at, closes_at, early_close, known,
+  mode_text}, markets: AutopilotMarket[] {key: crypto|ny|cme, label, open, opens_at, closes_at, note}, note}`. The
+  snapshot also carries `challenges: AutopilotChallenge[] {id, name, status: running|reached|time|brake|cancelled,
+  initial, target, until, brake_pct, aggressive, started_at, ended_at, account: PaperAccount, positions, history (its
+  last 10), log (its last 15), brake: AutopilotBrake, progress_pct, remaining, seconds_left, result:
+  AutopilotGoalResult | null}` (the running ones from the smallest initial balance up, then the ended ones, newest
+  first). 400 texts: 'Fuente no válida: usa
   «scanner» (escáner), «list» (lista fija) o «both» (las dos)', 'El máximo de posiciones debe ser un número entero
   entre 1 y 20', 'El riesgo por operación (%) debe ser un número entre 0,1 y 5,0', 'El número de candidatos del
   escáner debe ser un número entero entre 1 y 30', 'Como máximo 30 símbolos en la lista', 'Instrumento no válido para
@@ -755,7 +796,7 @@ GET  /api/learning/replay?days=&model_key=                       -> scanner repl
 Python API: `await rt.scanner.quick_signal(symbol, tf) -> dict | None` (QuickSignal);
 `from app.sim.backtest import run_backtest`; `rt.paper.snapshot(account_id=1)`; `rt.paper.place_order(...)`,
 `cancel_orders(order_id, symbol, all, account_id=1)`, `list_orders(account_id, status, limit)`, `pending_orders`,
-`risk_state(1)` (PaperRisk); `autopilot_snapshot()`, `set_autopilot(enabled=, source=, symbols=, tf=, max_positions=,
+`risk_state(1)` (PaperRisk); `autopilot_snapshot()`, `set_autopilot(enabled=, source=, symbols=, tf=, tfs=, max_positions=,
 risk_pct=, scanner_top=)`, `close_autopilot(position_id, all, symbol=)`, `reset(..., account_id=3)`;
 `autopilot_comparison(fresh=)`; `rt.sim.state()`; `from app.sim.evaluator import skill_report, replay_report,
 ReplayBusy`.
@@ -1179,10 +1220,39 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     stay watched ('posición abierta') after a newer scan drops them, so its exits stay its own. After a change of
     `autopilot.tf`, positions opened on the old timeframe keep NEXUS's exits on their own bars (an exits-only
     `AutoProfile`, `entries=False`, per timeframe it still holds; it never opens) and the new timeframe adds no second
-    position on those symbols (each trader follows only the positions of its own tf, `PaperEngine._follows`). Entries
+    position on those symbols (each trader follows only the positions of its own tf, `PaperEngine._follows`).
+    Several timeframes at once (`autopilot.tfs`, 2..3, e.g. 5m / 1h / 4h: the quick, measured and long-term trades of
+    its UI tabs, `trade_style`: «rápida» ≤ 5m, «medida» ≤ 2h, «largo plazo» above): one entry trader per timeframe
+    (`_autopilot_entry_profiles`) on the same candidates, each deciding on its own closes; the fastest is its main
+    timeframe (`cfg["tf"]`: the «Última vela» reads, the health check, the downtime count); still one position per
+    market across all of them (the first timeframe with an entry takes it; the log says «Abre … en 1h (medida)»);
+    `set_autopilot(tf=)` alone goes back to one timeframe, and positions of a dropped timeframe keep their exits-only
+    trader. Entries
     need NEXUS BUY / SELL and gate TOMAR (ESPERAR / NO TOMAR are logged as discarded), never open while its loss brake
     is on (`AutopilotBrake`: equity `autopilot.max_drawdown_pct` % under the initial balance; `autopilot_snapshot`
-    fills `status.brake`) nor in a market that is not live (`_market_live`: every class but crypto needs a quote with
+    fills `status.brake`). Its challenge (`app/sim/autopilot_goal.py`, meta `autopilot.goal` / `autopilot.goal_last`,
+    kept across restarts): `start_goal` sets a target equity and an optional deadline; the monitor loop
+    (`_goal_tick`, every `PUBLISH_EVERY_S`) ends it at the target or the deadline (`late` when the server was off
+    then): it closes the account's trades (never its portfolio; exit label «Cierre del reto»), saves the result and
+    goes back to the saved settings (`then` normal) or pauses the account (`then` pause); a reset cancels it. Its
+    aggressive mode is an overlay read through `_ap_setting` (`G.AGGRESSIVE`: 5m/15m/1h, 4 % risk, lots, 20x, 20
+    positions, 30 candidates, PyChart strategies without the gate) and, for account 3 only, `_risk_limits(3)` makes
+    its daily loss limit its loss brake and its open-risk cap 20 % (`G.aggressive_risk`); the saved settings never
+    change, so it ends with the challenge (the Binance mirror keeps the saved `autopilot.perp_leverage`). The same
+    overlay applies during the New York stock session when `autopilot.session_aggressive` is on (`_aggressive_now`:
+    a challenge in that mode or `_session_on`); `app/sim/market_session.py` has the session (Mon–Fri 9:30–16:00
+    America/New_York, NYSE holidays and 13:00 early closes from nyse.com through December 2027, `known` false after),
+    the CME index futures week (Sunday 18:00 – Friday 17:00, daily pause 17:00–18:00, no holidays) and
+    `markets_view`; the monitor's `_session_tick` notes each open / close (or a switch of the setting) in its decision
+    log and decides its candidates again. Positions opened in the session keep their stops and targets after it.
+    Challenge accounts (`app/sim/autopilot_challenges.py`, paper_accounts ids 101…, records in meta
+    `autopilot.challenges`): each one is a trader per timeframe of its own (`_autopilot_entry_profiles` builds one per
+    account: account 3 and every running challenge) on account 3's candidates, with `_autopilot_cfg(id)` = the
+    aggressive overlay, its own brake and initial balance and no portfolio; it is a risk account (`_risk_account`:
+    its daily loss limit is its brake), keeps its own decision log (`_ch_logs`, saved with `autopilot.state`), never
+    mirrors to a broker and pauses with account 3. The monitor's `_challenge_tick` ends each one at its target, its
+    deadline or its brake with nothing open (`_challenge_end`: closes its trades, `G.goal_result`); its events carry
+    its name; account 2 stays the simulator's nor in a market that is not live (`_market_live`: every class but crypto needs a quote with
     `market_open` ≠ false and a live price, so stocks only trade in their session), are capped as a cash account
     (`open_position(max_exposure_pct=)`, atomic with the insert: everything but futures held, an option at its
     premium, ≤ that % of equity; a smaller position when it does not fit whole, in whole contracts for an option, rule
@@ -1213,6 +1283,37 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     multiplier, contracts, margin}` (Position.instrument; null for shares, crypto and the rest). The user's own orders
     on a future keep plain units. Data: an API key that serves futures, or the recorder (it records the symbols NEXUS
     watches; 1h is rebuilt from 15m), so a new future needs about a week of recorded history before NEXUS analyses it.
+  - **Crypto perpetuals of NEXUS automática** (`app.engine.contracts.PERPETUALS`: BTC, ETH, BNB, SOL, XRP, DOGE, ADA,
+    LINK, AVAX, PAXG — PAX Gold, 1 token = 1 troy ounce — and XAU — gold like MetaTrader's XAUUSD, Binance's XAUUSDT
+    «TradFi» perpetual, both with full keyless history — against USDT / USDC / USD, TradingView symbols such as
+    `BINANCE:BTCUSDT.P` or `BINANCE:XAUUSDT.P`; `perpetual_spec`, name `Perpetuo <coin>/<quote>`, gold
+    `Oro XAUUSD (perpetuo XAU/USDT)`; with per-coin groups XAU, PAXG and XAUT are one
+    risk group `crypto:XAU`, label "Oro (XAU)"): the same contract path as the index futures (`open_position(contracts=True)`), with 1
+    contract = roughly a large exchange's minimum order step of the coin (0.001 BTC / ETH / PAXG / XAU oz, 0.01 BNB / LINK, 0.1 XRP,
+    1 SOL / DOGE / ADA / AVAX; approximate) and no fixed margin: `margin` per contract = entry × multiplier / `autopilot.perp_leverage` (1..50, default 10),
+    inside the same `autopilot.futures_margin_pct` budget. `on_margin` keeps any position NEXUS opened as
+    `instrument.kind 'future'` out of the cash exposure. `liquidation_price` is an APPROXIMATE isolated-margin
+    liquidation (loss = 1 / leverage of the notional minus `PERP_MAINT_PCT` 0.4 % of maintenance); the entry is
+    refused with rule `liquidation` when it would come before the stop, so stops (which only trail in favour) always
+    act first and nothing is ever liquidated. The position carries `instrument {kind 'future', root 'BTCUSDT.P', name,
+    multiplier 0.001, contracts, margin, perpetual true, leverage, liquidation}`. Fees: `PERP_FEE_PCT` 0.05 % per
+    side for any `.P` symbol perpetual_spec knows (a taker order, approximate), also on the user's account, which keeps
+    plain units. Candles and prices are those of the equivalent spot pair (`app.data.symbols` routes `.P` there; the
+    basis is usually a few hundredths of a percent), or of Binance USDⓈ-M futures (`binance_um`) for a perpetual
+    without a spot pair (XAUUSDT), and funding payments are NOT simulated.
+  - **MT5 lots («lotaje») of NEXUS automática** (`app.engine.lots`): `lot_spec(symbol, instrument)` = units in 1 lot
+    as most MetaTrader 5 brokers define it (they vary by broker): gold 100 oz (XAUUSD, GOLD, the XAUUSDT perpetual and
+    PAX Gold / XAUT, 1 token = 1 oz), silver 5 000 oz, forex 100 000 units of the base currency, crypto 1 coin, stocks and funds 1 share,
+    anything else 1 unit; None for options and index futures (whole contracts). Every `Position` carries
+    `lot {lots, size, unit}` (lots = qty / size at the open; null without a lot). With `autopilot.lots` on, its trader
+    calls `open_position(lots_max_risk_pct=autopilot.lot_max_risk_pct)`: the size its risk per trade asks for is
+    rounded DOWN to steps of 0.01 lot (`step_units`; a perpetual also in whole contracts: 0.01 lot of gold = 1 oz =
+    1 000 contracts of 0.001 PAXG); under one step it opens the minimum step only when that risks at most
+    `lot_max_risk_pct` % of equity at the stop, else rule `lots` (the trade is skipped and logged, never forced). The
+    margin budget and the cash exposure trim in whole steps too (rules `margin` / `exposure` when not even one fits).
+    Its open log line names the lots ("0,05 lotes (5,000 PAXG) con 10x…"). Its portfolio (hold) and options are never
+    sized in lots. With a small account the minimum lot of gold or BTC usually risks far more than the cap, so those
+    markets are skipped.
   - **Theoretical stock options of NEXUS automática** (`app.engine.options`): real option quotes need a paid feed,
     so every option price is THEORETICAL: Black-Scholes (European, no dividends, rate 4 %) with the underlying's live
     price and the annualized volatility of its last 20 daily returns (21 daily closes from `rt.hub.get_candles(…,
@@ -1239,13 +1340,27 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
   - **What NEXUS automática learns from its losses** (`autopilot.learn_guard`, on by default; `_learned_pauses`,
     `app.sim.journal.losing_contexts` / `context_keys`): before an entry (after the gate's TOMAR), its trader looks
     at its closed trades of the last 90 days grouped by the pre-trade dimensions of its journal — regime, entry
-    session, news nearby, gate score, direction (an option: its bet) and market — and opens nothing when the
+    session, news nearby, gate score, direction (an option: its bet), market, signal source and timeframe (`tf`: a
+    timeframe that loses with evidence stops on its own while the others keep trading) — and opens nothing when the
     decision falls in a group with at least 30 trades whose whole 99 % interval of the mean R (block bootstrap by
     UTC day) is below zero: a stricter level than the journal's 95 % because many groups are looked at at once. The
     skip is noted in its log with the evidence («x de n», mean R, the interval). Cached by the trades and the hour:
     once those losses are older than 90 days the context is tried again. `status.paused_contexts` lists them (filled
     by `autopilot_snapshot`); `set_autopilot(learn_guard=)`, terminal `autopilot aprender on|off`, UI switch
     «Aprender de sus pérdidas». It never makes trades it would not take otherwise: it only removes entries.
+  - **The plan of each trade** (`app/sim/trade_plan.py`, `Position.plan: PositionPlan {why, target, target_r,
+    no_target, params: PlanParam[] {label, value}} | null`, only for origin `autopilot`: account 3 and its challenge accounts): every trade carries its
+    target or why it has none. `_auto_check` writes `meta.context.why` at the entry (NEXUS's signal and the gate, or
+    the PyChart strategy's entry with NEXUS's read and whether the gate was required); `position_dict` adds the next
+    pending target (tp1, then tp2, tp3) with its distance in R, or `no_target` (a strategy without a limit closes on
+    its own rule or at its stop, as in its backtest; a holding of the portfolio is held until sold or its emergency
+    stop; targets already reached). Trades from before it get a `why` from their context. The open line of the
+    decision log ends with «· objetivo X (nR)» or «· sin objetivo: …». `params` (`trade_plan.params_of`) lists what
+    the trade took at its entry from `meta.context` (written by `_auto_check`: NEXUS's read, the gate line and whether
+    it was required, the strategy's entry id, the risk %, the aggressive mode, the account; plus regime, score,
+    probabilities and ATR %) and from the position (stop, loss at the stop, size in lots, leverage / margin /
+    liquidation, targets). The UI opens it in `TradeDetailModal` by clicking a trade (tiles, both tables, the
+    challenge accounts' rows).
   - **PyChart strategies as signal sources** (`autopilot.script_ids`, at most 3 saved scripts; `autopilot.script_gate`,
     on by default). On each closed bar where NEXUS's own decision has no entry (not BUY / SELL), its trader runs each
     chosen strategy in the PyChart sandbox on the market's last 1 000 CLOSED candles (`ScriptService.run(...,
@@ -1468,9 +1583,32 @@ imported by numpy itself (`ctypeslib`, `f2py`, `distutils`, `testing` and the fi
 ## 13. Frontend (React 18 + TS + Vite 5 + lightweight-charts 5)
 
 Shell (LEAD): header (logo, `<SymbolSearch/>`, timeframe, WS status, clock), left nav, page area, bottom
-`<Terminal/>` panel (resizable, `Ctrl+\``), toasts. Pages are default-exported components without props:
+`<Terminal/>` panel (resizable, `Ctrl+\``), toasts. Above the toasts, `components/paper/TradeAlerts.tsx`: one side
+card per opening and close of NEXUS automática (diff of the WS `paper_autopilot` snapshots, `lib/tradeAlert.ts`; the
+first snapshot only learns what is open): COMPRA / VENTA, product and speed, amount (and collateral of a future),
+entry, money at the next target and at the stop before costs (never an «expected» profit), or the real result once
+closed, and «Ver operación»; ≤ 4 cards, each hidden after 90 s; also a desktop notification when they are on and
+the tab is in the background; App.tsx stops the plain toast of those same events. Pages are default-exported
+components without props:
 `pages/{ChartPage,MarketsPage,ScannerPage,SimulationPage,PaperPage,StudioPage,BrainPage,SettingsPage}.tsx`.
 `components/terminal/Terminal.tsx` and `components/SymbolSearch.tsx` are default exports too.
+
+**Demo page** (`pages/PaperPage.tsx`, friendly first; blocks in `components/paper/DemoKit.tsx`, styles `demo.css`,
+classes `dk-*`): an account switch («Mi cuenta» / «NEXUS automática», remembered per browser), then per account a
+header (NEXUS automática: «Pausar» / «Activar» at once, `update({enabled})`; Mi cuenta: «Nueva orden»), a hero
+(`AccountHero`: equity in big, change since the initial balance, cash, open and closed result, winners as «x de n»
+with no conclusion below 30, the cumulative result of the closed trades listed in the snapshot) and section tabs
+(`SectionTabs`, remembered per browser: `nexus.paper.autopilot.section.v1`, `nexus.paper.mine.section.v1`).
+NEXUS automática: «Resumen» (the portfolio while `hold_pct` > 0 or it holds something; a tile per open trade
+(`TradeTile`: asset, kind, Compra / Venta, money at stake — amount, the guarantee of a perpetual or future, an
+option's premium —, result and the path from the stop or dynamic stop to the next target, `tradePath`), filtered by
+speed; «Qué hace ahora»; the latest moves in plain words, `activityOf`), «Operaciones» (the tables), «Actividad»
+(what it watches, decision log), «Análisis» (stats, vs random, journal, money rules, weekly report, risk) and
+«Ajustes» («Cómo opera», PyChart strategies, the mirrors). The explanation and the backend `note` live in
+«¿Cómo funciona?» (`<details>`); the hero keeps a visible line that it is simulated and has no validated edge.
+Mi cuenta: «Resumen» (position tiles, pending orders, latest moves), «Operar» (order ticket, auto-trading, risk) and
+«Detalle» (stats, positions, orders, risk, history). `AutopilotView` / `MyAccount` take an optional `section` prop
+(tests).
 
 **Code splitting** (`App.tsx`, `vite.config.ts`):
 - Every page is its own chunk: `lazyPage()` = React.lazy plus one shared download promise; `<PageBoundary
@@ -2354,11 +2492,113 @@ without both keys, nor in `NEXUS_OFFLINE` mode.
 - State in `meta` (`broker.mirror`: the open entries and the last 100 finished ones), no schema change.
 - API: `GET /api/broker/status?refresh=` → `BrokerStatus {enabled, provider "alpaca", paper true, configured,
   connected, account: BrokerAccount {equity, cash, buying_power, status, currency} | null, error, last_sync_ms,
-  mirror_stocks, mirror_crypto, entries: BrokerMirrorEntry[] (≤ 20: open first, then the latest finished), stats:
-  BrokerStats, note}` (the account is cached 30 s); `POST /api/broker/sync` → BrokerStatus after a pass; 400 {detail}
-  when it is off, has no keys or runs offline. The contract checker only reads the status.
+  mirror_stocks, mirror_crypto, mirror_perps (false here), entries: BrokerMirrorEntry[] (≤ 20: open first, then the
+  latest finished), stats: BrokerStats, note}` (the account is cached 30 s); `POST /api/broker/sync` → BrokerStatus
+  after a pass; 400 {detail} when it is off, has no keys or runs offline. The contract checker only reads the status.
+- `MirrorService` is also the base of the other practice mirrors: a subclass changes `NAME` (in its messages and
+  status labels: «Espejo en <NAME>: …», «Abierta en <NAME>»), `PROVIDER`, `STATE_KEY`, `SETTINGS_HINT`, `NOTE` and the
+  venue hooks `_cfg`, `_client`, `_map_symbol`, `_open_qty`, `_skip_reason`, `_send`, `_duplicate`, `_sellable`; the
+  reconcile, the state and the statistics are shared. Every practice client raises `app.broker.common.BrokerError
+  (status)` (`AlpacaError` and `BinanceError` are subclasses). A partial exit that a lot step rounds to nothing is not
+  sent.
 - Terminal `espejo` (aliases `alpaca`, `broker`; group Bróker): status, stats and the last positions; `espejo
   sincroniza` reconciles now. UI: card «Espejo en Alpaca (práctica)» in NEXUS automática (`BrokerCard.tsx`, polls
   every 30 s) and the Ajustes group «Bróker de práctica (Alpaca)» (`schema-broker.ts`; the keys are secret fields).
 - Limits: paper fills are Alpaca's own simulation against real quotes (no queue position, no market impact); a manual
   trade on the same symbol in the same practice account mixes with the mirror (use a practice account for NEXUS only).
+
+### Buy-and-hold portfolio of NEXUS automática (`PaperEngine._hold_tick`)
+
+Besides its trades, account 3 may hold a portfolio like a broker account: `autopilot.hold_pct` % of its equity spread
+over `autopilot.hold_basket` (weights normalized to 100). Every refresh (60 s) each asset it does not hold is bought at
+market — a stock or fund only with its market open and a live price (`_market_live`; crypto 24/7), never while its loss
+brake is on, nothing under 1 $ — as a long position on `1d` with no targets and an emergency stop
+`autopilot.hold_stop_pct` % below the purchase, `meta.hold = true` (Position.hold). A holding is never managed by a
+trader (`_follows` / `_autopilot_held` leave it out: NEXUS's signals do not close it), stays outside the trading limits
+(`_open_risk`, `_check_group`, `_check_max_positions`; `open_position(hold=True)`), still counts in the cash exposure,
+and is not bought again for 30 days after it is sold (meta key `autopilot.hold`: symbol → last purchase; a reset of the
+account clears it). `close_autopilot(all=True)` closes its trades only; a holding is sold by its id. UI: block
+«Cartera · comprar y mantener» (`PortfolioCard.tsx`: invested, worth now, gain, a bar of how the value is split, and a
+tile per asset with its target %, value, gain, quantity, purchase and current price and «Vender», or why it is still
+waiting); the trade tiles, tables, the speed filter and its summary leave the holdings out.
+
+### 20.1 Binance testnets (`app.broker.binance`, `app.broker.binance_mirror`)
+
+The same mirror on Binance's PRACTICE environments (test funds, never money): `app.broker.binance.TESTNET_SPOT_URL`
+(`https://testnet.binance.vision`, the spot testnet) and `TESTNET_FUTURES_URL` (`https://demo-fapi.binance.com`,
+Demo Trading: Binance's documented USDⓈ-M testnet REST base since the old testnet.binancefuture.com moved to
+demo.binance.com) are constants, not settings. Each issues its own keys (spot: testnet.binance.vision with GitHub;
+futures: demo.binance.com → API Management), not valid on the live exchange. Off by default
+(`broker.binance_enabled`); nothing is sent offline, and a market without its keys is skipped with the reason
+«faltan las claves de Demo Trading (futuros)» / «… del testnet de contado».
+
+- `BinanceTestnetClient(spot_key, spot_secret, futures_key, futures_secret)`: signed requests (HMAC-SHA256 of the
+  query string with `timestamp` and `recvWindow` 10 s, key in `X-MBX-APIKEY`, everything in the query, no body)
+  through `app.util.http_client`, never following redirects. `filters(market, symbol)` (exchangeInfo: lot step,
+  minimum quantity and minimum notional; None when the testnet does not list it), `account()` normalized to
+  BrokerAccount (equity = futures `totalMarginBalance`, cash = spot USDT, buying power = futures `availableBalance`,
+  currency USDT), `positions()` (spot balances by asset), `prepare_perp(symbol, leverage)` (ISOLATED margin, -4046
+  «no need to change» ignored, then the leverage), `submit_market(market, symbol, side, qty, client_order_id,
+  reduce_only)` and `order(id)`. Binance only refuses a repeated `newClientOrderId` while that order is open, so
+  `submit_market` first asks for the order with that client id (`origClientOrderId`, -2013 = none) and returns it when
+  it exists: a lost state never doubles an order. Orders come back as `{id "<spot|perp>:<SYMBOL>:<orderId>", status
+  (lowercase), filled_qty, filled_avg_price}` (spot price = `cummulativeQuoteQty / executedQty`, futures `avgPrice`).
+  Spanish `BinanceError(status, code)`; codes -1022 / -2014 / -2015 count as 401 (the keys).
+- `BinanceMirrorService` (`rt.broker_binance`, state `meta` key `broker.binance_mirror`): `binance_symbol` maps crypto
+  spot pairs in USD / USDT / USDC / FDUSD (any exchange) to `BASEUSDT` (or `BASEUSDC`) on the spot testnet, long only
+  (a short says «al contado no hay cortos»), and perpetuals `.P` in USD / USDT / USDC to Demo Trading (futures), long and
+  short, with `autopilot.perp_leverage` (1..50) set once per symbol before its first order; reductions and closes are
+  `reduceOnly`. Quantities are rounded down to the lot step (also what is sold, never more than the spot balance);
+  under the minimum quantity or notional, or a symbol the testnet does not list, is skipped with the reason. Not
+  mirrored: stocks, ETFs, CFDs, index futures, theoretical options, futures with an expiry, pairs not in dollars and
+  synthetic markets.
+- Settings: `broker.binance_enabled` false · `broker.binance_spot_key` / `broker.binance_spot_secret` /
+  `broker.binance_futures_key` / `broker.binance_futures_secret` "" (secrets) · `broker.binance_mirror_spot` true ·
+  `broker.binance_mirror_perps` true.
+- API: `GET /api/broker/binance/status?refresh=` and `POST /api/broker/binance/sync` → BrokerStatus with provider
+  `binance_testnet`, `mirror_stocks` false, `mirror_crypto` (spot) and `mirror_perps`. Terminal: `espejo binance` /
+  `espejo binance sincroniza` (also `espejo testnet`). UI: card «Espejo en el testnet de Binance (práctica)»
+  (`BrokerCard venue="binance"`) and the Ajustes group «Testnet de Binance (práctica)» (`schema-broker.ts`).
+- Limits: the testnets' order books are thin and their prices can drift from the real market, so their price
+  differences say less than Alpaca's; funding payments of the perpetuals are charged by Demo Trading but not
+  by NEXUS's simulation (app.engine.contracts).
+
+## 21. Long history and strategy research (RESEARCH, `app.data.importer`, `app.sim.research`)
+
+The API's backtests read at most 5,000 candles (17 days of 5m) and maintenance prunes fine timeframes (5m after 45
+days), so neither says much about a strategy. This module stores long history and judges strategies on it.
+
+- `app.data.importer`: candles stored with source `import`, which maintenance never prunes (`DELETE … AND (source
+  IS NULL OR source <> 'import')`), and never over a stored bar (`ON CONFLICT DO NOTHING`).
+  - `import_csv(db, path, symbol, tz_offset_h=, tfs=)`: a CSV of bars (QuantDataManager / Dukascopy, MetaTrader,
+    generic): delimiter , ; or tab; header or not; one date-time column or date + time; dates YYYY.MM.DD,
+    YYYY-MM-DD, YYYYMMDD, DD.MM.YYYY (day first), unix s / ms / µs; times HH:MM[:SS[.fff]] or HHMM[SS]; a high
+    below the open or close is widened; > 50 unreadable lines refuse the file. Resampled (`Resampler`) from the
+    file's own bar size (`source_seconds`) to `TARGET_TFS` 5m / 15m / 1h / 4h / 1d (only multiples of it); a first
+    or last bucket the file only covers in part is dropped. Files only from `IMPORT_DIR` = `data/import`
+    (`resolve_import_path`: anything else is refused).
+  - `import_binance(db, symbol, months=36, tfs=)`: Binance's official public dumps
+    (`https://data.binance.vision/data/{spot|futures/um}/monthly/klines/{PAIR}/{tf}/{PAIR}-{tf}-{YYYY}-{MM}.zip`;
+    `.P` symbols → USDⓈ-M futures) through `app.util.http_client`, the last `months` complete months, a 404 month
+    skipped (counted in `missing_months`); open times in ms or µs (recent spot files).
+- `app.sim.research.ResearchService` (`rt.research`): one background job at a time (an import or a research) with
+  its progress; `research(symbol, tf, bars ≤ RESEARCH_BARS 20,000, nexus=True, script_ids=None)` reads the newest
+  stored candles (any source; ≥ 1,000), runs every saved PyChart strategy (`ScriptService.run_on`: the sandbox on
+  the given candles, quiet, 240 s) and NEXUS with and without its gate (`run_backtest`), and judges each with the
+  copilot lab's method (`app.ai.lab.summarize_run` / `period_summary`): development (first 70 % of the candles) and
+  check (last 30 %), each against random entries with the same direction, duration and costs, 95 % interval by a
+  block bootstrap by day, nothing concluded below 30 trades. «candidata» = above random in both periods; the
+  conclusion still asks to confirm it on another market or timeframe. The last 20 reports (one per market and
+  timeframe) are kept in `meta` key `research.reports`.
+- API: `GET /api/research` → `{busy, job: {kind, title, state: running|done|error, progress[], started_ms,
+  finished_ms, error, result} | null, reports[]}` · `POST /api/research/run {symbol, tf, bars?, nexus?}` · `POST
+  /api/research/import/binance {symbols, months?, tfs?}` · `POST /api/research/import/file {file, symbol,
+  tz_offset_h?}` · `GET /api/research/imported?symbol=` → `{symbol, tfs: {tf: {bars, from, to}}}`; 400 {detail}
+  when another job runs, a file is outside `data/import`, or a value is not valid.
+- Terminal (group «Investigación»): `importar` (the files waiting in data/import), `importar binance <símbolos…>
+  [--meses=36] [--tf=5m,15m,1h,4h,1d]`, `importar archivo <nombre.csv> <símbolo> [--tz=0]`, `importar <símbolo>`
+  (what is stored), `importar estado`; `investigar <símbolo> <tf> [--velas=20000] [--sin-nexus]`, `investigar
+  estado`, `investigar resultado [símbolo tf]`.
+- Limits: PyChart runs on at most 20,000 candles (the sandbox's MAX_BARS: 2.3 years of 1h, 9 of 4h, 7 months of
+  15m, 69 days of 5m); CSV times are taken as written unless `tz_offset_h` says otherwise; Dukascopy CFD prices
+  differ slightly from other venues' (fine for research, not a quote).

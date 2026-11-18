@@ -25,6 +25,9 @@ class Runtime:
         self.validation: Any = None  # app.validation.service.ValidationService (walk-forward reports)
         self.ai: Any = None  # app.ai.service.AIService (local copilot with Ollama, read-only tools)
         self.broker: Any = None  # app.broker.mirror.MirrorService (account 3 mirrored in an Alpaca PAPER account)
+        # app.broker.binance_mirror.BinanceMirrorService (account 3 mirrored on Binance's testnets: test funds)
+        self.broker_binance: Any = None
+        self.research: Any = None  # app.sim.research.ResearchService (imported history and strategy research)
         self.auth: Any = None  # app.auth.SupabaseVerifier (cloud mode only)
         # "single": the only instance (SQLite or no background work) · "leader": holds the PostgreSQL leader lock and
         # runs the services · "standby": another instance holds it; only /api/health answers (see app.main.Leadership)

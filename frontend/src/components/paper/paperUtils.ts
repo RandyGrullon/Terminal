@@ -33,6 +33,35 @@ export function contractsText(p: Position, units: number): string | null {
   return p.instrument.kind === 'future' && p.instrument.root ? `${count} ${word} ${p.instrument.root}` : `${count} ${word}`
 }
 
+/** Lots of a position for `units` (qty or qty_open): units / its lot size; null without a lot (options, index
+ *  futures, an older server). */
+export function lotsOf(p: Position, units: number): number | null {
+  const lot = p.lot
+  if (!lot || !isNum(lot.size) || lot.size <= 0 || !isNum(units)) return null
+  return Math.round((units / lot.size) * 1e6) / 1e6
+}
+
+/** "0,01 lotes", "1,00 lote", "0,0164 lotes": 2 decimals on the 0,01 grid, up to 4 off it. */
+export function fmtLots(lots: number): string {
+  const onGrid = Math.abs(lots * 100 - Math.round(lots * 100)) < 1e-6
+  const digits = onGrid ? 2 : 4
+  const n = lots.toLocaleString('es-ES', { minimumFractionDigits: digits, maximumFractionDigits: digits })
+  return `${n} ${Math.abs(lots - 1) < 1e-9 ? 'lote' : 'lotes'}`
+}
+
+/** What 1 lot holds: "1 lote = 100 oz", "1 lote = 1 BTC", "1 lote = 1 acción". */
+export function lotSizeText(p: Position): string | null {
+  const lot = p.lot
+  if (!lot || !isNum(lot.size)) return null
+  return `1 lote = ${lot.size.toLocaleString('es-ES', { maximumFractionDigits: 4 })} ${lot.unit}`
+}
+
+/** "0,05 lotes" for `units`, or null without a lot. */
+export function lotsText(p: Position, units: number): string | null {
+  const n = lotsOf(p, units)
+  return n === null ? null : fmtLots(n)
+}
+
 /** How the tables show a position's market: an option by its contract ("F 12 P 18/12/2026", a put on F, its
  *  chart is the stock's), any other position by its ticker and exchange. */
 export function marketOf(p: Position): { ticker: string; sub: string; chart: string; side: string; sideTone: Tone } {

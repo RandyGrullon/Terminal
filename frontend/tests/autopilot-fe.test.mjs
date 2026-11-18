@@ -178,17 +178,17 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
   const src = readFileSync(path.join(SRC, 'api', 'types-autopilot.ts'), 'utf8')
   const t = interfaces(src)
   assert.deepEqual(t.AutopilotStatus, [
-    'enabled', 'account_id', 'source', 'tf', 'symbols', 'max_positions', 'risk_pct', 'scanner_top', 'watching', 'scan', 'log',
+    'enabled', 'account_id', 'source', 'tf', 'tfs', 'hold_pct', 'hold_basket', 'hold_stop_pct', 'symbols', 'max_positions', 'risk_pct', 'lots', 'lot_max_risk_pct', 'scanner_top', 'watching', 'scan', 'log',
     'alerts', 'alert_channels', 'initial_balance', 'max_exposure_pct', 'max_drawdown_pct', 'futures_margin_pct',
     'stock_instrument', 'options_premium_pct', 'learn_guard', 'paused_contexts', 'script_ids', 'script_gate', 'scripts',
-    'health', 'weekly', 'brake', 'note',
+    'health', 'weekly', 'brake', 'goal', 'goal_last', 'session_aggressive', 'per_tf_positions', 'session', 'markets', 'note',
   ])
   assert.deepEqual(t.AutopilotScript, ['id', 'name', 'error', 'checked_at'])
   assert.deepEqual(t.AutopilotPausedContext, ['dimension', 'label', 'key', 'bucket_label', 'n', 'wins', 'mean_r', 'ci'])
   assert.deepEqual(t.AutopilotHealth, ['ok', 'last_decision', 'stale', 'downtime', 'text'])
   assert.deepEqual(t.AutopilotDowntime, ['from', 'to'])
   assert.deepEqual(t.AutopilotWeekly, ['week_start', 'week_end', 'trades', 'wins', 'total_r', 'mean_r', 'pnl', 'text', 'generated_at'])
-  assert.deepEqual(t.AutopilotSnapshot, ['account', 'positions', 'history', 'risk', 'autopilot'])
+  assert.deepEqual(t.AutopilotSnapshot, ['account', 'positions', 'history', 'risk', 'autopilot', 'challenges'])
   assert.deepEqual(t.AutopilotWatch, ['symbol', 'why', 'direction?', 'last?'])
   assert.deepEqual(t.AutopilotLast, ['bar_time', 'tf', 'action', 'label'])
   assert.deepEqual(t.AutopilotComparison, [
@@ -210,7 +210,7 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
   assert.deepEqual(t.AutopilotUpdate, [
     'enabled?', 'source?', 'symbols?', 'tf?', 'max_positions?', 'risk_pct?', 'scanner_top?', 'alerts?', 'max_exposure_pct?',
     'max_drawdown_pct?', 'futures_margin_pct?', 'stock_instrument?', 'options_premium_pct?', 'learn_guard?', 'script_ids?',
-    'script_gate?',
+    'script_gate?', 'tfs?', 'lots?', 'lot_max_risk_pct?', 'session_aggressive?', 'per_tf_positions?',
   ])
   assert.match(src, /export type AutopilotStockInstrument = 'auto' \| 'shares' \| 'options'/)
   assert.deepEqual(t.AutopilotBrake, ['limit_pct', 'drawdown_pct', 'active'])
@@ -522,10 +522,15 @@ test('view: honest explanation, the backend note verbatim and the state badge', 
   }
   assert.match(html, /class="badge badge-pos ?">Activa</)
   assert.ok(!/ventaja (probada|demostrada)|rentable/i.test(html), 'no claim of an edge')
+  assert.ok(html.includes('class="dk-how"') && html.includes('¿Cómo funciona?'), 'the explanation is one click away')
+  assert.ok(html.includes('>Pausar</button>'), 'active: the header pauses it')
   const paused = render(M.AutopilotView, { initial: snapshot({ enabled: false }) })
   assert.match(paused, /class="badge badge-muted ?">Pausada</)
   assert.ok(!/class="badge badge-pos ?">Activa</.test(paused))
-  assert.ok(paused.includes('Pausada: no abre posiciones nuevas; las abiertas siguen con su stop y sus objetivos.'))
+  assert.ok(paused.includes('>Activar</button>'), 'paused: the header activates it')
+  assert.ok(paused.includes('En pausa: no abre operaciones nuevas; las abiertas siguen con su stop y sus objetivos.'))
+  const pausedCfg = render(M.AutopilotView, { initial: snapshot({ enabled: false }), section: 'ajustes' })
+  assert.ok(pausedCfg.includes('Pausada: no abre posiciones nuevas; las abiertas siguen con su stop y sus objetivos.'))
   assert.ok(render(M.AutopilotView).includes('Cargando la cuenta de NEXUS…'), 'loading state before the first answer')
 })
 
@@ -540,11 +545,12 @@ test('stats: the winners are "x de n" (no bare percentage) and nothing is conclu
   // the user's account keeps its stats exactly as before
   const mine = render(M.PaperStats, { account: account({ id: 1 }) })
   assert.ok(mine.includes('% acierto') && !mine.includes(' de 7<'))
-  assert.ok(render(M.AutopilotView, { initial: snapshot() }).includes('>3 de 7<'), 'the view uses the tally')
+  assert.ok(render(M.AutopilotView, { initial: snapshot() }).includes('>3 de 7<'), 'the hero uses the tally')
+  assert.ok(render(M.AutopilotView, { initial: snapshot(), section: 'analisis' }).includes('Aún sin evidencia suficiente (n = 7)'), 'and «Análisis» the stats')
 })
 
 test('watching: symbol, why and direction (Largo / Corto) plus the latest scan', () => {
-  const html = render(M.AutopilotView, { initial: snapshot() })
+  const html = render(M.AutopilotView, { initial: snapshot(), section: 'actividad' })
   const card = html.slice(html.indexOf('Qué está vigilando'), html.indexOf('Decisiones recientes'))
   assert.ok(card.includes('Escaneo #812') && card.includes('4 oportunidades TOMAR'), card)
   assert.ok(card.includes('Hasta 10 candidatos del último escaneo · decide en velas de 1h'))
@@ -610,17 +616,21 @@ test('decision log: newest first, time + symbol + text, a tone per kind', () => 
   assert.ok(!rows[3].includes('<button'), 'an entry without a symbol has no chart link')
   assert.deepEqual(Object.keys(M.KIND_INFO).sort(), ['close', 'info', 'open', 'skip'])
   assert.ok(render(M.DecisionLog, { log: [], onOpenChart: noop }).includes('Sin decisiones todavía'))
-  const view = render(M.AutopilotView, { initial: snapshot() })
+  const view = render(M.AutopilotView, { initial: snapshot(), section: 'actividad' })
   assert.ok(view.indexOf('señal COMPRAR y filtro TOMAR') < view.indexOf('Corto descartado'), 'the view keeps the order')
+  const summary = render(M.AutopilotView, { initial: snapshot() })
+  assert.ok(summary.includes('Qué hace ahora') && summary.includes('señal COMPRAR y filtro TOMAR'), 'the summary shows its latest decision')
 })
 
 test('futures show whole contracts (open of total), never the units of the index', () => {
   const fut = position({ id: 51, symbol: 'CME_MINI:M2K1!', qty: 15, qty_open: 10, instrument: {
     kind: 'future', name: 'Micro E-mini Russell 2000', root: 'M2K', multiplier: 5, contracts: 3, margin: 700 } })
-  const html = render(M.AutopilotView, { initial: snapshot({}, { positions: [fut], history: [{ ...fut, id: 52, status: 'closed', qty_open: 0 }] }) })
+  const html = render(M.AutopilotView, { initial: snapshot({}, { positions: [fut], history: [{ ...fut, id: 52, status: 'closed', qty_open: 0 }] }), section: 'operaciones' })
   assert.ok(html.includes('2 de 3 contratos M2K'), 'open positions: contracts left of the total')
   assert.ok(html.includes('3 contratos M2K'), 'history: the contracts traded')
-  const plain = render(M.AutopilotView, { initial: snapshot() })
+  const tile = render(M.AutopilotView, { initial: snapshot({}, { positions: [fut], history: [] }) })
+  assert.ok(tile.includes('>M2K<') && tile.includes('Futuro') && tile.includes('Garantía aprox.'), 'its tile names the future and its margin')
+  const plain = render(M.AutopilotView, { initial: snapshot(), section: 'operaciones' })
   assert.ok(plain.includes('2 de 2') && !/contratos? M2K|\d contratos?</.test(plain), 'shares and crypto keep their units')
 })
 
@@ -629,13 +639,17 @@ test('options show their contract, a call or a put on the stock, and open the st
     strike: 12, expiry: '2026-12-18', sigma: 0.33, delta: 0.47, spot: 12 }
   const put = position({ id: 61, symbol: 'OPT:NYSE:F:20261218:P:12', qty: 200, qty_open: 200, entry_price: 0.5, price: 0.62,
     sl: 0.25, tp1: 0.75, tp2: 1, tp3: 1.25, instrument: inst })
-  const html = render(M.AutopilotView, { initial: snapshot({}, { positions: [put], history: [{ ...put, id: 62, status: 'closed', qty_open: 0 }] }) })
+  const html = render(M.AutopilotView, { initial: snapshot({}, { positions: [put], history: [{ ...put, id: 62, status: 'closed', qty_open: 0 }] }), section: 'operaciones' })
   assert.ok(html.includes('F 12 P 18/12/2026') && html.includes('Put sobre F · teórica'), html)
   assert.ok(html.includes('2 de 2 contratos') && html.includes('Abrir NYSE:F en el gráfico'), 'the chart of its stock')
   assert.ok(!html.includes('OPT:NYSE'), 'the internal symbol is never shown')
   assert.ok(html.includes('>Put<'), 'its side is the right it bought')
-  assert.ok(html.includes('Acciones y fondos') && html.includes('NEXUS elige: acciones, y un put para bajar'), html)
-  assert.ok(html.includes('Prima máxima por operación (%)'), html)
+  const tile = render(M.AutopilotView, { initial: snapshot({}, { positions: [put], history: [] }) })
+  assert.ok(tile.includes('F 12 P 18/12/2026') && tile.includes('Opción') && tile.includes('Prima pagada') && tile.includes('Gana si la acción baja'), 'its tile')
+  assert.ok(!tile.includes('OPT:NYSE:F:20261218:P:12<'), 'the internal symbol is never shown as text')
+  const cfg = render(M.AutopilotView, { initial: snapshot(), section: 'ajustes' })
+  assert.ok(cfg.includes('Acciones y fondos') && cfg.includes('NEXUS elige: acciones, y un put para bajar'), cfg)
+  assert.ok(cfg.includes('Prima máxima por operación (%)'), cfg)
   const st = M.normalizeAutopilot(snapshot()).autopilot
   const d = M.draftFrom(st)
   assert.deepEqual(M.draftChanges({ ...d, stock_instrument: 'options', options_premium_pct: 5 }, d), {
@@ -644,8 +658,8 @@ test('options show their contract, a call or a put on the stock, and open the st
 })
 
 test('positions and history reuse the paper tables; NEXUS is the origin, never "autopilot"', () => {
-  const html = render(M.AutopilotView, { initial: snapshot() })
-  const open = html.slice(html.indexOf('Posiciones abiertas'), html.indexOf('Cómo opera'))
+  const html = render(M.AutopilotView, { initial: snapshot(), section: 'operaciones' })
+  const open = html.slice(html.indexOf('Posiciones abiertas'), html.indexOf('>Historial'))
   assert.ok(open.includes('ETHUSDT') && open.includes('>Cerrar<'), 'closable by hand')
   assert.ok(open.includes('el resultado cuenta en esta cuenta'))
   const hist = html.slice(html.indexOf('>Historial'))
@@ -654,6 +668,20 @@ test('positions and history reuse the paper tables; NEXUS is the origin, never "
   assert.ok(count(open, '>NEXUS<') >= 1 && count(hist, '>NEXUS<') >= 1)
   const empty = render(M.AutopilotView, { initial: snapshot({}, { positions: [], history: [] }) })
   assert.ok(empty.includes('NEXUS abrirá una cuando su señal al cierre de una vela sea COMPRAR o VENDER y el filtro diga TOMAR.'))
+  assert.ok(render(M.AutopilotView, { initial: snapshot({}, { positions: [], history: [] }), section: 'operaciones' }).includes('NEXUS abrirá una cuando'))
+})
+
+test('summary: a tile per open trade (its money, the path from the stop to the target, close / see) and the latest moves', () => {
+  const html = render(M.AutopilotView, { initial: snapshot() })
+  const tiles = html.slice(html.indexOf('Operaciones abiertas'), html.indexOf('Qué hace ahora'))
+  assert.ok(tiles.includes('class="dk-tile"') && tiles.includes('>ETH<') && tiles.includes(' Compra</span>'), tiles)
+  assert.ok(tiles.includes('Monto') && tiles.includes('dk-path-track') && tiles.includes('para el objetivo') && tiles.includes('el stop está a'), tiles)
+  assert.ok(tiles.includes('>Cerrar</button>') && tiles.includes('>Ver</button>'), 'closable and visible on the chart')
+  assert.ok(tiles.includes('Rápidas') && tiles.includes('Medidas') && tiles.includes('Largo plazo'), 'the speed filter')
+  const feed = html.slice(html.indexOf('Últimos movimientos'))
+  assert.ok(feed.includes('Compró ETH') && feed.includes('Cerró ADA'), feed)
+  assert.ok(!/ventaja (probada|demostrada)|rentable|ganancia esperada/i.test(html), 'no promise')
+  assert.ok(html.includes('La validación no encontró ventaja'), 'the hero says it honestly')
 })
 
 // ----------------------------------------------------------------------------- controls

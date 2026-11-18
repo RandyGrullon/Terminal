@@ -96,6 +96,7 @@ class CloseRequest(BaseModel):
     position_id: int | None = None
     symbol: str | None = None
     all: bool = False
+    account_id: int | None = None  # NEXUS automática: a challenge account instead of account 3
 
 
 class PendingOrderRequest(BaseModel):
@@ -456,6 +457,11 @@ class AutopilotRequest(BaseModel):
     learn_guard: bool | None = None  # it learns from its losses (no entries where its recent trades lose with evidence)
     script_ids: list[int] | None = None  # saved PyChart strategies that also give it entries (at most 3; [] = none)
     script_gate: bool | None = None  # their entries also need the gate's TOMAR
+    tfs: list[str] | None = None  # 1..3 timeframes at once (quick / measured / long-term trades); [] or one = one
+    lots: bool | None = None  # size its trades in MT5 lots (steps of 0.01 lot, app.engine.lots)
+    lot_max_risk_pct: float | None = None  # the most a minimum lot (0.01) may risk at its stop, % of equity
+    session_aggressive: bool | None = None  # its aggressive mode during the New York stock session only
+    per_tf_positions: bool | None = None  # one position per market and timeframe (else one per market)
 
 
 @router.get("/api/paper/autopilot")
@@ -480,7 +486,10 @@ async def paper_autopilot_update(req: AutopilotRequest) -> dict:
                                          stock_instrument=req.stock_instrument,
                                          options_premium_pct=req.options_premium_pct,
                                          learn_guard=req.learn_guard, script_ids=req.script_ids,
-                                         script_gate=req.script_gate)
+                                         script_gate=req.script_gate, tfs=req.tfs, lots=req.lots,
+                                         lot_max_risk_pct=req.lot_max_risk_pct,
+                                         session_aggressive=req.session_aggressive,
+                                         per_tf_positions=req.per_tf_positions)
     except (PaperError, ValueError, KeyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc).strip("'\"")) from None
     return clean_json(snap)
@@ -515,10 +524,85 @@ async def paper_autopilot_close(req: CloseRequest) -> dict:
     """The user may close NEXUS's positions by hand (one, or all of them)."""
     paper = _service("paper", "La cuenta demo")
     try:
-        await paper.close_autopilot(req.position_id, bool(req.all))
+        await paper.close_autopilot(req.position_id, bool(req.all),
+                                    account_id=req.account_id if req.account_id is not None else AUTOPILOT_ACCOUNT)
     except PaperError as exc:
         raise _paper_error(exc) from None
     return clean_json(await paper.autopilot_snapshot())
+
+
+class GoalRequest(BaseModel):
+    target_equity: float  # the account's equity to reach (above its current one)
+    until: float | None = None  # deadline, unix seconds (None = no deadline)
+    aggressive: bool = False  # its aggressive mode while the challenge lasts (app.sim.autopilot_goal.AGGRESSIVE)
+    then: str = "normal"  # after it: normal (its saved settings) | pause
+
+
+class GoalStopRequest(BaseModel):
+    close: bool = False  # also close its trades now (its portfolio stays)
+
+
+@router.post("/api/paper/autopilot/goal")
+async def paper_autopilot_goal(req: GoalRequest) -> dict:
+    """Start a challenge for NEXUS's own account: the server closes its trades by itself at the target or the deadline,
+    then goes back to its normal settings (app.sim.autopilot_goal)."""
+    paper = _service("paper", "La cuenta demo")
+    try:
+        return clean_json(await paper.start_goal(req.target_equity, req.until, req.aggressive, req.then))
+    except PaperError as exc:
+        raise _paper_error(exc) from None
+
+
+class ChallengeRequest(BaseModel):
+    initial_balance: float  # its starting balance
+    target_equity: float  # the equity to reach (above the initial balance, at most 100×)
+    until: float | None = None  # deadline, unix seconds (None = none)
+    brake_pct: float | None = None  # loss brake, % below the initial balance (5..95; default 50)
+    name: str | None = None  # default «Reto <initial> → <target>»
+
+
+class ChallengeStopRequest(BaseModel):
+    close: bool = True  # close its trades now (default) or leave them with their stops and targets
+
+
+@router.post("/api/paper/autopilot/challenges")
+async def paper_autopilot_challenge_create(req: ChallengeRequest) -> dict:
+    """A new challenge account traded by NEXUS's brain in the aggressive mode (app.sim.autopilot_challenges)."""
+    paper = _service("paper", "La cuenta demo")
+    try:
+        return clean_json(await paper.create_challenge(req.initial_balance, req.target_equity, req.until,
+                                                       req.brake_pct, req.name))
+    except PaperError as exc:
+        raise _paper_error(exc) from None
+
+
+@router.post("/api/paper/autopilot/challenges/{account_id}/stop")
+async def paper_autopilot_challenge_stop(account_id: int, req: ChallengeStopRequest | None = None) -> dict:
+    paper = _service("paper", "La cuenta demo")
+    try:
+        return clean_json(await paper.stop_challenge(account_id, req.close if req is not None else True))
+    except PaperError as exc:
+        raise _paper_error(exc) from None
+
+
+@router.delete("/api/paper/autopilot/challenges/{account_id}")
+async def paper_autopilot_challenge_delete(account_id: int) -> dict:
+    """Delete a challenge account and its trades (its open trades are closed first)."""
+    paper = _service("paper", "La cuenta demo")
+    try:
+        return clean_json(await paper.delete_challenge(account_id))
+    except PaperError as exc:
+        raise _paper_error(exc) from None
+
+
+@router.post("/api/paper/autopilot/goal/stop")
+async def paper_autopilot_goal_stop(req: GoalStopRequest | None = None) -> dict:
+    """End the running challenge now (its settings go back to normal; `close` also closes its trades)."""
+    paper = _service("paper", "La cuenta demo")
+    try:
+        return clean_json(await paper.stop_goal(bool(req.close) if req is not None else False))
+    except PaperError as exc:
+        raise _paper_error(exc) from None
 
 
 # ----------------------------------------------------------------------------- scanner

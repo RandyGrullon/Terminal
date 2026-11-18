@@ -81,7 +81,7 @@ test('contract: types-broker.ts has one field per line and is re-exported by typ
     return body.split('\n').map((l) => l.trim().match(/^(\w+)(\?)?\s*:/)).filter(Boolean).map((m) => m[1] + (m[2] ?? ''))
   }
   assert.deepEqual(fields('BrokerStatus'), ['enabled', 'provider', 'paper', 'configured', 'connected', 'account', 'error',
-    'last_sync_ms', 'mirror_stocks', 'mirror_crypto', 'entries', 'stats', 'note'])
+    'last_sync_ms', 'mirror_stocks', 'mirror_crypto', 'mirror_perps', 'entries', 'stats', 'note'])
   assert.deepEqual(fields('BrokerAccount'), ['equity', 'cash', 'buying_power', 'status', 'currency'])
   assert.equal(fields('BrokerMirrorEntry').length, 19)
   assert.ok(fields('BrokerStats').includes('slip_entry_bps') && fields('BrokerStats').includes('text'))
@@ -147,4 +147,50 @@ test('settings: the practice-broker group, its keys are secrets, and «Validaci�
   assert.equal(M.FIELD_BY_KEY['broker.alpaca_secret_key'].kind, 'secret')
   assert.ok(M.FIELD_BY_KEY['broker.alpaca_key_id'].link.href.startsWith('https://app.alpaca.markets/paper'))
   assert.equal(M.GROUPS[M.GROUPS.length - 1].title, 'Validación')
+})
+
+test('binance testnet: its routes, its own texts, «Binance» on the fills and never real money', async () => {
+  const realFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url, init = {}) => {
+    seen.push({ url: new URL(String(url), 'http://localhost'), method: init.method ?? 'GET' })
+    return new Response(JSON.stringify(status({ provider: 'binance_testnet' })), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+  try {
+    await M.api.brokerBinance.status()
+    await M.api.brokerBinance.status(true)
+    await M.api.brokerBinance.sync()
+  } finally {
+    globalThis.fetch = realFetch
+  }
+  assert.deepEqual(seen.map((s) => [s.method, s.url.pathname, s.url.search]), [
+    ['GET', '/api/broker/binance/status', ''],
+    ['GET', '/api/broker/binance/status', '?refresh=true'],
+    ['POST', '/api/broker/binance/sync', ''],
+  ])
+  const note = 'Testnet de Binance (práctica): órdenes reales en un exchange de pruebas con fondos de prueba, nunca dinero real.'
+  const off = render({ venue: 'binance', status: M.normalizeBroker(status({ provider: 'binance_testnet', enabled: false, connected: false, note,
+    account: null, entries: [] })) })
+  assert.ok(off.includes('Espejo en el testnet de Binance (práctica)') && off.includes('Demo Trading de futuros') && off.includes('Nunca usa dinero real'), off)
+  assert.ok(!off.includes('Alpaca'), off)
+  const perp = entry({ pos_id: 11, symbol: 'BINANCE:BTCUSDT.P', alpaca_symbol: 'BTCUSDT', side: 'short', status_label: 'Abierta en Binance Testnet',
+    sim_entry: 50000, fill_entry: 49990, slip_entry_bps: 2 })
+  const on = render({ venue: 'binance', status: M.normalizeBroker(status({ provider: 'binance_testnet', mirror_perps: true, entries: [perp],
+    note: 'Testnet de Binance (práctica): fondos de prueba, nunca dinero real.',
+    account: { equity: 15000.5, cash: 9000, buying_power: 14000.25, status: 'ACTIVE', currency: 'USDT' } })) })
+  assert.ok(on.includes('Entrada NEXUS 50.000,0 · Binance 49.990,0 (+2,0 pb)') && on.includes('15.000,50 USDT') && !on.includes('$ USDT') && on.includes('Abierta en Binance Testnet'), on)
+  assert.equal(M.normalizeBroker(status({ mirror_perps: true })).mirror_perps, true)
+  assert.equal(M.normalizeBroker(status()).mirror_perps, false)
+})
+
+test('settings: the Binance testnet group, four secret keys with their testnet links', () => {
+  const group = M.GROUPS.find((g) => g.id === 'broker_binance')
+  assert.ok(group && group.title === 'Testnet de Binance (práctica)' && group.description.includes('nunca dinero real'))
+  assert.deepEqual(group.fields.map((f) => f.key), ['broker.binance_enabled', 'broker.binance_spot_key', 'broker.binance_spot_secret',
+    'broker.binance_futures_key', 'broker.binance_futures_secret', 'broker.binance_mirror_spot', 'broker.binance_mirror_perps'])
+  for (const key of ['broker.binance_spot_key', 'broker.binance_spot_secret', 'broker.binance_futures_key', 'broker.binance_futures_secret']) {
+    assert.equal(M.FIELD_BY_KEY[key].kind, 'secret', key)
+  }
+  assert.equal(M.FIELD_BY_KEY['broker.binance_spot_key'].link.href, 'https://testnet.binance.vision/')
+  assert.equal(M.FIELD_BY_KEY['broker.binance_futures_key'].link.href, 'https://demo.binance.com/en/my/settings/api-management')
 })

@@ -4,6 +4,7 @@ import type { Candle, Quote, Timeframe } from './types'
 /** Where a live price comes from: an exchange (binance…), an API-key provider, TradingView or the local cache. */
 export type QuoteSource =
   | 'binance'
+  | 'binance_um'
   | 'okx'
   | 'coinbase'
   | 'kraken'

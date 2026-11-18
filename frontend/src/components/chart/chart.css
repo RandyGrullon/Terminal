@@ -186,6 +186,31 @@
   position: absolute;
   inset: 0;
 }
+/* «Ver operación»: the strip above the chart (TradeFocusCard) */
+.chart-trade {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 10px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--info);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.chart-trade.row {
+  flex-direction: row;
+  align-items: center;
+}
+.chart-trade-head {
+  align-items: center;
+}
+.chart-trade-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
 .chart-overlay-box {
   display: flex;
   flex-direction: column;

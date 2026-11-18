@@ -513,3 +513,31 @@
   color: var(--warn);
   background: var(--warn-bg);
 }
+
+/* NEXUS automática's trade cards beside the toasts (TradeAlerts) */
+.trade-alert {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  border-left: 4px solid var(--accent);
+  box-shadow: var(--shadow);
+  font-size: 12.5px;
+}
+.trade-alert.pos {
+  border-left-color: var(--pos);
+}
+.trade-alert.neg {
+  border-left-color: var(--neg);
+}
+.trade-alert-head {
+  align-items: center;
+}
+.trade-alert-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}

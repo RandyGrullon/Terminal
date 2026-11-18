@@ -1,6 +1,8 @@
 // Main NEXUS chart (lightweight-charts v5).
 // Pane 0: candles, volume overlay, NEXUS EMAs, markers (signals / rejected), historical "hasta aquí" SL/TP step
-// lines, open-position (or proposed entry) price lines, the prediction cone and overlay indicators.
+// lines, open-position (or proposed entry) price lines, the prediction cone and overlay indicators, plus «Ver
+// operación»: a demo-account position with its entry / exit markers, its levels, the path it followed and two dashed
+// projections from the last candle to its next target and to its stop (lib/tradeView).
 // Optional pane: NEXUS score + probability. Every non-overlay indicator gets its own pane.
 // Series live in refs; data updates never recreate the chart. Live candles arrive through the imperative handle.
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -14,6 +16,7 @@ import {
   LineStyle,
   MarkerLayer,
   TradeLevelsLayer,
+  TradeViewLayer,
   addCandles,
   addLine,
   addSeriesForOutput,
@@ -28,11 +31,13 @@ import {
   toLineData,
   toVolumeData,
   trimPanes,
+  tradeViewLevels,
   ts,
   useChart,
   type LevelLine,
 } from '../../lib/chart'
-import { priceDecimals } from '../../lib/format'
+import { fmtPrice, fmtR, priceDecimals } from '../../lib/format'
+import { PROJECTION_BARS, barAt, barSpacing, projection, type TradeView } from '../../lib/tradeView'
 import ChartLegend from './ChartLegend'
 import MarkerTooltip, { type TooltipState } from './MarkerTooltip'
 import {
@@ -82,6 +87,8 @@ interface Props {
   toggles: ChartToggles
   /** Levels of the idea checked in "¿Tomo esta operación?" (drawn dotted). */
   preview: GateResult | null
+  /** «Ver operación»: a demo-account position on this market (null: none). */
+  trade?: TradeView | null
   entryThreshold: number
   onEditIndicator: (uid: string) => void
   onRemoveIndicator: (uid: string) => void
@@ -100,6 +107,7 @@ interface BaseSeries {
   trade: TradeLevelsLayer
   posLines: LevelLines
   previewLines: LevelLines
+  tradeView: TradeViewLayer
   cone: ConeLayer
 }
 
@@ -173,6 +181,7 @@ function removeStructure(chart: IChartApi, s: Structure): void {
 
 const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props, ref) {
   const { viewKey, tf, candles, nexus, indicators, toggles, preview, entryThreshold } = props
+  const trade = props.trade ?? null
   const { ref: boxRef, chart } = useChart({ timeScale: timeScaleFor(tf) })
   const baseRef = useRef<BaseSeries | null>(null)
   const structRef = useRef<Structure | null>(null)
@@ -250,6 +259,7 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
       const emaSlow = addLine(chart, { color: COLORS.purple, width: 1 })
       const emaFast = addLine(chart, { color: COLORS.accent, width: 1 })
       const trade = new TradeLevelsLayer(chart, 0)
+      const tradeView = new TradeViewLayer(chart, candleSeries, 0)
       const cone = new ConeLayer(chart, 0)
       base = {
         candles: candleSeries,
@@ -261,6 +271,7 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
         trade,
         posLines: new LevelLines(candleSeries),
         previewLines: new LevelLines(candleSeries),
+        tradeView,
         cone,
       }
     } catch (err) {
@@ -385,9 +396,43 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
   }, [chart, bars, tf, toggles.ema, guard])
 
   // ------------------------------------------------------------------ markers
+  const candleTimes = useMemo(() => cleanCandles(candles, tf).map((c) => c.time), [candles, tf])
+  const tradeMarkers = useMemo<ChartMarker[]>(() => {
+    if (!trade) return []
+    const out: ChartMarker[] = []
+    const long = trade.side === 'long'
+    const entryBar = barAt(candleTimes, trade.entryTime)
+    if (entryBar !== null) {
+      out.push({
+        time: entryBar,
+        kind: 'TRADE_ENTRY',
+        position: long ? 'belowBar' : 'aboveBar',
+        shape: long ? 'arrowUp' : 'arrowDown',
+        color: COLORS.info,
+        text: `Entrada ${long ? 'largo' : 'corto'} ${fmtPrice(trade.entryPrice)}`,
+        tooltip: 'Aquí abrió la operación (cuenta demo, simulada).',
+        price: trade.entryPrice,
+      })
+    }
+    const exitBar = trade.exitTime !== null ? barAt(candleTimes, trade.exitTime) : null
+    if (exitBar !== null && trade.exitPrice !== null) {
+      const won = (trade.rMultiple ?? 0) >= 0
+      out.push({
+        time: exitBar,
+        kind: 'TRADE_EXIT',
+        position: long ? 'aboveBar' : 'belowBar',
+        shape: 'circle',
+        color: won ? COLORS.pos : COLORS.neg,
+        text: `Salida ${fmtPrice(trade.exitPrice)}${trade.rMultiple !== null ? ` · ${fmtR(trade.rMultiple)}` : ''}`,
+        tooltip: trade.exitLabel ? `Motivo: ${trade.exitLabel}` : undefined,
+        price: trade.exitPrice,
+      })
+    }
+    return out
+  }, [trade, candleTimes])
   const visibleMarkers = useMemo(
-    () => (markers ?? []).filter((m) => (isRejectedMarker(m) ? toggles.rejected : toggles.signals)),
-    [markers, toggles.rejected, toggles.signals],
+    () => [...(markers ?? []).filter((m) => (isRejectedMarker(m) ? toggles.rejected : toggles.signals)), ...tradeMarkers],
+    [markers, toggles.rejected, toggles.signals, tradeMarkers],
   )
   useEffect(() => {
     const b = baseRef.current
@@ -417,12 +462,13 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
     const b = baseRef.current
     if (!chart || !b) return
     guard('niveles de la posición', () => {
-      if (!toggles.levels) b.posLines.clear()
+      // a demo trade on screen («Ver operación») draws its own levels: NEXUS's would repeat them
+      if (!toggles.levels || trade) b.posLines.clear()
       else if (position) b.posLines.set(positionLevels(position))
       else if (proposal) b.posLines.set(proposalLevels(proposal))
       else b.posLines.clear()
     })
-  }, [chart, position, proposal, toggles.levels, guard])
+  }, [chart, position, proposal, toggles.levels, trade, guard])
 
   // ------------------------------------------------------------------ idea checked by the user
   useEffect(() => {
@@ -433,6 +479,55 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
       else b.previewLines.clear()
     })
   }, [chart, preview, guard])
+
+  // ------------------------------------------------------------------ «Ver operación»
+  const tradeFramedRef = useRef<string | null>(null)
+  useEffect(() => {
+    const b = baseRef.current
+    if (!chart || !b) return
+    guard('operación', () => {
+      if (!trade || candleTimes.length === 0) {
+        b.tradeView.clear()
+        return
+      }
+      const arr = candleArrRef.current.length ? candleArrRef.current : cleanCandles(candles, tf)
+      const lastCandle = arr.length ? arr[arr.length - 1] : null
+      const entryBar = barAt(candleTimes, trade.entryTime)
+      const endBar = trade.open ? (lastCandle?.time ?? null) : trade.exitTime !== null ? barAt(candleTimes, trade.exitTime) : null
+      const endPrice = trade.open ? (lastCandle?.close ?? null) : trade.exitPrice
+      const path =
+        entryBar !== null && endBar !== null && endPrice !== null
+          ? [{ time: entryBar, value: trade.entryPrice }, { time: endBar, value: endPrice }]
+          : []
+      const s = trade.side === 'long' ? 1 : -1
+      const winning = endPrice !== null && s * (endPrice - trade.entryPrice) >= 0
+      const spacing = barSpacing(candleTimes)
+      const proj = lastCandle && spacing ? projection(trade, { time: lastCandle.time, price: lastCandle.close }, spacing) : null
+      b.tradeView.set(
+        {
+          levels: tradeViewLevels(trade),
+          path,
+          pathColor: winning ? COLORS.pos : COLORS.neg,
+          toTarget: proj?.target ?? null,
+          toStop: proj?.stop ?? null,
+        },
+        tf,
+      )
+      // frame it once per trade: from a little before its entry to the end of the projection
+      const key = `${trade.id}|${viewKey}`
+      if (tradeFramedRef.current !== key && entryBar !== null) {
+        tradeFramedRef.current = key
+        const scale = chart.timeScale()
+        const from = scale.timeToIndex(ts(entryBar, tf), true)
+        const to = lastCandle ? scale.timeToIndex(ts(lastCandle.time, tf), true) : null
+        if (from !== null && to !== null) {
+          const pad = Math.max(10, Math.round((to - from) * 0.15))
+          scale.setVisibleLogicalRange({ from: from - pad, to: to + (trade.open ? PROJECTION_BARS + 4 : pad) })
+          userMovedRef.current = true
+        }
+      }
+    })
+  }, [chart, trade, candles, candleTimes, tf, viewKey, guard])
 
   // ------------------------------------------------------------------ prediction cone
   const anchorTime = current?.time

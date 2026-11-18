@@ -43,7 +43,7 @@ def test_the_keys_of_a_decision_match_the_journal_groups():
     keys = J.context_keys(regime="trend_up", ts=fomc.ny_time("2025-01-15", 8, 50), gate_score=81, bet="short",
                           symbol="NASDAQ:AAPL")
     assert keys == {"regime": "trend_up", "session": "nueva_york", "news": "cerca", "gate": "80", "side": "short",
-                    "market": "stock", "source": "nexus"}
+                    "market": "stock", "source": "nexus", "tf": None}
     script = J.context_keys(regime=None, ts=fomc.ny_time("2025-01-15", 8, 50), gate_score=None, bet="long",
                             symbol=SYM, source="script:7:Cruce de EMAs")
     assert script["source"] == "script:7:Cruce de EMAs" and J.source_label(script["source"]) == "Estrategia «Cruce de EMAs»"
@@ -101,3 +101,18 @@ def test_learn_switch_from_the_api_and_the_terminal(api_client):
     text = "\n".join(line["text"] for line in res["lines"])
     assert "todavía no hay ningún contexto donde pierda con evidencia fuerte" in text
     assert api_client.post("/api/terminal", json={"text": "autopilot aprender quizas"}).json()["ok"] is False
+
+
+def test_a_losing_timeframe_is_paused_on_its_own():
+    """«Mixed» timeframes: it stops the one whose trades lose with strong evidence and keeps the others."""
+    fast = [{**_trade(k, -1.0, regime="range"), "tf": "5m"} for k in range(34)]
+    slow = [{**_trade(k, 1.1), "tf": "1h"} for k in range(34)]
+    pauses = J.losing_contexts(fast + slow, seed=1)
+    keys = {(p["dimension"], p["key"]) for p in pauses}
+    assert ("tf", "5m") in keys and ("tf", "1h") not in keys
+    hit = next(p for p in pauses if p["dimension"] == "tf")
+    assert (hit["label"], hit["bucket_label"], hit["n"], hit["wins"]) == ("Temporalidad", "5m (rápida)", 34, 0)
+    # the decision about to open on 5m carries that key, so its trader skips it
+    keys_now = J.context_keys(regime="trend_up", ts=fomc.ny_time("2026-07-01", 10, 0), gate_score=78, bet="long",
+                              symbol=SYM, tf="5m")
+    assert keys_now["tf"] == "5m" and J.tf_label("4h") == "4h (largo plazo)" and J._tf_key(None) is None

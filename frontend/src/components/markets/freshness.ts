@@ -19,6 +19,7 @@ export const KEYED_LIVE_MAX_S = 150
 
 export const SOURCE_LABEL: Record<string, string> = {
   binance: 'Binance',
+  binance_um: 'Binance Futuros',
   okx: 'OKX',
   coinbase: 'Coinbase',
   kraken: 'Kraken',
@@ -29,7 +30,7 @@ export const SOURCE_LABEL: Record<string, string> = {
   tradingview: 'TradingView',
   cache: 'caché local',
 }
-const EXCHANGES = new Set(['binance', 'okx', 'coinbase', 'kraken', 'kucoin'])
+const EXCHANGES = new Set(['binance', 'binance_um', 'okx', 'coinbase', 'kraken', 'kucoin'])
 const KEYED = new Set(['twelvedata', 'polygon', 'alphavantage'])
 
 export type FreshnessKind = 'realtime' | 'recent' | 'delayed' | 'closed' | 'stale' | 'synthetic' | 'unknown'

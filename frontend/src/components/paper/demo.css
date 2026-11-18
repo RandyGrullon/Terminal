@@ -1,0 +1,1008 @@
+/* Friendly demo page («Cuenta demo», components/paper/DemoKit.tsx): account switch, hero, section tabs, trade and
+   portfolio tiles, activity feed. Loaded with the demo page after styles.css; every class here is dk-* so nothing
+   global is overridden. */
+
+/* ----------------------------------------------------------------------------- account switch */
+.dk-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 260px));
+  gap: 10px;
+}
+.dk-switch-btn {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  transition: border-color 0.15s, background 0.15s;
+  min-width: 0;
+}
+.dk-switch-btn:hover {
+  border-color: var(--border-2);
+  background: var(--panel-2);
+}
+.dk-switch-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.dk-switch-btn.active {
+  border-color: var(--accent);
+  background: linear-gradient(135deg, rgba(47, 107, 255, 0.18), rgba(47, 107, 255, 0.04));
+}
+.dk-switch-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--panel-3);
+  color: var(--text-2);
+}
+.dk-switch-btn.active .dk-switch-icon {
+  background: var(--accent);
+  color: #fff;
+}
+.dk-switch-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.dk-switch-text b {
+  font-size: 14px;
+  color: var(--text);
+}
+.dk-switch-text span {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dk-switch-note {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+@media (max-width: 560px) {
+  .dk-switch {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .dk-switch-btn {
+    padding: 8px 10px;
+    gap: 8px;
+  }
+  .dk-switch-icon {
+    width: 28px;
+    height: 28px;
+  }
+  .dk-switch-text b {
+    font-size: 13px;
+    line-height: 1.25;
+  }
+  .dk-switch-text span {
+    display: none;
+  }
+}
+
+/* ----------------------------------------------------------------------------- page header */
+.dk-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+}
+.dk-head h1 {
+  margin: 0;
+  font-size: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dk-head .sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+.dk-head-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.dk-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+.dk-live i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.dk-live.on {
+  color: var(--pos);
+  background: var(--pos-bg);
+}
+.dk-live.on i {
+  animation: dk-pulse 1.6s ease-in-out infinite;
+}
+.dk-live.off {
+  color: var(--muted);
+  background: var(--panel-3);
+}
+@keyframes dk-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(22, 199, 132, 0.6);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(22, 199, 132, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dk-live.on i {
+    animation: none;
+  }
+}
+
+/* «¿Cómo funciona?» */
+.dk-how {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0 12px;
+}
+.dk-how > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 0;
+  font-size: 12.5px;
+  color: var(--text-2);
+  user-select: none;
+}
+.dk-how > summary::-webkit-details-marker {
+  display: none;
+}
+.dk-how > summary b {
+  color: var(--accent-2);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.dk-how[open] > summary {
+  border-bottom: 1px solid var(--border);
+}
+.dk-how-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 12px;
+}
+
+/* ----------------------------------------------------------------------------- hero */
+.dk-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(240px, 1fr);
+  gap: 16px 24px;
+  padding: 18px 20px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background:
+    radial-gradient(120% 140% at 0% 0%, rgba(47, 107, 255, 0.16), transparent 55%),
+    linear-gradient(180deg, var(--panel-2), var(--panel));
+}
+.dk-hero.pos {
+  background:
+    radial-gradient(120% 140% at 0% 0%, rgba(22, 199, 132, 0.14), transparent 55%),
+    linear-gradient(180deg, var(--panel-2), var(--panel));
+}
+.dk-hero.neg {
+  background:
+    radial-gradient(120% 140% at 0% 0%, rgba(234, 57, 67, 0.13), transparent 55%),
+    linear-gradient(180deg, var(--panel-2), var(--panel));
+}
+.dk-hero-main,
+.dk-hero-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.dk-hero-label {
+  font-size: 11.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.dk-hero-value {
+  font-size: 38px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.dk-hero-change {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 13.5px;
+}
+.dk-hero-change .muted {
+  font-size: 12px;
+}
+.dk-hero-foot {
+  grid-column: 1 / -1;
+  font-size: 11.5px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dk-figs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+.dk-fig {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  min-width: 0;
+}
+.dk-fig-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+.dk-fig-value {
+  font-family: var(--mono);
+  font-size: 15px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.dk-fig-value.pos {
+  color: var(--pos);
+}
+.dk-fig-value.neg {
+  color: var(--neg);
+}
+.dk-fig-hint {
+  font-size: 10.5px;
+  color: var(--muted);
+  font-family: var(--font);
+  font-weight: 400;
+}
+.dk-spark {
+  width: 100%;
+  height: 70px;
+  display: block;
+}
+.dk-spark-zero {
+  stroke: var(--border-2);
+  stroke-dasharray: 3 4;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.dk-spark-line {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.dk-spark-area {
+  fill: var(--muted);
+  opacity: 0.12;
+}
+.dk-spark.pos .dk-spark-line {
+  stroke: var(--pos);
+}
+.dk-spark.pos .dk-spark-area {
+  fill: var(--pos);
+}
+.dk-spark.neg .dk-spark-line {
+  stroke: var(--neg);
+}
+.dk-spark.neg .dk-spark-area {
+  fill: var(--neg);
+}
+.dk-spark-empty {
+  height: 70px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  border: 1px dashed var(--border-2);
+  border-radius: 10px;
+  padding: 0 12px;
+}
+@media (max-width: 860px) {
+  .dk-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .dk-hero-value {
+    font-size: 32px;
+  }
+}
+@media (max-width: 560px) {
+  .dk-hero {
+    padding: 14px;
+    border-radius: 12px;
+  }
+  .dk-figs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .dk-fig {
+    padding: 7px 8px;
+  }
+  .dk-fig-value {
+    font-size: 14px;
+  }
+  .dk-head-actions {
+    margin-left: 0;
+  }
+  .dk-how > summary b {
+    display: none;
+  }
+  .dk-speeds {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .dk-speed {
+    padding: 7px 9px;
+  }
+}
+
+/* ----------------------------------------------------------------------------- section tabs */
+.dk-sections {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.dk-section {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-2);
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+.dk-section:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+.dk-section:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.dk-section.active {
+  background: var(--accent-bg);
+  color: var(--accent-2);
+  font-weight: 600;
+}
+.dk-count {
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--panel-3);
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+.dk-section.active .dk-count {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* ----------------------------------------------------------------------------- blocks and layout */
+.dk-block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.dk-block-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.dk-block-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.dk-block-sub {
+  font-size: 12px;
+  color: var(--muted);
+  max-width: 900px;
+  line-height: 1.45;
+}
+.dk-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 20px;
+  align-items: start;
+}
+.dk-overview-main,
+.dk-overview-side {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+@media (max-width: 1100px) {
+  .dk-overview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.dk-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.dk-cols {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  align-items: start;
+}
+.dk-cols > .dk-stack {
+  min-width: 0;
+}
+.dk-empty {
+  padding: 22px 16px;
+  border: 1px dashed var(--border-2);
+  border-radius: 12px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.dk-empty b {
+  display: block;
+  color: var(--text);
+  font-size: 13.5px;
+  margin-bottom: 2px;
+}
+
+/* ----------------------------------------------------------------------------- speed filter (NEXUS automática) */
+.dk-speeds {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+.dk-speed {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  min-width: 0;
+}
+.dk-speed:hover {
+  border-color: var(--border-2);
+}
+.dk-speed:focus-visible {
+  outline: 2px solid var(--accent);
+}
+.dk-speed.active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.dk-speed b {
+  font-size: 13px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.dk-speed span {
+  font-size: 11px;
+  color: var(--muted);
+}
+.dk-speed .mono {
+  font-size: 12px;
+}
+
+/* ----------------------------------------------------------------------------- avatars and chips */
+.dk-avatar {
+  --dk-c: var(--accent-2);
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--dk-c);
+  background: color-mix(in srgb, var(--dk-c) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--dk-c) 45%, transparent);
+}
+.dk-avatar.dim {
+  opacity: 0.55;
+}
+.dk-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--panel-3);
+  color: var(--text-2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.dk-dir {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.dk-dir.pos {
+  color: var(--pos);
+  background: var(--pos-bg);
+}
+.dk-dir.neg {
+  color: var(--neg);
+  background: var(--neg-bg);
+}
+
+/* ----------------------------------------------------------------------------- trade tiles */
+.dk-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  gap: 12px;
+}
+.dk-tile,
+.dk-hold {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  min-width: 0;
+  transition: border-color 0.15s;
+}
+.dk-tile:hover,
+.dk-hold:hover {
+  border-color: var(--border-2);
+}
+.dk-tile.alert {
+  border-color: rgba(234, 57, 67, 0.6);
+  box-shadow: inset 3px 0 0 var(--neg);
+}
+.dk-tile-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.dk-tile-name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.dk-tile-name b {
+  font-size: 14px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dk-tile-name span {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dk-tile-pnl {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.dk-tile-pnl b {
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 700;
+}
+.dk-pct {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--panel-3);
+}
+.dk-pct.pos {
+  background: var(--pos-bg);
+}
+.dk-pct.neg {
+  background: var(--neg-bg);
+}
+.dk-tile-money {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.dk-tile-advice {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: var(--neg-bg);
+  color: #ffb3b8;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.dk-tile-advice svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--neg);
+}
+.dk-tile-foot {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+/* path from the stop to the next target */
+.dk-path {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dk-path-track {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(234, 57, 67, 0.28), var(--panel-3) 45%, var(--panel-3) 55%, rgba(22, 199, 132, 0.28));
+}
+.dk-path-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 999px;
+}
+.dk-path-fill.pos {
+  background: var(--pos);
+  opacity: 0.55;
+}
+.dk-path-fill.neg {
+  background: var(--neg);
+  opacity: 0.55;
+}
+.dk-path-entry {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 14px;
+  margin-left: -1px;
+  background: var(--text-2);
+  border-radius: 1px;
+}
+.dk-path-dot {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  border: 2px solid var(--panel);
+  box-shadow: 0 0 0 1px currentColor;
+}
+.dk-path-dot.pos {
+  background: var(--pos);
+  color: var(--pos);
+}
+.dk-path-dot.neg {
+  background: var(--neg);
+  color: var(--neg);
+}
+.dk-path-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10.5px;
+  font-family: var(--mono);
+}
+.dk-path-note {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* ----------------------------------------------------------------------------- portfolio */
+.dk-port-sum {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(110px, 160px)) minmax(200px, 1fr);
+  gap: 8px;
+  align-items: stretch;
+}
+@media (max-width: 860px) {
+  .dk-port-sum {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .dk-alloc {
+    grid-column: 1 / -1;
+  }
+}
+.dk-alloc {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  min-width: 0;
+}
+.dk-alloc-bar {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  gap: 2px;
+  background: var(--panel-3);
+}
+.dk-alloc-bar span {
+  display: block;
+  min-width: 3px;
+}
+.dk-alloc-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 11px;
+  color: var(--text-2);
+}
+.dk-alloc-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.dk-alloc-legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+.dk-port-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 10px;
+}
+.dk-hold.waiting {
+  border-style: dashed;
+  background: transparent;
+}
+.dk-hold-gain {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.dk-hold-gain b {
+  font-size: 13px;
+}
+.dk-hold-value {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.dk-hold-value b {
+  font-size: 18px;
+  color: var(--text);
+}
+.dk-hold-line {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.dk-hold-wait {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.dk-hold-wait svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+/* ----------------------------------------------------------------------------- activity feed */
+.dk-feed {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+.dk-feed-row {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+.dk-feed-row:hover {
+  background: var(--panel-2);
+}
+.dk-feed-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.dk-feed-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--panel-3);
+  color: var(--text-2);
+}
+.dk-feed-icon.pos {
+  background: var(--pos-bg);
+  color: var(--pos);
+}
+.dk-feed-icon.neg {
+  background: var(--neg-bg);
+  color: var(--neg);
+}
+.dk-feed-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.dk-feed-text b {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dk-feed-text span {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dk-feed-side {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  font-size: 11px;
+  color: var(--muted);
+}
+.dk-feed-side b {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* A trade's plan (NEXUS automática): its target or why it has none, and why it opened */
+.dk-tile-plan {
+  display: grid;
+  gap: 2px;
+  line-height: 1.4;
+  color: var(--text-2);
+}
+.dk-tile-plan b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* A trade opens its detail on click (TradeDetailModal) */
+.dk-clickable,
+.pp-row-click {
+  cursor: pointer;
+}
+.dk-clickable:hover {
+  border-color: var(--accent);
+}
+.pp-row-click:hover > td {
+  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+}
+.dk-clickable:focus-visible,
+.pp-row-click:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.td-body {
+  display: grid;
+  gap: 12px;
+}
+.td-section h4 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.td-section p {
+  margin: 0;
+  line-height: 1.45;
+}
+.td-params {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.td-params th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-2);
+  padding: 3px 12px 3px 0;
+  width: 44%;
+  vertical-align: top;
+}
+.td-params td {
+  padding: 3px 0;
+}

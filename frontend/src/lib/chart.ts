@@ -31,6 +31,7 @@ import {
   type WhitespaceData,
 } from 'lightweight-charts'
 import type { Candle, ChartMarker, ConePoint, IndicatorOutput, NexusBars, PositionState } from '../api/types'
+import type { TradeView } from './tradeView'
 
 export { LineStyle, LineType }
 
@@ -504,6 +505,69 @@ export class ConeLayer {
         /* chart already removed */
       }
     }
+  }
+}
+
+/** «Ver operación»: price lines of a demo-account position (its entry, stop, targets and dynamic stop, or its exit
+ *  once closed). */
+export function tradeViewLevels(t: TradeView): LevelLine[] {
+  const side = t.side === 'long' ? 'LARGO' : 'CORTO'
+  const entry: LevelLine = { price: t.entryPrice, color: COLORS.info, title: `ENTRADA ${side}`, style: LineStyle.Solid, width: 2 }
+  if (!t.open) {
+    const won = t.exitPrice !== null && (t.side === 'long' ? t.exitPrice >= t.entryPrice : t.exitPrice <= t.entryPrice)
+    return [entry, { price: t.exitPrice, color: won ? COLORS.pos : COLORS.neg, title: 'SALIDA', style: LineStyle.Solid, width: 2 }]
+  }
+  const hit = (n: number) => (t.tpHits >= n ? ' ✓' : '')
+  return [
+    entry,
+    { price: t.sl, color: COLORS.neg, title: 'SL · HASTA AQUÍ', style: LineStyle.Solid, width: 2 },
+    { price: t.tps[0], color: COLORS.tp1, title: `TP1${hit(1)}` },
+    { price: t.tps[1], color: COLORS.tp2, title: `TP2${hit(2)}` },
+    { price: t.tps[2], color: COLORS.tp3, title: `TP3${hit(3)}` },
+    ...(t.trail !== null ? [{ price: t.trail, color: COLORS.warn, title: 'STOP DINÁMICO', style: LineStyle.Dotted }] : []),
+  ]
+}
+
+export interface TradeDrawing {
+  levels: LevelLine[]
+  /** Entry → last candle (open) or → exit (closed); times are bar open times. */
+  path: { time: number; value: number }[]
+  pathColor: string
+  /** Last candle → next target / → stop, PROJECTION_BARS ahead (open trades only). */
+  toTarget: { time: number; value: number }[] | null
+  toStop: { time: number; value: number }[] | null
+}
+
+/** «Ver operación» on the chart: price lines, the path followed and the two dashed projections (target / stop). */
+export class TradeViewLayer {
+  private path: ISeriesApi<'Line'>
+  private toTarget: ISeriesApi<'Line'>
+  private toStop: ISeriesApi<'Line'>
+  private lines: LevelLines
+  constructor(
+    private chart: IChartApi,
+    candles: ISeriesApi<SeriesType>,
+    pane = 0,
+  ) {
+    this.path = addLine(chart, { color: COLORS.info, width: 2, pane })
+    this.toTarget = addLine(chart, { color: COLORS.pos, style: LineStyle.Dashed, width: 2, pane })
+    this.toStop = addLine(chart, { color: COLORS.neg, style: LineStyle.Dashed, width: 2, pane })
+    this.lines = new LevelLines(candles)
+  }
+  set(d: TradeDrawing, tf: ChartTf): void {
+    if (isChartRemoved(this.chart)) return
+    const pts = (list: { time: number; value: number }[] | null) =>
+      (list ?? []).filter((p, i, all) => i === 0 || p.time > all[i - 1].time).map((p) => ({ time: ts(p.time, tf), value: p.value }))
+    this.lines.set(d.levels)
+    this.path.applyOptions({ color: d.pathColor })
+    this.path.setData(pts(d.path))
+    this.toTarget.setData(pts(d.toTarget))
+    this.toStop.setData(pts(d.toStop))
+  }
+  clear(): void {
+    this.lines.clear()
+    if (isChartRemoved(this.chart)) return
+    for (const s of [this.path, this.toTarget, this.toStop]) s.setData([])
   }
 }
 

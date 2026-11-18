@@ -581,7 +581,8 @@ _AP_KIND = {"open": ("Abre", "success"), "close": ("Cierra", "info"), "skip": ("
 # --instrumento: how it trades stocks and funds (autopilot.stock_instrument)
 _AP_INSTRUMENTS = {"auto": "auto", "nexus": "auto", "acciones": "shares", "shares": "shares", "opciones": "options",
                    "options": "options"}
-AUTOPILOT_USAGE = ("autopilot [on|off] [lista <símbolos…> | escaner [N] | ambos [N]] [--tf 1h] [--max 5] [--risk 1] "
+AUTOPILOT_USAGE = ("autopilot [on|off] [lista <símbolos…> | escaner [N] | ambos [N]] [--tf 1h | --tf 5m,1h,4h] "
+                   "[--max 5] [--risk 1] "
                    "[--top 10] [--expo 100] [--freno 20] [--margen 50] [--instrumento auto|acciones|opciones] "
                    "[--prima 10] [--estrategias <id,…>|no] [--filtro-estrategias on|off] · "
                    "autopilot pos | log | azar | diario | semana | aprender on|off | avisos on|off | "
@@ -929,7 +930,11 @@ async def _autopilot(ctx: CommandContext) -> None:
         else:
             ctx.fail(f"No entiendo «{rest[0]}». Uso: {AUTOPILOT_USAGE}")
     if ctx.flag("tf") is not None:
-        update["tf"] = _tf(ctx, str(ctx.flag("tf")))
+        parts = [t for t in str(ctx.flag("tf")).replace(";", ",").split(",") if t.strip()]
+        if len(parts) > 1:  # several at once: quick, measured and long-term trades
+            update["tfs"] = [_tf(ctx, t.strip()) for t in parts]
+        else:
+            update["tf"] = _tf(ctx, str(ctx.flag("tf")))
     for flag, key, what, zero in (("max", "max_positions", "el máximo de posiciones", False),
                                   ("risk", "risk_pct", "el riesgo por operación", False),
                                   ("top", "scanner_top", "el número de candidatos del escáner", False),

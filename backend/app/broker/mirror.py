@@ -29,7 +29,8 @@ from collections import deque
 from typing import Any, Awaitable, Callable
 
 from app import config
-from app.broker.alpaca import AlpacaClient, AlpacaError
+from app.broker.alpaca import AlpacaClient, AlpacaError  # noqa: F401 (AlpacaError: re-exported)
+from app.broker.common import BrokerError
 from app.data.symbols import US_STOCK_EXCHANGES, is_sim, split_pair, strip_derivative
 from app.engine.costs import asset_class
 from app.sim.common import fmt_qty, json_dumps, json_loads
@@ -113,6 +114,17 @@ def _mean(values: list[float]) -> float | None:
 
 
 class MirrorService:
+    """The Alpaca PAPER mirror, and the base of the other practice mirrors (app.broker.binance_mirror): a subclass
+    changes the class constants and the venue hooks (_cfg, _client, _map_symbol, _open_qty, _skip_reason, _send,
+    _sellable); the reconcile, the state and the statistics stay the same."""
+
+    NAME = "Alpaca"  # in its messages: "Espejo en Alpaca: …", "Abierta en Alpaca"
+    PROVIDER = "alpaca"
+    STATE_KEY = STATE_KEY
+    TASK_NAME = "broker-mirror"
+    SETTINGS_HINT = "Ajustes → Bróker de práctica (Alpaca)"
+    NOTE = NOTE
+
     def __init__(self, rt: Any) -> None:
         self.rt = rt
         self._entries: dict[int, dict] = {}
@@ -131,7 +143,7 @@ class MirrorService:
     async def start(self) -> None:
         await self._load()
         if config.BACKGROUND:
-            self._task = asyncio.create_task(self._loop(), name="broker-mirror")
+            self._task = asyncio.create_task(self._loop(), name=self.TASK_NAME)
 
     async def stop(self) -> None:
         task, self._task = self._task, None
@@ -162,7 +174,7 @@ class MirrorService:
             except Exception as exc:  # noqa: BLE001 - the loop must survive anything
                 self._error = f"Error interno del espejo: {type(exc).__name__}"
                 if self._log.should_log("loop", 600):
-                    self._emit("error", f"Espejo en Alpaca: error interno: {type(exc).__name__}: {str(exc)[:200]}")
+                    self._emit("error", f"Espejo en {self.NAME}: error interno: {type(exc).__name__}: {str(exc)[:200]}")
 
     # ------------------------------------------------------------------ settings
 
@@ -184,8 +196,44 @@ class MirrorService:
                 "stocks": bool(self._setting("broker.mirror_stocks", True)),
                 "crypto": bool(self._setting("broker.mirror_crypto", True))}
 
-    def _client(self, cfg: dict[str, Any]) -> AlpacaClient:
+    def _client(self, cfg: dict[str, Any]) -> Any:
         return AlpacaClient(cfg["key_id"], cfg["secret"])
+
+    # ------------------------------------------------------------------ venue hooks (Alpaca's rules)
+
+    def _map_symbol(self, symbol: str, cfg: dict[str, Any]) -> tuple[str | None, str, str]:
+        """(venue symbol, kind, "") or (None, "", why it is not mirrored)."""
+        return alpaca_symbol(symbol, stocks=cfg["stocks"], crypto=cfg["crypto"])
+
+    async def _open_qty(self, e: dict, client: Any, qty: float) -> float:
+        """The quantity of the opening order (Alpaca: whole shares for a stock short)."""
+        if e["kind"] == "stock" and e["side"] == "short":
+            return float(math.floor(qty + QTY_EPS))
+        return qty
+
+    async def _skip_reason(self, e: dict, client: Any, qty: float) -> str | None:
+        """Why a new position is not mirrored by this venue, or None."""
+        return ("Alpaca no admite cortos en cripto" if e["kind"] == "crypto" and e["side"] == "short"
+                else "corto de menos de 1 acción: Alpaca no admite cortos fraccionados" if qty < QTY_EPS
+                else f"orden de menos de {MIN_NOTIONAL:.0f} $" if qty * e["sim_entry"] < MIN_NOTIONAL
+                else None)
+
+    async def _send(self, client: Any, e: dict, buy: bool, qty: float, cid: str, purpose: str) -> dict:
+        """Send a market order; a BrokerError when the venue refuses it."""
+        return await client.submit_market(symbol=e["alpaca_symbol"], side="buy" if buy else "sell", qty=qty,
+                                          tif="day" if e["kind"] == "stock" else "gtc", client_order_id=cid)
+
+    @staticmethod
+    def _duplicate(exc: BrokerError) -> bool:
+        """The order was already sent before a restart (Alpaca: 422 on a repeated client_order_id)."""
+        return exc.status == 422 and "client_order_id" in str(exc).lower()
+
+    def _status_label(self, status: str) -> str:
+        if status == "open":
+            return f"Abierta en {self.NAME}"
+        if status == "rejected":
+            return f"Rechazada por {self.NAME}"
+        return STATUS_LABEL.get(status, status)
 
     def _emit(self, level: str, message: str, data: Any = None) -> None:
         bus = getattr(self.rt, "bus", None)
@@ -199,7 +247,7 @@ class MirrorService:
         if db is None:
             return
         try:
-            raw = await db.fetchval("SELECT value FROM meta WHERE key=?", (STATE_KEY,))
+            raw = await db.fetchval("SELECT value FROM meta WHERE key=?", (self.STATE_KEY,))
         except Exception:
             raw = None
         state = json_loads(raw, None)
@@ -218,10 +266,11 @@ class MirrorService:
             return
         state = {"entries": list(self._entries.values()), "closed": list(self._closed)}
         try:
-            await db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (STATE_KEY, json_dumps(state)))
+            await db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                             (self.STATE_KEY, json_dumps(state)))
         except Exception as exc:
             if self._log.should_log("save", 600):
-                self._emit("warn", f"Espejo en Alpaca: no se pudo guardar su estado: {exc}")
+                self._emit("warn", f"Espejo en {self.NAME}: no se pudo guardar su estado: {exc}")
 
     # ------------------------------------------------------------------ reconcile
 
@@ -256,15 +305,15 @@ class MirrorService:
                     if e["status"] in FINAL and pid not in positions:
                         self._closed.append(self._entries.pop(pid))
                 self._error = None
-            except AlpacaError as exc:
+            except BrokerError as exc:
                 self._error = str(exc)
                 if self._log.should_log(f"sync:{exc.status}", 600):
-                    self._emit("warn", f"Espejo en Alpaca: {exc}")
+                    self._emit("warn", f"Espejo en {self.NAME}: {exc}")
             finally:
                 self._last_sync_ms = now_ms()
                 await self._save()
 
-    async def _new(self, pos: dict, cfg: dict, client: AlpacaClient,
+    async def _new(self, pos: dict, cfg: dict, client: Any,
                    market_open: Callable[[], Awaitable[bool]]) -> dict:
         side = "short" if pos.get("side") == "short" else "long"
         e: dict[str, Any] = {
@@ -276,19 +325,16 @@ class MirrorService:
             "order": None, "step": 0, "retries": 0, "status": "working", "reason": None,
             "opened_at": now_ms(), "closed_at": None,
         }
-        sym, kind, why = alpaca_symbol(pos["symbol"], stocks=cfg["stocks"], crypto=cfg["crypto"])
+        sym, kind, why = self._map_symbol(pos["symbol"], cfg)
         age = now_s() - int(safe_float(pos.get("entry_time")) or 0)
+        e.update({"alpaca_symbol": sym, "kind": kind or None})
         qty = e["sim_qty"]
-        if sym and kind == "stock" and side == "short":
-            qty = float(math.floor(qty + QTY_EPS))
         reason = (why if not sym
                   else f"abierta hace más de {MAX_LAG_S // 60} minutos (antes de activar el espejo o con él apagado)"
-                  if age > MAX_LAG_S
-                  else "Alpaca no admite cortos en cripto" if kind == "crypto" and side == "short"
-                  else "corto de menos de 1 acción: Alpaca no admite cortos fraccionados" if qty < QTY_EPS
-                  else f"orden de menos de {MIN_NOTIONAL:.0f} $" if qty * e["sim_entry"] < MIN_NOTIONAL
-                  else None)
-        e.update({"alpaca_symbol": sym, "kind": kind or None})
+                  if age > MAX_LAG_S else None)
+        if reason is None:
+            qty = await self._open_qty(e, client, qty)
+            reason = await self._skip_reason(e, client, qty)
         if reason is None and kind == "stock" and not await market_open():
             reason = "mercado de EE. UU. cerrado: una orden a mercado se ejecutaría en la próxima apertura"
         if reason is not None:
@@ -297,19 +343,18 @@ class MirrorService:
         await self._submit(e, client, "open", qty)
         return e
 
-    async def _submit(self, e: dict, client: AlpacaClient, purpose: str, qty: float) -> None:
+    async def _submit(self, e: dict, client: Any, purpose: str, qty: float) -> None:
         e["step"] += 1
         cid = f"nexus-{e['pos_id']}-{purpose[0]}{e['step']}"
         opening = purpose == "open"
         buy = (e["side"] == "long") == opening
         try:
-            order = await client.submit_market(symbol=e["alpaca_symbol"], side="buy" if buy else "sell", qty=qty,
-                                               tif="day" if e["kind"] == "stock" else "gtc", client_order_id=cid)
-        except AlpacaError as exc:
+            order = await self._send(client, e, buy, qty, cid, purpose)
+        except BrokerError as exc:
             if exc.status in (0, 401):
                 e["step"] -= 1  # nothing was sent: the same id next time
                 raise
-            if exc.status == 422 and "client_order_id" in str(exc).lower():  # sent before a restart: the same order
+            if self._duplicate(exc):  # sent before a restart: the same order
                 order = await client.order_by_client_id(cid)
             else:
                 self._failed(e, purpose, str(exc))
@@ -318,7 +363,7 @@ class MirrorService:
                       "status": str(order.get("status") or "new")}
         e["status"] = "working"
         what = {"open": "abre", "reduce": "reduce", "close": "cierra"}[purpose]
-        self._emit("info", f"Espejo en Alpaca: {what} {e['alpaca_symbol']} ({'compra' if buy else 'venta'} de "
+        self._emit("info", f"Espejo en {self.NAME}: {what} {e['alpaca_symbol']} ({'compra' if buy else 'venta'} de "
                            f"{fmt_qty(qty)}) como NEXUS automática", {"pos_id": e["pos_id"], "client_order_id": cid})
 
     def _failed(self, e: dict, purpose: str, reason: str) -> None:
@@ -328,11 +373,11 @@ class MirrorService:
         e["retries"] += 1
         if e["retries"] >= MAX_RETRIES:
             e.update({"status": "error", "closed_at": now_ms(),
-                      "reason": f"no se pudo cerrar en Alpaca ({reason}): ciérrala a mano en tu cuenta de práctica"})
+                      "reason": f"no se pudo cerrar en {self.NAME} ({reason}): ciérrala a mano en tu cuenta de práctica"})
         else:
             e.update({"status": "open", "reason": reason})
 
-    async def _step(self, e: dict, pos: dict | None, client: AlpacaClient,
+    async def _step(self, e: dict, pos: dict | None, client: Any,
                     market_open: Callable[[], Awaitable[bool]],
                     held_in_alpaca: Callable[[str], Awaitable[float | None]]) -> None:
         """Check its working order, then follow NEXUS; an order sent here is checked once more right away (a market
@@ -350,7 +395,7 @@ class MirrorService:
                     await self._filled(e, order["purpose"], filled, price)
                 elif status in DEAD_ORDERS:
                     e["order"] = None
-                    self._failed(e, order["purpose"], f"orden {ORDER_STATUS_ES.get(status, status)} por Alpaca")
+                    self._failed(e, order["purpose"], f"orden {ORDER_STATUS_ES.get(status, status)} por {self.NAME}")
                     return
                 else:
                     return  # still working: the next pass looks again
@@ -359,7 +404,7 @@ class MirrorService:
             if not await self._follow(e, pos, client, market_open, held_in_alpaca):
                 return
 
-    async def _follow(self, e: dict, pos: dict | None, client: AlpacaClient,
+    async def _follow(self, e: dict, pos: dict | None, client: Any,
                       market_open: Callable[[], Awaitable[bool]],
                       held_in_alpaca: Callable[[str], Awaitable[float | None]]) -> bool:
         """With no working order: follow NEXUS's partial exits and its close. True when it sent an order."""
@@ -374,8 +419,10 @@ class MirrorService:
                     e.update({"status": "waiting", "reason": "salida parcial pendiente: el mercado de EE. UU. está "
                                                              "cerrado"})
                     return False
-                await self._submit(e, client, "reduce", await self._sellable(e, excess, held_in_alpaca))
-                return e.get("order") is not None
+                qty = await self._sellable(e, excess, held_in_alpaca)
+                if qty > QTY_EPS:  # a venue's lot step may round a small partial exit down to nothing
+                    await self._submit(e, client, "reduce", qty)
+                    return e.get("order") is not None
             e.update({"status": "open", "reason": None if e["status"] == "waiting" else e["reason"]})
             return False
         # NEXUS closed it: close what the mirror holds
@@ -457,7 +504,7 @@ class MirrorService:
     def _public(self, e: dict) -> dict:
         return {
             "pos_id": e["pos_id"], "symbol": e["symbol"], "alpaca_symbol": e.get("alpaca_symbol"), "side": e["side"],
-            "status": e["status"], "status_label": STATUS_LABEL.get(e["status"], e["status"]), "reason": e.get("reason"),
+            "status": e["status"], "status_label": self._status_label(e["status"]), "reason": e.get("reason"),
             "sim_qty": e.get("sim_qty"), "held": round(float(e.get("held") or 0.0), 9),
             "sim_entry": e.get("sim_entry"), "fill_entry": e.get("fill_entry"),
             "sim_exit": e.get("sim_exit"), "fill_exit": e.get("fill_exit"),
@@ -503,16 +550,17 @@ class MirrorService:
         active = sorted(self._entries.values(), key=lambda e: e["pos_id"], reverse=True)
         done = sorted(self._closed, key=lambda e: e.get("closed_at") or 0, reverse=True)
         out: dict[str, Any] = {
-            "enabled": cfg["enabled"], "provider": "alpaca", "paper": True, "configured": cfg["configured"],
+            "enabled": cfg["enabled"], "provider": self.PROVIDER, "paper": True, "configured": cfg["configured"],
             "connected": False, "account": None, "error": None, "last_sync_ms": self._last_sync_ms,
-            "mirror_stocks": cfg["stocks"], "mirror_crypto": cfg["crypto"],
+            "mirror_stocks": bool(cfg.get("stocks")), "mirror_crypto": bool(cfg.get("crypto")),
+            "mirror_perps": bool(cfg.get("perps")),
             "entries": [self._public(e) for e in [*active, *done][:SHOW_ENTRIES]],
-            "stats": self.stats(), "note": NOTE,
+            "stats": self.stats(), "note": self.NOTE,
         }
         if not cfg["enabled"]:
             return out
         if not cfg["configured"]:
-            out["error"] = "Faltan las claves de tu cuenta de práctica: Ajustes → Bróker de práctica (Alpaca)."
+            out["error"] = f"Faltan las claves de tu cuenta de práctica: {self.SETTINGS_HINT}."
             return out
         if config.OFFLINE:
             out["error"] = "Modo sin conexión (NEXUS_OFFLINE): el espejo no envía nada."
@@ -523,7 +571,7 @@ class MirrorService:
             out["account"] = {"equity": safe_float(acct.get("equity")), "cash": safe_float(acct.get("cash")),
                               "buying_power": safe_float(acct.get("buying_power")),
                               "status": str(acct.get("status") or ""), "currency": str(acct.get("currency") or "USD")}
-        except AlpacaError as exc:
+        except BrokerError as exc:
             out["error"] = str(exc)
         if self._error and not out["error"]:
             out["error"] = self._error
@@ -533,9 +581,9 @@ class MirrorService:
         """A reconcile pass on request (POST /api/broker/sync, `espejo sincroniza`), then the fresh BrokerStatus."""
         cfg = self._cfg()
         if not cfg["enabled"]:
-            raise MirrorError("El espejo está desactivado: actívalo en Ajustes → Bróker de práctica (Alpaca).")
+            raise MirrorError(f"El espejo está desactivado: actívalo en {self.SETTINGS_HINT}.")
         if not cfg["configured"]:
-            raise MirrorError("Faltan las claves de tu cuenta de práctica: Ajustes → Bróker de práctica (Alpaca).")
+            raise MirrorError(f"Faltan las claves de tu cuenta de práctica: {self.SETTINGS_HINT}.")
         if config.OFFLINE:
             raise MirrorError("Modo sin conexión (NEXUS_OFFLINE): el espejo no envía nada.")
         await self.sync()

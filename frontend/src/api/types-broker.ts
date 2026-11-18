@@ -1,8 +1,10 @@
-// Mirror of NEXUS automática in the user's Alpaca PAPER (practice) account (backend app.broker): never real money.
-// GET /api/broker/status and POST /api/broker/sync answer a BrokerStatus; the keys are never sent back.
+// Mirrors of NEXUS automática in the user's PRACTICE accounts (backend app.broker): Alpaca PAPER and Binance's testnets,
+// never real money. GET /api/broker/status and POST /api/broker/sync (Alpaca), GET /api/broker/binance/status and
+// POST /api/broker/binance/sync (Binance testnets) answer a BrokerStatus; the keys are never sent back.
 // One field per line: tools/contract_check.py compares these interfaces with the live server.
 
-/** The practice account as Alpaca reports it. */
+/** The practice account as the venue reports it (Binance testnets: futures margin balance as equity, spot USDT as
+ *  cash, futures available balance as buying power, currency USDT). */
 export interface BrokerAccount {
   equity: number | null
   cash: number | null
@@ -15,7 +17,7 @@ export interface BrokerAccount {
 export interface BrokerMirrorEntry {
   pos_id: number
   symbol: string
-  alpaca_symbol: string | null
+  alpaca_symbol: string | null // the venue's symbol: AAPL, BTC/USD on Alpaca · BTCUSDT on Binance
   side: string // long | short
   status: string // working | open | waiting | closed | skipped | rejected | error
   status_label: string
@@ -52,7 +54,7 @@ export interface BrokerStats {
 
 export interface BrokerStatus {
   enabled: boolean
-  provider: string
+  provider: string // alpaca | binance_testnet
   paper: boolean
   configured: boolean
   connected: boolean
@@ -60,7 +62,8 @@ export interface BrokerStatus {
   error: string | null
   last_sync_ms: number | null
   mirror_stocks: boolean
-  mirror_crypto: boolean
+  mirror_crypto: boolean // spot crypto
+  mirror_perps: boolean // crypto perpetuals (Binance testnets; always false on Alpaca)
   entries: BrokerMirrorEntry[]
   stats: BrokerStats
   note: string

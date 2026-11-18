@@ -16,7 +16,7 @@ operación, un semáforo de condiciones de mercado, escáner, simulador y backte
 >   sin el filtro pierde −0,23R por operación (1.907 operaciones). El filtro reduce la pérdida sobre todo porque opera
 >   menos. Un «TOMAR» no significa que la operación tenga ventaja (sección 4 de ese documento).
 > - **Todo es simulado**: la cuenta demo nunca envía órdenes a un bróker ni mueve dinero real (el espejo opcional
->   de NEXUS automática solo usa una cuenta de práctica de Alpaca, también sin dinero real).
+>   de NEXUS automática solo usa una cuenta de práctica de Alpaca o los entornos de práctica de Binance, también sin dinero real).
 > - Señales, probabilidades y estadísticas se calculan con datos históricos y **no garantizan resultados futuros**.
 >   No es asesoría financiera.
 
@@ -54,11 +54,11 @@ tu servidor de correo.
 | **Mercados** | Los ~458.000 activos del escáner público de TradingView (acciones de muchos países, cripto, forex, futuros, CFD, bonos, índices) con precio, cambio, volumen, rating técnico, RSI, ADX, rendimiento y la lectura rápida de NEXUS. |
 | **Escáner** | Recorre un mercado entero, ordena oportunidades y, en modo profundo, aplica NEXUS + filtro a los mejores. Cada predicción se guarda antes del resultado y se verifica después; el modelo del escáner se reentrena con esos resultados. |
 | **Simulación** | Mercado simulado (sintético con regímenes alcista, bajista, lateral, volátil y crash, o replay vela a vela de un activo real sin mirar el futuro), backtest **con y sin filtro** y Monte Carlo (riesgo de ruina, VaR). |
-| **Cuenta demo** | Operaciones simuladas a mercado, **órdenes límite y stop pendientes**, gestión automática de SL, TP parciales y stop dinámico, avisos de salida, **límites de riesgo de cartera** y auto-trading opcional que solo abre señales TOMAR. Además, **NEXUS automática**: una segunda cuenta demo, propia de NEXUS, que opera sola con sus señales (apagada por defecto), lleva un diario de sus operaciones, deja de entrar donde pierde con evidencia, puede seguir tus estrategias de PyChart y, si quieres, se repite en una cuenta de práctica de Alpaca (sin dinero real). |
+| **Cuenta demo** | Operaciones simuladas a mercado, **órdenes límite y stop pendientes**, gestión automática de SL, TP parciales y stop dinámico, avisos de salida, **límites de riesgo de cartera** y auto-trading opcional que solo abre señales TOMAR. Además, **NEXUS automática**: una segunda cuenta demo, propia de NEXUS, que opera sola con sus señales (apagada por defecto), lleva un diario de sus operaciones, deja de entrar donde pierde con evidencia, puede seguir tus estrategias de PyChart y, si quieres, se repite en una cuenta de práctica de Alpaca o en los entornos de práctica de Binance (sin dinero real). |
 | **PyChart** | Indicadores y estrategias en **Python** con una API estilo Pine Script (`ta.ema`, `plot`, `plotshape`, `strategy.entry`…): errores por línea, ejecución aislada (sandbox) y backtest. |
 | **Copiloto** | Una IA en tu propio PC (Ollama) que entiende tus datos de NEXUS con herramientas de solo lectura: explica qué hizo NEXUS automática y por qué, resume su diario, mira un mercado o las noticias, busca en internet si añades una clave y, en su **laboratorio**, escribe y prueba estrategias de PyChart con resultados honestos (desarrollo y comprobación frente a entrar al azar). No opera ni cambia ajustes. |
 | **Aprendizaje** | Cómo se retroalimenta el sistema: acierto fuera de muestra frente a la referencia, calibración, pesos aprendidos, decisiones del filtro y la **validación walk-forward** («¿hay ventaja real?»). |
-| **Ajustes** | Riesgo, NEXUS, filtro, escáner, proveedores de datos y sus claves, cuenta demo, alertas, riesgo de cartera, tiempo real, bróker de práctica (Alpaca), copiloto y validación; estado del sistema y de la base de datos. |
+| **Ajustes** | Riesgo, NEXUS, filtro, escáner, proveedores de datos y sus claves, cuenta demo, alertas, riesgo de cartera, tiempo real, bróker de práctica (Alpaca y testnet de Binance), copiloto y validación; estado del sistema y de la base de datos. |
 | **Semáforo** (cabecera) | *Operar*, *Precaución* o *No operar* según la Fed, el calendario económico de esta semana y la próxima, la volatilidad (VIX), futuros, dólar, tipos y *funding*. En rojo, el filtro dice NO TOMAR. |
 | **Terminal** (botón de la cabecera o ``Ctrl+` ``) | Todo lo que pasa, en vivo (señales, operaciones, escaneos, aprendizaje, errores), y una línea de comandos con alias en español. |
 
@@ -201,7 +201,10 @@ ventanas independientes el veredicto es «sin conclusión»: es lo normal durant
 ### 6. Cuenta demo
 
 **Cuenta demo** es tu cuenta simulada (saldo inicial de *Ajustes → Riesgo*, 10.000 por defecto; «Reiniciar» empieza
-de cero). En «Nueva orden demo» eliges símbolo, lado, tipo, riesgo % y, si quieres, SL y TP:
+de cero). Arriba ves en grande cuánto vale la cuenta, cuánto cambió desde que empezó y la curva de las operaciones
+cerradas; debajo, tres secciones: **Resumen** (una ficha por posición abierta con su resultado y una barra que va del
+stop al objetivo, más los últimos movimientos), **Operar** (nueva orden, auto-trading y riesgo) y **Detalle** (tablas
+completas e historial). En «Nueva orden demo» eliges símbolo, lado, tipo, riesgo % y, si quieres, SL y TP:
 
 - **A mercado**: se abre al precio actual. Si el filtro dice NO TOMAR, se pide confirmación.
 - **Límite / Stop**: queda **pendiente** hasta que el precio llegue, con validez «hasta cancelarla», «durante N velas»
@@ -222,7 +225,9 @@ Terminal: `buy btc --risk 1`, `limit btc <precio> --exp 2d`, `stop eth <precio> 
 #### NEXUS automática: la cuenta demo propia de NEXUS
 
 Arriba de *Cuenta demo*, el selector **Mi cuenta | NEXUS automática** cambia a una segunda cuenta simulada que
-**opera sola** con los análisis de NEXUS. Es otra cuenta (la 3): su saldo, sus posiciones y su historial nunca se
+**opera sola** con los análisis de NEXUS. Su página empieza igual (valor de la cuenta en grande, «Pausar» / «Activar»
+en la cabecera) y se ordena en **Resumen** (su cartera, sus operaciones abiertas en fichas por velocidad, qué hace ahora
+y sus últimos movimientos), **Operaciones**, **Actividad**, **Análisis** y **Ajustes** («Cómo opera»). Es otra cuenta (la 3): su saldo, sus posiciones y su historial nunca se
 mezclan con los tuyos, y sus operaciones solo te avisan por Telegram o correo si lo activas. Está **apagada** hasta
 que la actives en «Cómo opera»:
 
@@ -252,6 +257,25 @@ que la actives en «Cómo opera»:
   en su riesgo por operación y su margen aproximado no pasa del «Margen máximo en futuros» (50 % del capital). Con
   1.000 $ casi nunca caben y el registro te dirá por qué. Sin una clave que sirva futuros, NEXUS los graba mientras
   está encendido y necesita alrededor de una semana de historial para analizarlos en velas de 1 h.
+- **Cripto al contado como una billetera**: con `autopilot.spot_short` en `false` (por defecto `true`), en pares al
+  contado como `BINANCE:SOLUSDT` solo compra y luego vende lo que tiene; sus apuestas a la baja van por el perpetuo.
+- **Futuros perpetuos de cripto** (BTC, ETH, BNB, SOL, XRP, DOGE, ADA, LINK, AVAX y **oro**, 24/7): pon
+  símbolos como `BINANCE:BTCUSDT.P` o `BINANCE:SOLUSDT.P` en su lista. Para el oro como el XAUUSD de MetaTrader usa
+  `BINANCE:XAUUSDT.P`: el perpetuo de oro de Binance, que sigue al precio del oro al contado y tiene historial
+  completo sin clave (sus velas vienen de Binance Futuros, porque no tiene par al contado). También vale
+  `BINANCE:PAXGUSDT.P` (PAX Gold, un token de 1 onza troy, con una pequeña diferencia de precio); NEXUS cuenta los dos
+  como un solo grupo de riesgo, «Oro (XAU)». `OANDA:XAUUSD` necesita una clave de Twelve Data o Polygon para tener
+  historial. Opera contratos enteros (0,001 BTC / ETH / PAXG / onza de oro, 0,01 BNB / LINK, 0,1 XRP, 1 SOL / DOGE / ADA / AVAX; aproximadamente el paso mínimo de un exchange grande), en largo o en corto, con margen = valor de la posición / apalancamiento
+  (`autopilot.perp_leverage`, 10x por defecto, de 1x a 50x) dentro del mismo «Margen máximo en futuros». No entra si
+  la liquidación aproximada llegaría antes que el stop, así que el stop siempre actúa primero. Comisión 0,05 % por
+  lado (orden a mercado de un exchange de futuros, aproximada). Los precios son los del par al contado equivalente
+  (la diferencia suele ser de centésimas de punto porcentual; el oro XAUUSDT, los de Binance Futuros) y **no simula el *funding*** de cada 8 horas.
+- **Lotes de MT5** («Operar en lotes de MT5 (mínimo 0,01)» en Ajustes de NEXUS automática, apagado por defecto):
+  redondea el tamaño hacia abajo a pasos de 0,01 lote, como MetaTrader 5 (oro: 1 lote = 100 onzas, también XAUUSDT y PAXG;
+  cripto: 1 moneda; acciones: 1 acción; divisas: 100.000; los contratos varían según el bróker). Si su riesgo por
+  operación pide menos de 0,01 lote, abre 0,01 solo si ese lote mínimo arriesga como mucho el «Tope del lote mínimo»
+  (5 % del capital por defecto); si no, no opera ese mercado y lo anota. Con una cuenta pequeña el lote mínimo de oro
+  o de BTC suele arriesgar mucho más que eso, así que esos mercados se saltan. Cada operación muestra sus lotes.
 - **Opciones sobre acciones** (simuladas, con **precio teórico**): con «Acciones y fondos» en «NEXUS elige» (por
   defecto) compra acciones cuando NEXUS dice COMPRAR y un **put** cuando dice VENDER, porque en una cuenta de efectivo
   no se venden acciones en corto; con «Opciones» compra un **call** para apostar al alza y un put a la baja, y con
@@ -269,7 +293,8 @@ que la actives en «Cómo opera»:
 - Puedes **pausarla** (no abre nada nuevo; sus posiciones siguen con su stop y sus objetivos), cerrar sus posiciones
   a mano o **reiniciarla** con otro saldo.
 - **Aprende de sus pérdidas** (activado por defecto): antes de entrar mira sus operaciones de los últimos 90 días
-  agrupadas como en su diario (régimen, sesión, noticias cerca, puntuación del filtro, dirección y mercado) y no entra
+  agrupadas como en su diario (régimen, sesión, noticias cerca, puntuación del filtro, dirección, mercado, fuente de
+  la señal y temporalidad: si las de 5m pierden con evidencia deja de abrir en 5m y sigue en las demás) y no entra
   donde pierde de forma consistente: al menos 30 operaciones y todo el intervalo del 99 % del R medio por debajo de
   cero (más exigente que el 95 % porque mira muchos grupos a la vez). El registro dice por qué descartó y con qué
   evidencia, y su vista lista los contextos pausados. Cuando esas pérdidas tienen más de 90 días lo vuelve a probar.
@@ -291,7 +316,8 @@ que la actives en «Cómo opera»:
 - **Diario de operaciones**: al abrir guarda lo que vio NEXUS (régimen, puntuación del filtro) y al cerrar cuánto fue
   a favor y en contra y por qué terminó así («En contra desde el principio», «Ganaba 1R o más y lo devolvió»,
   «Llegó a su objetivo»…). Su tarjeta agrupa las operaciones por causa, sesión (Asia, Londres, Nueva York, fin de
-  semana), régimen, noticias de EE. UU. cerca (IPC, empleo, Fed), puntuación del filtro, dirección y mercado, como
+  semana), régimen, noticias de EE. UU. cerca (IPC, empleo, Fed), puntuación del filtro, dirección, mercado, fuente y
+  temporalidad, como
   «x de n» con el R medio, y resume lo más llamativo. Solo califica un grupo con 30 operaciones o más y cuando su
   intervalo del 95 % no incluye el cero: describe lo que pasó, no garantiza lo que pasará. En la terminal:
   `autopilot diario`.
@@ -310,6 +336,56 @@ que la actives en «Cómo opera»:
   puntos básicos; positivo = peor que la simulación) y por qué no replicó algo (opciones, futuros, cortos en cripto,
   la bolsa cerrada…). Nunca usa dinero real: la app solo habla con la API de práctica de Alpaca. En la terminal:
   `espejo` y `espejo sincroniza`.
+- **Espejo en el testnet de Binance (práctica)** (opcional, desactivado por defecto): el testnet de contado y Demo
+  Trading de futuros son los entornos de práctica de Binance, con fondos de prueba. Crea claves en el de contado
+  (https://testnet.binance.vision, entrando con GitHub) y en Demo Trading (https://demo.binance.com → «API Management»
+  desde tu perfil, con permiso de futuros; claves aparte; su antiguo testnet.binancefuture.com ahora lleva allí), ponlas
+  en *Ajustes → Testnet de Binance (práctica)* y NEXUS automática repetirá allí su cripto al contado (solo compra y luego vende) y sus
+  perpetuos (en largo y en corto, con su apalancamiento y margen aislado). Redondea cada cantidad al paso del testnet
+  y dice por qué no replicó algo (acciones, CFD, futuros de índices, opciones, cortos al contado, órdenes por debajo
+  del mínimo…). Nunca usa dinero real: las direcciones de esos entornos son fijas en el código. Su libro de órdenes es
+  más fino que el real, así que sus precios pueden alejarse del mercado. En la terminal: `espejo binance` y `espejo
+  binance sincroniza`.
+- **Operaciones por velocidad**: en «Cómo opera» → *Temporalidades* elige hasta 3 a la vez (por ejemplo 5m, 1h y 4h).
+  Cada una decide en sus propias velas sobre los mismos mercados, con una sola posición por mercado. Arriba de sus
+  posiciones, las pestañas *Rápidas* (velas de hasta 5m), *Medidas* (hasta 2h) y *Largo plazo* (4h o más) separan sus
+  operaciones abiertas y cerradas, con «x de n» ganadoras y el resultado de cada una (sin conclusiones con menos de 30).
+  En la terminal: `autopilot --tf 5m,1h,4h`.
+- **Reto (meta con hora límite)**: en la tarjeta «Reto» de NEXUS automática pones un valor de cuenta a alcanzar (por
+  ejemplo 12.000 $) y una hora (por ejemplo 17:00). El servidor de NEXUS vigila la cuenta solo: al llegar a la meta o
+  a la hora, cierra sus operaciones (la cartera se queda) y vuelve a sus ajustes normales, o se pausa si lo eliges.
+  Con «Modo agresivo» opera mientras dura el reto con velas de 5m, 15m y 1h, un 4 % de riesgo por operación en
+  lotes, 20x en perpetuos, más posiciones y candidatos, y con su límite de pérdida diaria igual al freno de pérdidas;
+  tus ajustes guardados no cambian. Basta con que el servidor siga encendido (sobrevive a un reinicio). Un reto no
+  crea ventaja: más riesgo solo hace que llegue antes a la meta o al freno.
+- **Cuentas de reto**: en la tarjeta «Cuentas de reto» de NEXUS automática creas varias cuentas simuladas, cada una con
+  su saldo inicial, su meta (por ejemplo 10 $ → 100 $ o 5.000 $ → 10.000 $), un freno de pérdidas y, si quieres, una
+  hora límite. NEXUS las opera todas con sus mismas señales y candidatos, en modo agresivo (5m/15m/1h, 4 % por operación
+  en lotes, 20x), cada una con el tamaño que le da su propio capital, y las cierra solas al llegar a la meta, a la hora
+  límite o al freno. Cada una muestra su progreso, sus operaciones y sus decisiones; puedes terminarla o borrarla. Una
+  cuenta pequeña solo cabe en monedas baratas. Un reto no crea ventaja.
+- **Horario de mercados y sesión de Nueva York**: la tarjeta «Horario de mercados» muestra qué está abierto y cuándo
+  abre o cierra cada mercado en tu hora: cripto y oro (24/7), la bolsa de Nueva York (9:30–16:00 de Nueva York con los
+  festivos y cierres anticipados de la NYSE) y los futuros de índices de la CME. Con «Modo agresivo en la sesión de
+  Nueva York» NEXUS automática pasa sola al modo agresivo en la apertura y vuelve a sus ajustes normales en el cierre,
+  cada día hábil, y lo anota en su registro. Las acciones y los futuros aún no los opera (solo hay cotizaciones con
+  retraso y sin historial). Nada indica que ese horario dé ventaja.
+- **Cartera de comprar y mantener**: con `autopilot.hold_pct` (por ejemplo 50) NEXUS automática reparte ese % de su
+  cuenta en una cartera (por defecto SPY, QQQ, AAPL, NVDA, MSFT, AMZN, BTC y ETH) y la mantiene como en un bróker:
+  compra cada activo a precio de mercado (las acciones con la bolsa abierta) y solo vende si tú lo vendes o si cae
+  un 50 % desde su compra. La tarjeta «Cartera» muestra cantidad, precio de compra, precio actual, valor y ganancia
+  de cada uno, con su botón «Vender». No garantiza ganancias.
+- **Objetivo o un porqué en cada operación**: cada operación de NEXUS automática (y de sus cuentas de reto) dice
+  por qué entró (la señal de NEXUS y el filtro, o la estrategia de PyChart que dio la entrada) y su objetivo con su
+  distancia en R; si no tiene objetivo dice por qué (por ejemplo, una estrategia que sale con su propia regla o en su
+  stop, o un activo de la cartera que se mantiene). Se ve en cada operación abierta y en su registro. Al hacer clic en
+  una operación se abre su detalle: por qué entró, su objetivo, los parámetros que tomó (señal, filtro, régimen,
+  probabilidades, volatilidad, riesgo, stop, lotes, apalancamiento) y cómo va o cómo terminó.
+- **Carteles de sus operaciones**: cada vez que NEXUS automática compra o vende aparece un cartel a la derecha de la
+  pantalla, en cualquier sección, con el producto, la velocidad, el monto (y la garantía si es un futuro), la entrada,
+  lo que ganaría si llega al objetivo y lo que perdería si toca el stop (antes de comisiones; no es una predicción), y
+  al cerrarla, su resultado real. Su botón «Ver operación» la abre en el gráfico. Si activas las notificaciones de
+  escritorio en Ajustes → Alertas, con la pestaña en segundo plano también te llegan como notificación del sistema.
 - **Desde la terminal** (alias `piloto`): `autopilot` muestra su estado; `autopilot on btc eth --tf 4h --max 3 --risk
   0,5` la activa con una lista fija; `autopilot escaner 10` usa el escáner; `autopilot off` la pausa; `autopilot pos`
   y `autopilot log` muestran sus posiciones y sus decisiones; `autopilot azar` la compara con entrar al azar;
@@ -531,6 +607,24 @@ rechaza las peticiones, NEXUS lo avisa en la terminal y no intenta esquivarlo.
    nuevas (salvo los casos descritos en «Known limitations» de [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
 
 ---
+
+## Historial largo e investigación de estrategias
+
+Los backtests normales usan como mucho 5.000 velas (17 días en 5m): poco para saber si una estrategia funciona o tuvo
+suerte. NEXUS puede guardar años de historial y probar en él todas tus estrategias:
+
+- **Cripto**: `importar binance BINANCE:BTCUSDT.P BINANCE:ETHUSDT --meses=36` descarga los volcados oficiales de
+  Binance (data.binance.vision) en 5m, 15m, 1h, 4h y 1d (los símbolos `.P`, de futuros).
+- **Forex, índices, oro, acciones como CFD**: descarga el historial con QuantDataManager (StrategyQuant, versión
+  gratuita: datos de Dukascopy), expórtalo a CSV en la carpeta `data/import` y luego `importar archivo
+  us500.csv OANDA:SPX500USD` (`--tz=2` si el archivo no está en UTC). Lee CSV de MetaTrader y de casi cualquier
+  formato; arma las velas de 5m a 1d a partir de las de 1 minuto.
+- `investigar btc 1h` prueba todas las estrategias de PyChart y NEXUS (con y sin filtro) en hasta 20.000 velas: cada
+  una en un periodo de desarrollo (el primer 70 %) y otro de comprobación (el último 30 %), frente a entrar al azar
+  con la misma dirección, duración y costes. Solo es «candidata» si supera al azar en los dos; aun así, confírmala en
+  otro mercado. `investigar estado` muestra el progreso e `investigar resultado`, el informe.
+
+El historial importado no se borra con el mantenimiento. No es una garantía: son datos pasados.
 
 ## Pruebas
 

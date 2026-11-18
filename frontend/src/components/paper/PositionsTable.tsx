@@ -4,10 +4,11 @@ import { memo } from 'react'
 import { ChartCandlestick, Check, Info, OctagonAlert, ShieldCheck, TriangleAlert } from 'lucide-react'
 import type { NexusWarning, Position } from '../../api/types'
 import { fmtBarTime, fmtDuration, fmtPct, fmtPrice, fmtR, signTone, toneColor } from '../../lib/format'
-import { Badge, Button, IconButton, VerdictBadge } from '../ui'
+import { Badge, Button, VerdictBadge } from '../ui'
 import { ORIGIN_LABEL, fmtMoney, fmtQty, isNum } from '../markets/opsUtils'
-import { adviceLevel, contractsOf, contractsText, distPct, marketOf, stopProtects, tpHits } from './paperUtils'
+import { adviceLevel, contractsOf, contractsText, distPct, lotSizeText, lotsText, marketOf, stopProtects, tpHits } from './paperUtils'
 import { useMediaQuery } from './useMediaQuery'
+import { detailProps } from './TradeDetailModal'
 
 interface Props {
   positions: Position[]
@@ -16,6 +17,8 @@ interface Props {
   onOpenChart: (p: Position) => void
   /** Extra origin labels (e.g. NEXUS's own account: autopilot -> "NEXUS"), over the shared ORIGIN_LABEL. */
   originLabels?: Record<string, string>
+  /** A click on a row (not on its buttons) opens the trade's detail. */
+  onDetail?: (p: Position) => void
 }
 
 function WarningIcons({ warnings }: { warnings: NexusWarning[] }) {
@@ -89,8 +92,9 @@ const Row = memo(function Row(props: {
   onClose: (p: Position) => void
   onOpenChart: (p: Position) => void
   originLabels?: Record<string, string>
+  onDetail?: (p: Position) => void
 }) {
-  const { p, closing, busy, inlineAdvice, cols, onClose, onOpenChart, originLabels } = props
+  const { p, closing, busy, inlineAdvice, cols, onClose, onOpenChart, originLabels, onDetail } = props
   const market = marketOf(p)
   const level = adviceLevel(p)
   const pnlTone = signTone(p.pnl)
@@ -100,7 +104,7 @@ const Row = memo(function Row(props: {
   const rowCls = [level === 'close' ? 'pp-row-close' : '', subRow ? 'pp-has-sub' : ''].filter(Boolean).join(' ') || undefined
   return (
     <>
-    <tr className={rowCls}>
+    <tr className={[rowCls, onDetail ? 'pp-row-click' : ''].filter(Boolean).join(' ') || undefined} {...detailProps(p, onDetail)}>
       <td>
         <div className="pp-sym">
           <button type="button" onClick={() => onOpenChart(p)} title={`Abrir ${market.chart} en el gráfico`}>
@@ -114,8 +118,14 @@ const Row = memo(function Row(props: {
       <td title="Cantidad abierta / cantidad inicial">
         <div className="pp-stack" style={{ alignItems: 'flex-start', gap: 2 }}>
           <Badge tone={market.sideTone}>{market.side}</Badge>
-          <span className="pp-sub">
-            {contractsText(p, p.qty) !== null ? `${contractsOf(p, p.qty_open)} de ${contractsText(p, p.qty)}` : `${fmtQty(p.qty_open)} de ${fmtQty(p.qty)}`}
+          <span className="pp-sub" title={lotSizeText(p) ?? undefined}>
+            {!p.hold && lotsText(p, p.qty) !== null
+              ? p.qty_open === p.qty
+                ? lotsText(p, p.qty)
+                : `${lotsText(p, p.qty_open)} de ${lotsText(p, p.qty)}`
+              : contractsText(p, p.qty) !== null
+                ? `${contractsOf(p, p.qty_open)} de ${contractsText(p, p.qty)}`
+                : `${fmtQty(p.qty_open)} de ${fmtQty(p.qty)}`}
           </span>
         </div>
       </td>
@@ -185,7 +195,15 @@ const Row = memo(function Row(props: {
           >
             Cerrar
           </Button>
-          <IconButton icon={<ChartCandlestick size={14} />} title="Ver gráfico" size="sm" onClick={() => onOpenChart(p)} />
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={<ChartCandlestick size={13} />}
+            onClick={() => onOpenChart(p)}
+            title="Ver en el gráfico dónde abrió, su stop, sus objetivos y hacia dónde va"
+          >
+            Ver operación
+          </Button>
         </div>
       </td>
     </tr>
@@ -200,7 +218,7 @@ const Row = memo(function Row(props: {
   )
 })
 
-function PositionsTable({ positions, closingId, onClose, onOpenChart, originLabels }: Props) {
+function PositionsTable({ positions, closingId, onClose, onOpenChart, originLabels, onDetail }: Props) {
   const inlineAdvice = useMediaQuery('(min-width: 1360px)')
   const cols = inlineAdvice ? 11 : 10
   return (
@@ -235,6 +253,7 @@ function PositionsTable({ positions, closingId, onClose, onOpenChart, originLabe
               onClose={onClose}
               onOpenChart={onOpenChart}
               originLabels={originLabels}
+              onDetail={onDetail}
             />
           ))}
         </tbody>

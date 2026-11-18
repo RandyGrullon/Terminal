@@ -4,6 +4,8 @@ Each spec knows its native intervals, the page size, how to page backwards and h
 into ascending Candle dicts {time (bar open, unix s), open, high, low, close, volume (base asset)}.
 Verified from this network (see tests for the embedded real samples):
 - BINANCE  data-api.binance.vision/api/v3/klines (api.binance.com answers 451 here) · 1000/request · Monday weeks
+- BINANCE USDⓈ-M futures (provider `binance_um`) fapi.binance.com/fapi/v1/klines · same rows and errors · 1000/request;
+  only the perpetuals without a spot pair (gold XAUUSDT, a «TradFi» perpetual) come from it (app.data.symbols)
 - OKX      /api/v5/market/candles (300, latest bars) + /history-candles (100) · `after` = older than ts (ms)
 - COINBASE /products/{BASE-QUOTE}/candles · granularity 60,300,900,3600,21600,86400 only · 300/request
 - KRAKEN   /0/public/OHLC · only the latest 720 bars · weekly bars start on Thursday (we resample 1d -> 1w)
@@ -128,6 +130,14 @@ class BinanceSpec(ExchangeSpec):
         if result.status == 451:
             raise self.api_error("servicio no disponible desde esta región (HTTP 451)", "unsupported")
         raise unexpected(self.label, self.provider, result)
+
+
+class BinanceFuturesSpec(BinanceSpec):
+    """Binance USDⓈ-M perpetual futures: the same klines payload and error codes as the spot API."""
+
+    provider = "binance_um"
+    label = "BINANCE (futuros)"
+    URL = "https://fapi.binance.com/fapi/v1/klines"
 
 
 # ----------------------------------------------------------------------------- OKX
@@ -284,5 +294,6 @@ class KucoinSpec(ExchangeSpec):
 
 
 SPECS: dict[str, ExchangeSpec] = {
-    spec.provider: spec for spec in (BinanceSpec(), OkxSpec(), CoinbaseSpec(), KrakenSpec(), KucoinSpec())
+    spec.provider: spec for spec in (BinanceSpec(), BinanceFuturesSpec(), OkxSpec(), CoinbaseSpec(), KrakenSpec(),
+                                     KucoinSpec())
 }
