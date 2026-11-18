@@ -17,11 +17,13 @@ _DECLARATION = _section(
     ("indicator", "indicator(title, overlay=True)",
      "Declara un indicador. overlay=True lo dibuja sobre el precio; overlay=False en un panel propio debajo. "
      "Ponlo al principio del script; el título debe ser un texto literal. Ejemplo: indicator(\"Mi RSI\", overlay=False)"),
-    ("strategy", "strategy(title, overlay=True, initial_capital=10000, risk_pct=1, fee_pct=0.1, slippage_pct=0)",
+    ("strategy", "strategy(title, overlay=True, initial_capital=10000, risk_pct=1, fee_pct=0.1, slippage_pct=0, "
+                 "max_entries_per_day=None)",
      "Declara una estrategia con backtest. initial_capital = capital inicial; risk_pct = % del capital arriesgado "
      "por operación (el tamaño se calcula con la distancia al stop); fee_pct = comisión por lado en %; "
      "slippage_pct = deslizamiento en %. Las órdenes se ejecutan en la APERTURA de la vela siguiente a la señal "
-     "(sin mirar el futuro). Usa strategy.entry / exit / close."),
+     "(sin mirar el futuro). max_entries_per_day = máximo de entradas por día UTC (las demás señales de ese día se "
+     "ignoran). Usa strategy.entry / exit / close."),
 )
 
 _SERIES = _section(
@@ -243,16 +245,22 @@ _ALERTS = _section(
 
 _STRATEGY = _section(
     "Estrategia (backtest)",
-    ("strategy.entry", "strategy.entry(id, direction, when=True, qty_pct=None, stop=None, limit=None, comment=None)",
+    ("strategy.entry", "strategy.entry(id, direction, when=True, qty_pct=None, stop=None, limit=None, comment=None, "
+                       "reverse=True)",
      "Abre una posición \"long\" o \"short\" (o strategy.long / strategy.short) en la apertura de la vela siguiente "
      "a cada vela donde when es True. Una sola posición a la vez: una entrada contraria da la vuelta a la posición. "
-     "Sin qty_pct el tamaño sale de risk_pct y la distancia al stop; qty_pct = % del capital a invertir."),
+     "Sin qty_pct el tamaño sale de risk_pct y la distancia al stop; qty_pct = % del capital a invertir. "
+     "reverse=False: solo entra si no hay posición abierta (una señal contraria no la gira)."),
     ("strategy.exit",
-     "strategy.exit(id, from_entry=None, stop=None, limit=None, trail_atr=None, when=True, update=False, comment=None)",
+     "strategy.exit(id, from_entry=None, stop=None, limit=None, trail_atr=None, when=True, update=False, comment=None, "
+     "max_bars=None, partial_limit=None, partial_pct=50, breakeven=False)",
      "Salidas de la posición from_entry: stop = stop «hasta aquí», limit = objetivo, trail_atr = stop dinámico a "
      "k × ATR(14) del mejor precio. Los niveles se toman de la vela de la señal y quedan FIJOS durante la operación; "
      "con update=True se recalculan en cada vela (útil para seguir una línea como Supertrend). Stop y objetivo se "
-     "comprueban dentro de la vela; si ambos se tocan en la misma vela se asume el stop (prudente)."),
+     "comprueban dentro de la vela; si ambos se tocan en la misma vela se asume el stop (prudente). max_bars = "
+     "cierra en la apertura siguiente tras n velas en la operación. partial_limit = objetivo parcial: cierra el "
+     "partial_pct % de la posición en ese nivel (una vez) y, con breakeven=True, el stop del resto pasa al precio de "
+     "entrada desde la vela siguiente. El R de la operación cuenta las dos partes."),
     ("strategy.close", "strategy.close(id, when=True, comment=None)",
      "Cierra la posición abierta por la entrada id en la apertura de la vela siguiente a cada vela donde when es True."),
     ("strategy.close_all", "strategy.close_all(when=True, comment=None)",

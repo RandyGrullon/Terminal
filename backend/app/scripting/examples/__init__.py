@@ -79,6 +79,12 @@ EXAMPLES: tuple[tuple[str, str, str], ...] = (
         "ruptura (continuación), con stop, objetivo, una operación por sesión, cierre al final de la ventana y "
         "filtro de noticias (IPC, empleo, Fed).",
     ),
+    (
+        "genxau_macd_h4.py",
+        "GenXAU #3/#4 · falló el holdout — solo estudio",
+        "Dos finalistas de la investigación GenXAU de oro M30 (MACD/señal + tendencia H4 + TP parcial, overlap "
+        "Londres-NY). Fallaron el holdout 2025-11 → 2026-11: sirven para estudiarlas en el gráfico, no para operar.",
+    ),
 )
 
 

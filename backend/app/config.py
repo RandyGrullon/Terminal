@@ -85,6 +85,10 @@ DEFAULT_SETTINGS: dict = {
         "fund": 0.02,
     },
     "risk.slippage_pct": 0.02,
+    # Overnight swap of positions in MT5 lots (app.engine.costs.swap_rule): USD per 1.00 lot and night, by asset,
+    # charged at XM's daily rollover (17:00 New York, Wednesday triple) and counted in each trade's R like the
+    # commission. XAU = XM's GOLD swap measured on 2026-11-18 (longs pay, shorts earn a little): it changes with rates.
+    "risk.swap_by_symbol": {"XAU": {"long": -75.0, "short": 16.0}},
     # NEXUS engine
     # Calibrated on real 1h crypto data: |score| p90 ≈ 0.21-0.24, p99 ≈ 0.35-0.53. 0.20 yields ~30 candidates per
     # 1500 bars, which the Trade Gate then filters (TOMAR / ESPERAR / NO TOMAR with the reason on the chart).

@@ -19,6 +19,7 @@ import PredictionsTable from '../components/brain/PredictionsTable'
 import SkillCard from '../components/brain/SkillCard'
 import TimelineChart, { type TimelinePoint } from '../components/brain/TimelineChart'
 import ValidationCard from '../components/brain/ValidationCard'
+import GenXauCard from '../components/brain/GenXauCard'
 import WeightBars from '../components/brain/WeightBars'
 import { MIN_EVIDENCE_N, evidenceTone, filterEvidence, fmtOf } from '../components/brain/evidence'
 import { fmtBrier, fmtRate, prettyKey, prob01, rateTone } from '../components/brain/learnFormat'
@@ -389,6 +390,7 @@ export default function BrainPage() {
           reading and focus order now follow what is on screen. */}
       <div className="col">
         <ValidationCard />
+        <GenXauCard />
       </div>
 
       <Card title="Modelos NEXUS por activo" sub="Cada símbolo y temporalidad aprende sus propios pesos y su calibración" flush>

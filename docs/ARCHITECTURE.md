@@ -239,7 +239,9 @@ Never edit the baseline files: add a migration. JSON blobs are TEXT (`json.dumps
 `await rt.settings.update(dict)` (validates every value before writing any). Values coerced to the default's type;
 unknown keys accepted only with `ui.` prefix (feature keys are known through `app.settings_ext`, §4). Numbers (and
 numeric lists such as `nexus.tp_r`) reject booleans, NaN and ±inf; a dict default (`risk.fee_pct_by_class`) takes a
-JSON object (or its string) with known keys only and finite numbers, missing keys keep their default value. Invalid →
+JSON object (or its string) with known keys only and finite numbers, missing keys keep their default value; a map
+of numeric maps (`risk.swap_by_symbol`) takes any key (upper-cased) with the inner keys of the default (`long`,
+`short`; a missing one is 0). Invalid →
 `ValueError` (`PUT /api/settings` → 400). Beyond types the store checks nothing: feature code clamps or validates the
 values it reads (e.g. `scanner.replay_days` 0..30; the alert channels report incomplete data in their status).
 
@@ -322,6 +324,7 @@ Markov regime switching + GARCH(1,1)-like volatility clustering + jumps + mean r
 risk.account_size 10000 · risk.per_trade_pct 1.0 · risk.fee_pct 0.1 · risk.slippage_pct 0.02
 risk.fee_pct_by_class {forex 0.005, index 0.01, futures 0.01, bond 0.01,
                        commodity 0.02, cfd 0.02, stock 0.02, fund 0.02}
+risk.swap_by_symbol {XAU {long -75, short 16}}   (USD per 1.00 MT5 lot and night: XM's GOLD swap, 2026-11-18)
 nexus.entry_threshold 0.2 · nexus.exit_threshold 0.0 · nexus.horizon 5 · nexus.sl_atr 2.0
 nexus.tp_r [1.0, 2.0, 3.0] · nexus.trail_atr 3.0 · nexus.learning_rate 0.08 · nexus.allow_short true
 nexus.min_bars 150 · nexus.default_limit 1000 · nexus.time_stop_bars 48
@@ -391,7 +394,13 @@ in the form, they set how the edge is measured) and `scanner.replay_days` in 'Es
 `SIM:*` counts as crypto). `fee_pct_for(symbol, settings)` = `risk.fee_pct_by_class[class]` when configured (negative
 → 0), otherwise `risk.fee_pct` (crypto, SIM:*, `other` and any class missing from the map): a single crypto-sized fee
 would make the gate veto every low-volatility market. Used by NEXUS (`NexusService.params(symbol)`: gate R:R/EV and
-trade R), backtests and Monte Carlo without an explicit fee, simulator replays and paper trading. Settings UI: kind
+trade R), backtests and Monte Carlo without an explicit fee, simulator replays and paper trading. **Overnight swap**
+(MT5 lots): `swap_rule(symbol, risk.swap_by_symbol)` → {long, short} USD per 1.00 lot and night by asset
+(`swap_asset`: gold = `XAU` for XAUUSD, XAUUSDT.P, GOLD…), charged at `rollovers(after, until)` = 17:00 New York
+(00:00 of XM's server, GMT+2 / GMT+3 with the US DST: 22:00 / 21:00 UTC), Monday to Friday, Wednesday counting three
+nights. It is XM's current swap (it changes with rates), a setting rather than code; Binance's gold perpetual has a
+funding rate instead, so this models MT5 costs. Paper trading only (the backtests and the lab do not charge it yet).
+Settings UI: kind
 `fee_classes` (group Riesgo, 0–2 % per class, the classes the server returns); the `risk.fee_pct` help says it
 applies to crypto and to classes without their own fee.
 
@@ -1176,7 +1185,11 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
   events ("Cerrado BINANCE:BTCUSDT largo +2,1R (+1,25 % · +125,00) · Objetivo 2", R net of fees).
   - **Fees and R**: fees per side come from the asset class (`fee_pct_for`: `risk.fee_pct_by_class`, otherwise
     `risk.fee_pct`). `r_multiple` is net of fees, like the engine and the backtest: closed positions count entry and
-    exit fees; open positions count the fees paid so far, with no exit fee on the open part.
+    exit fees; open positions count the fees paid so far, with no exit fee on the open part. A position in MT5 lots
+    pays the swap of every rollover it held through (`_charge_swap`, from the monitor's `_swap_tick` and before any
+    fill): into `meta.fees` (so its P&L and R include it, like the commission), the account's balance and a «Swap (n
+    noches)» fill with qty 0 (so the day's realized result and its loss limit count it); `Position.swap` is the total
+    so far; the simulator's positions and synthetic markets pay none.
   - **Level management**: SL first; TP1 closes 1/3 and moves the stop to break-even; TP2 closes 1/3 and starts the
     chandelier trail; TP3 closes the rest. A stop moved by a fill takes effect from the next bar: later updates of
     the bar in which it moved (the hub re-sends the forming 1m bar with its running high/low), or the live bar
@@ -1529,8 +1542,9 @@ stdev variance highest lowest highestbars lowestbars change crossover crossunder
 pivotlow barssince valuewhen cum linreg correlation percentrank median vwap wpr cmo tsi), `nz na fixnan`,
 `plot(series, title, color, linewidth, style, pane)`, `plotshape(cond, title, location, color, shape, text)`,
 `hline(price, title, color, style)`, `bgcolor(cond, color)`, `alertcondition(cond, title, message)`,
-`strategy.entry(id, direction, when, qty_pct, stop, limit, comment, qty)`,
-`strategy.exit(id, from_entry, stop, limit, trail_atr, when, update, comment)`, `strategy.close(id, when)`,
+`strategy.entry(id, direction, when, qty_pct, stop, limit, comment, qty, reverse)`,
+`strategy.exit(id, from_entry, stop, limit, trail_atr, when, update, comment, max_bars, partial_limit, partial_pct,
+breakeven)`, `strategy.close(id, when)`,
 `strategy.close_all(when)`, `color.*` constants, `print()` → stdout (shown in the terminal),
 `noticias.cerca(antes=30, despues=30, eventos="principales", moneda="USD")` / `noticias.lista(eventos, moneda)` /
 `noticias.desde` · `hasta` · `disponible` (economic calendar, `app.scripting.runtime_news`, below). Ship ≥ 8 example
@@ -1556,7 +1570,15 @@ vectorized *rules*. Signals are evaluated at the bar close and filled at the nex
 `strategy.entry` or `strategy.exit`) are checked intrabar — gaps fill at the open and the **stop wins** when both are
 touched in the same bar. Levels are captured on the signal bar and stay fixed for the trade unless
 `strategy.exit(..., update=True)` (refreshed on every close, Pine behaviour); `trail_atr=k` adds a chandelier trailing
-stop at k × ATR(14) from the best price. One position at a time (no pyramiding); an opposite entry reverses it.
+stop at k × ATR(14) from the best price. One position at a time (no pyramiding); an opposite entry reverses it,
+unless that entry has `reverse=False` (it then only enters when flat). `strategy(..., max_entries_per_day=n)` caps
+the entries per UTC day of the fill (`params.max_entries_per_day`). `strategy.exit(..., max_bars=n)` closes at the
+open after n bars in the trade (reason `TIME`, marker `EXIT_TIME`). `partial_limit` (captured once, like a fixed
+level) closes `partial_pct` % of the position there (or at the open of a gap beyond it; the stop wins a bar that
+touches both) with a `TP1` marker «TP 50 %»; with `breakeven=True` the stop of the rest moves to the entry price from
+the next bar (reason `BE`, «Stop en punto de equilibrio»). The trade then has `tp1` = the partial fill, `tp2` = the
+final target, `qty` = the whole size, fees and P&L of both parts, and an R over the whole position. All off by
+default (added for the GenXAU study example `genxau_macd_h4.py`).
 `strategy.next` (`BacktestResult.next`, PyChart only): what the rules ask for at the open after the last bar, without
 doing it — `StrategyNextAction {action entry|close, id, side, time (open time of the last bar), price (its close),
 stop, limit (an entry's levels from its own stop / limit and its exit rules on that bar, on the right side of the
@@ -1762,7 +1784,8 @@ las señales", backtest "Efecto del filtro", the Studio strategy panel and the A
   period's 'x de n' with the reference and climatology of the same rows. `ValidationCard` (§17) has its own
   full-width row after the gate / scanner-weights row. Scanner page: `ScanAccuracyCard` shows the reference,
   climatology, Brier skill and verdict.
-- Settings: kind `fee_classes` for `risk.fee_pct_by_class` (§4); the providers description says the keys are stored
+- Settings: kind `fee_classes` for `risk.fee_pct_by_class` (§4) and `swap_rules` for `risk.swap_by_symbol` (longs and
+  shorts per asset); the providers description says the keys are stored
   in the user's own database (SQLite locally, their Supabase Postgres in cloud mode). More field kinds: `text` (plain
   input with placeholder / inputMode), `password` (masked with show / hide like `secret`, but spaces allowed), `multi`
   (toggle chips over `options`, value in the options' order, a saved value outside them still shown); `FieldDef`
@@ -2128,6 +2151,13 @@ research and simulation tool, a TOMAR is not an edge, not financial advice.
   window; narrower windows scroll inside the table and the expanded series detail stays in view (sticky, container
   query units on `.val-card .table-wrap`). The 'Frente al azar' box compares the closed-trade drawdowns ('Caída máx.
   por operaciones cerradas: NEXUS x % · azar (mediana) y %'); the account box says both of its drawdowns are per bar.
+  Under it, `components/brain/GenXauCard.tsx` («GenXAU — oro M30»): the static verdict of the external GenXAU research
+  (genetic generator in MetaTrader 5's tester, XM's XAUUSD M30: Plan A 44,592 passes → 11,409 strategies → 2,418 ideas
+  → 516 good in 2019-24 → 0 past the Deflated Sharpe; Spearman −0.02; the 5 finalists fail the holdout; Plan B 5,242
+  → 0), amber «Sin evidencia de ventaja», never green; its holdout year is spent. The main chart's toggle «Sesiones»
+  (`lib/sessions.ts`, bars up to 1h) draws the windows of that research behind the candles: the London-NY overlap
+  (12–16 UTC), XM's rollover (23:00–01:00 of its server, Monday before 02:00) and the Friday close (from 21:00 of the
+  server), with XM's server at GMT+2 / GMT+3 with the US DST; context, never a signal.
 
 ---------------------------------------------------------------------------------------------------------------------
 ## 18. Verification checklist (what "done" means)
@@ -2436,7 +2466,15 @@ questions about NEXUS in Spanish. Off by default (`ai.enabled`); while off, Olla
   bootstrap by UTC day of entry (`app.validation.stats`, ≥ 8 days). Verdicts: no closed trades; «Muestra pequeña: sin
   conclusiones» below 30 (`verdict.MIN_TRADES`); no interval; «Sin diferencia clara con entrar al azar» when the
   interval includes 0; «Por encima / por debajo de entrar al azar en este periodo» otherwise. Seeded by
-  `seed_for("lab", symbol, tf, code)` (the same script gives the same summary). The note says that adjusting rules
+  `seed_for("lab", symbol, tf, code)` (the same script gives the same summary). Each successful run is also a trial
+  of the multiple-testing family of its market and timeframe (`lab.trial_of`, saved in `meta` key `lab.trials`, the
+  last 2,000, a variant run again replaces its previous run): its idea is the code without comments and numbers
+  (`lab.idea_key`: the variants of its parameters are one idea), its R per trade of the development period gives SR,
+  skew and kurtosis (`app.validation.deflated`, ported from GenXAU's `analizar.py`), and the summary adds
+  `multiplicidad` (variants and ideas tried, those with ≥ 120 trades, SR, σ(SR), SR0, DSR, a Spanish verdict;
+  indicative threshold DSR ≥ 0.5, no DSR with one eligible variant) and, when an idea has ≥ 4 variants, `mesetas`
+  (median SR, median profit factor and % positive variants in development and in check: an idea is judged by its
+  median variant, never its best). The note says that adjusting rules
   after looking makes the check period dependent and that every variant tested is another chance to look good by
   luck (a no-edge rule is called "above / below" about 1 time in 12 at this level). The system prompt adds the lab's
   rules: reference → script → test → fix; show the whole script in a ```python``` block and the results as they are;
@@ -2587,7 +2625,10 @@ days), so neither says much about a strategy. This module stores long history an
   the given candles, quiet, 240 s) and NEXUS with and without its gate (`run_backtest`), and judges each with the
   copilot lab's method (`app.ai.lab.summarize_run` / `period_summary`): development (first 70 % of the candles) and
   check (last 30 %), each against random entries with the same direction, duration and costs, 95 % interval by a
-  block bootstrap by day, nothing concluded below 30 trades. «candidata» = above random in both periods; the
+  block bootstrap by day, nothing concluded below 30 trades. Every strategy also gets `multiplicidad`: its DSR
+  against all the strategies of that research (NEXUS's two runs are ideas `nexus:filtro` / `nexus:sin_filtro`), the
+  `DSR` column of the terminal table. «candidata» = above random in both periods and, when it can be computed, DSR ≥
+  0.5; the
   conclusion still asks to confirm it on another market or timeframe. The last 20 reports (one per market and
   timeframe) are kept in `meta` key `research.reports`.
 - API: `GET /api/research` → `{busy, job: {kind, title, state: running|done|error, progress[], started_ms,

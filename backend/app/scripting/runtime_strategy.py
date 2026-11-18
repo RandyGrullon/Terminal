@@ -8,7 +8,12 @@ PyChart scripts are evaluated once over the whole series, so orders are *rules*:
 - ``stop`` / ``limit`` levels (of ``strategy.entry`` or ``strategy.exit``) are captured on the signal bar and stay
   fixed for the whole trade; ``strategy.exit(..., update=True)`` refreshes them on every bar close (Pine
   behaviour) and ``trail_atr=k`` adds a chandelier trailing stop at k × ATR(14) from the best price;
-- one position at a time (no pyramiding); an opposite entry reverses the position.
+- one position at a time (no pyramiding); an opposite entry reverses the position, unless the entry says
+  ``reverse=False`` (then it only enters when flat);
+- ``strategy(..., max_entries_per_day=n)`` caps the entries per UTC day (of the fill);
+- ``strategy.exit(..., max_bars=n)`` closes at the open after n bars in the trade; ``partial_limit`` closes
+  ``partial_pct`` % of the position at that level (once) and, with ``breakeven=True``, moves the stop of the rest to
+  the entry price.
 """
 from __future__ import annotations
 
@@ -107,6 +112,7 @@ class StrategyAPI:
         max_bars_back: Any = None,
         precision: Any = None,
         format: Any = None,
+        max_entries_per_day: Any = None,
     ) -> None:
         capital = to_float(initial_capital, "strategy(initial_capital)")
         if capital <= 0:
@@ -118,12 +124,19 @@ class StrategyAPI:
         slip = to_float(slippage_pct, "strategy(slippage_pct)")
         if not 0 <= fee <= 10 or not 0 <= slip <= 10:
             raise ScriptRuntimeError("strategy: fee_pct y slippage_pct deben estar entre 0 y 10 (%).")
+        per_day = None
+        if max_entries_per_day is not None:
+            per_day = to_float(max_entries_per_day, "strategy(max_entries_per_day)")
+            if per_day != int(per_day) or not 1 <= per_day <= 1000:
+                raise ScriptRuntimeError("strategy(max_entries_per_day) debe ser un número entero entre 1 y 1000.")
+            per_day = int(per_day)
         if self._declare("strategy", title, overlay):
             self._ctx.strategy_config = {
                 "initial_capital": capital,
                 "risk_pct": risk,
                 "fee_pct": fee,
                 "slippage_pct": slip,
+                "max_entries_per_day": per_day,
             }
         return None
 
@@ -153,8 +166,10 @@ class StrategyAPI:
         limit: Any = None,
         comment: Any = None,
         qty: Any = None,
+        reverse: Any = True,
     ) -> None:
-        """Opens (or reverses into) a position at the next bar open on every bar where ``when`` is true."""
+        """Opens (or reverses into) a position at the next bar open on every bar where ``when`` is true;
+        ``reverse=False``: only when flat (an opposite signal leaves the open position alone)."""
         rules = self._rules("strategy.entry")
         if qty is not None and qty_pct is None:
             raise ScriptRuntimeError("strategy.entry: usa qty_pct (porcentaje del capital) en lugar de qty.")
@@ -173,6 +188,7 @@ class StrategyAPI:
                 "stop": self._levels(stop, "strategy.entry(stop)"),
                 "limit": self._levels(limit, "strategy.entry(limit)"),
                 "comment": None if comment is None else str(comment)[:40],
+                "reverse": bool(reverse),
             }
         )
         return None
@@ -187,8 +203,13 @@ class StrategyAPI:
         when: Any = True,
         update: Any = False,
         comment: Any = None,
+        max_bars: Any = None,
+        partial_limit: Any = None,
+        partial_pct: Any = 50,
+        breakeven: Any = False,
     ) -> None:
-        """Protective stop / take-profit (and optional ATR trailing stop) for the position of ``from_entry``."""
+        """Protective stop / take-profit (and optional ATR trailing stop) for the position of ``from_entry``; a time
+        limit (``max_bars``) and a partial take-profit (``partial_limit``, ``partial_pct``, ``breakeven``)."""
         rules = self._rules("strategy.exit")
         n = self._ctx.n
         trail = None
@@ -198,8 +219,19 @@ class StrategyAPI:
                 raise ScriptRuntimeError("strategy.exit(trail_atr) debe ser mayor que 0 (múltiplo del ATR).")
         stop_s = self._levels(stop, "strategy.exit(stop)")
         limit_s = self._levels(limit, "strategy.exit(limit)")
-        if stop_s is None and limit_s is None and trail is None:
-            raise ScriptRuntimeError("strategy.exit: indica stop, limit o trail_atr.")
+        partial_s = self._levels(partial_limit, "strategy.exit(partial_limit)")
+        bars = None
+        if max_bars is not None:
+            bars = to_float(max_bars, "strategy.exit(max_bars)")
+            if bars != int(bars) or not 1 <= bars <= 100_000:
+                raise ScriptRuntimeError("strategy.exit(max_bars) debe ser un número entero de velas mayor que 0.")
+            bars = int(bars)
+        pct = to_float(partial_pct, "strategy.exit(partial_pct)")
+        if partial_s is not None and not 0 < pct < 100:
+            raise ScriptRuntimeError("strategy.exit(partial_pct) debe estar entre 0 y 100 (sin incluirlos): el % de la "
+                                     "posición que se cierra en partial_limit.")
+        if stop_s is None and limit_s is None and trail is None and bars is None and partial_s is None:
+            raise ScriptRuntimeError("strategy.exit: indica stop, limit, trail_atr, max_bars o partial_limit.")
         rules.exits.append(
             {
                 "id": _name(id, "strategy.exit"),
@@ -210,6 +242,10 @@ class StrategyAPI:
                 "when": to_bool(when, n, "strategy.exit(when)"),
                 "update": bool(update),
                 "comment": None if comment is None else str(comment)[:40],
+                "max_bars": bars,
+                "partial": partial_s,
+                "partial_pct": pct,
+                "breakeven": bool(breakeven),
             }
         )
         return None

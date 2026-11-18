@@ -60,7 +60,7 @@ const STATIC: { section: string; items: [string, string][] }[] = [
     section: 'Declaración',
     items: [
       ['indicator', '(title, overlay=True)'],
-      ['strategy', '(title, initial_capital=10000, risk_pct=1, fee_pct=0.1)'],
+      ['strategy', '(title, initial_capital=10000, risk_pct=1, fee_pct=0.1, max_entries_per_day=None)'],
     ],
   },
   {
@@ -93,8 +93,8 @@ const STATIC: { section: string; items: [string, string][] }[] = [
   {
     section: 'Estrategia',
     items: [
-      ['strategy.entry', '(id, direction, when, qty_pct)'],
-      ['strategy.exit', '(id, from_entry, stop, limit, trail_atr)'],
+      ['strategy.entry', '(id, direction, when, qty_pct, reverse=True)'],
+      ['strategy.exit', '(id, from_entry, stop, limit, trail_atr, max_bars, partial_limit, partial_pct=50, breakeven)'],
       ['strategy.close', '(id, when)'],
     ],
   },

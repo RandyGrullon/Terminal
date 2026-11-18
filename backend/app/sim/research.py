@@ -224,7 +224,10 @@ class ResearchService:
                                times, arr["open"], arr["close"], split, n, cost_pct=cost, seed=seed + 7),
         ]
         wins = sum(1 for r in rows if r[3] > 0)
-        return {"ok": True, "total": {"operaciones": len(rows), "ganadoras": f"{wins} de {len(rows)}",
+        trial = lab.trial_from_trades(closed, split_time, idea=f"nexus:{'filtro' if gate else 'sin_filtro'}",
+                                      variant=f"nexus:{'filtro' if gate else 'sin_filtro'}",
+                                      label="NEXUS con su filtro" if gate else "NEXUS sin filtro", symbol=symbol, tf=tf)
+        return {"_trial": trial, "ok": True, "total": {"operaciones": len(rows), "ganadoras": f"{wins} de {len(rows)}",
                                       "rentabilidad_pct": lab._r((res.get("metrics") or {}).get("total_return_pct"))},
                 "periodos": periods, "costes": {"comision_pct_por_lado": lab._r(fee, 4),
                                                 "deslizamiento_pct": lab._r(slip, 4)}}
@@ -245,7 +248,8 @@ class ResearchService:
             run = await self.rt.scripts.run_on(s["code"], candles, symbol, tf, timeout=SCRIPT_TIMEOUT_S)
             summary = lab.summarize_run(run, symbol=symbol, tf=tf, seed=1000 + i)
             entry = {"nombre": s["name"], "fuente": "pychart", "script_id": s["id"],
-                     "segundos": round(time.perf_counter() - started, 1), **summary}
+                     "segundos": round(time.perf_counter() - started, 1), **summary,
+                     "_trial": lab.trial_of(run, code=s["code"], symbol=symbol, tf=tf) if summary.get("ok") else None}
             results.append(entry)
         if nexus:
             for gate in (True, False):
@@ -258,9 +262,18 @@ class ResearchService:
                     entry = {"ok": False, "errores": [{"mensaje": f"{type(exc).__name__}: {exc}"}]}
                 results.append({"nombre": name, "fuente": "nexus", "segundos": round(time.perf_counter() - started, 1),
                                 **entry})
+        # how many strategies were tried in this research: each one's deflated Sharpe against all of them
+        trials = [r["_trial"] for r in results if r.get("_trial")]
+        for r in results:
+            trial = r.pop("_trial", None)
+            if trial is not None:
+                r["multiplicidad"] = lab.multiplicity(trial, trials)
         for r in results:
             dev, chk = self._verdicts(r.get("periodos") or [])
-            r["candidata"] = bool(r.get("ok")) and dev == "above" and chk == "above"
+            dsr = r.get("multiplicidad") or {}
+            # with a computable DSR, a candidate also has to pass it (DSR ≥ 0.5)
+            r["candidata"] = (bool(r.get("ok")) and dev == "above" and chk == "above"
+                              and (dsr.get("dsr") is None or bool(dsr.get("pasa_dsr"))))
         candidates = [r["nombre"] for r in results if r["candidata"]]
         tried = sum(1 for r in results if r.get("ok"))
         conclusion = (CANDIDATE.format(names=", ".join(candidates), n=tried) if candidates else NO_EDGE)

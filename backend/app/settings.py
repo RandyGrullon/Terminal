@@ -114,6 +114,18 @@ class SettingsStore:
                 if default and all(isinstance(x, (int, float)) for x in default):
                     return [_finite(x) for x in value]
                 return list(value)
+            if isinstance(default, dict) and default and all(isinstance(v, dict) for v in default.values()):
+                # Maps of numeric maps by a free key (e.g. risk.swap_by_symbol: {asset: {long, short}}): any key
+                # (upper case), the inner keys of the default, finite numbers (a missing one is 0).
+                if isinstance(value, str):
+                    value = json.loads(value.strip() or "{}")
+                inner = sorted({k for v in default.values() for k in v})
+                if not isinstance(value, dict) or not all(isinstance(v, dict) for v in value.values()):
+                    raise ValueError
+                if any(k not in inner for v in value.values() for k in v):
+                    raise ValueError
+                return {str(k).strip().upper(): {i: _finite(v.get(i, 0.0)) for i in inner}
+                        for k, v in value.items() if str(k).strip()}
             if isinstance(default, dict):
                 # Numeric maps (e.g. risk.fee_pct_by_class): only the known keys, finite numbers; missing keys keep
                 # their default value.

@@ -19,6 +19,11 @@ const TF_SECONDS: Record<string, number> = {
   '8h': 28800, '12h': 43200, '1d': 86400, '3d': 259200, '1w': 604800,
 }
 
+/** Seconds of a timeframe ('30m' → 1800); null for an unknown one. */
+export function tfSeconds(tf: string | null | undefined): number | null {
+  return TF_SECONDS[String(tf ?? '')] ?? null
+}
+
 export function styleOf(tf: string | null | undefined): TradeStyle {
   const s = TF_SECONDS[String(tf ?? '')]
   if (!s) return 'medida'

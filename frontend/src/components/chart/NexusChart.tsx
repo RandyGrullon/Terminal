@@ -17,6 +17,7 @@ import {
   MarkerLayer,
   TradeLevelsLayer,
   TradeViewLayer,
+  addBands,
   addCandles,
   addLine,
   addSeriesForOutput,
@@ -38,6 +39,8 @@ import {
 } from '../../lib/chart'
 import { fmtPrice, fmtR, priceDecimals } from '../../lib/format'
 import { PROJECTION_BARS, barAt, barSpacing, projection, type TradeView } from '../../lib/tradeView'
+import { SESSION_COLORS, sessionBandOf, sessionBands, SESSION_MAX_TF_S } from '../../lib/sessions'
+import { tfSeconds } from '../../lib/tradeStyle'
 import ChartLegend from './ChartLegend'
 import MarkerTooltip, { type TooltipState } from './MarkerTooltip'
 import {
@@ -65,6 +68,8 @@ export interface ChartToggles {
   volume: boolean
   ema: boolean
   scorePane: boolean
+  /** Session bands on bars up to 1h: London-NY overlap, the broker's rollover and the Friday close (lib/sessions). */
+  sessions: boolean
 }
 
 export interface NexusChartHandle {
@@ -99,6 +104,7 @@ interface Props {
 
 interface BaseSeries {
   candles: ISeriesApi<'Candlestick'>
+  bands: ISeriesApi<'Histogram'>
   volume: ISeriesApi<'Histogram'>
   emaFast: ISeriesApi<'Line'>
   emaSlow: ISeriesApi<'Line'>
@@ -253,6 +259,7 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
     if (!chart) return
     let base: BaseSeries
     try {
+      const bands = addBands(chart, 0)
       const volume = addVolume(chart, 0)
       const candleSeries = addCandles(chart, 0)
       const emaTrend = addLine(chart, { color: COLORS.muted, width: 1 })
@@ -263,6 +270,7 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
       const cone = new ConeLayer(chart, 0)
       base = {
         candles: candleSeries,
+        bands,
         volume,
         emaFast,
         emaSlow,
@@ -573,6 +581,20 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chart, prediction, toggles.cone, anchorTime, anchorPrice, viewKey, tf, guard, resetView])
 
+  // ------------------------------------------------------------------ session bands (bars up to 1h)
+  const showSessions = toggles.sessions && (tfSeconds(tf) ?? Infinity) <= SESSION_MAX_TF_S
+  const sessionsOnRef = useRef(showSessions)
+  sessionsOnRef.current = showSessions
+  useEffect(() => {
+    const b = baseRef.current
+    if (!chart || !b) return
+    guard('sesiones', () => {
+      const arr = showSessions ? cleanCandles(candles, tf) : []
+      const rows = sessionBands(arr.map((c) => c.time), tfSeconds(tf) ?? 0)
+      b.bands.setData(rows.map((r) => ({ time: ts(r.time, tf), value: 1, color: SESSION_COLORS[r.band] })))
+    })
+  }, [chart, candles, tf, showSessions, guard])
+
   // ------------------------------------------------------------------ volume visibility
   useEffect(() => {
     const b = baseRef.current
@@ -725,6 +747,8 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
         try {
           b.candles.update({ time: t, open: c.open, high: c.high, low: c.low, close: c.close })
           b.volume.update({ time: t, value: volume, color: c.close >= c.open ? COLORS.upVol : COLORS.downVol })
+          const band = sessionsOnRef.current ? sessionBandOf(c.time) : null
+          if (band && (!last || c.time > last.time)) b.bands.update({ time: t, value: 1, color: SESSION_COLORS[band] })
         } catch (err) {
           console.warn('[NexusChart] vela en vivo descartada', err)
           return
@@ -756,6 +780,7 @@ const NexusChart = forwardRef<NexusChartHandle, Props>(function NexusChart(props
         getPrecision={getPrecision}
         bars={bars}
         showEma={toggles.ema}
+        showSessions={showSessions}
         showScore={structure.showScore}
         indicators={indicators}
         onEdit={props.onEditIndicator}

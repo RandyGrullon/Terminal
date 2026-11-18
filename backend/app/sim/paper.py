@@ -70,6 +70,7 @@ import numpy as np
 
 from app import config
 from app.data.symbols import fx_pair, split_pair, strip_derivative
+from app.engine import costs as CS
 from app.engine.costs import asset_class, fee_pct_for
 from app.engine.levels import ev_hold
 from app.engine.nexus_current import EARLY_EV
@@ -1314,6 +1315,7 @@ class PaperEngine:
             "advice": meta.get("advice"),
             "warnings": meta.get("warnings") or [],
             "plan": TP.plan_of(pos, meta, risk_unit),
+            "swap": round(float(meta.get("swap", 0.0) or 0.0), 2),
         }
 
     def open_positions(self, account_id: int = 1, symbol: str | None = None) -> list[dict]:
@@ -2474,6 +2476,8 @@ class PaperEngine:
         """Book fills / level changes for a position (caller holds self._lock). True when the position closed."""
         if not fills and st is None:
             return False
+        if fills:  # the swap of the rollovers it held through comes first: its result and R include it
+            await self._charge_swap(pos, time_s)
         meta = pos["meta"]
         s = side_sign(pos["side"])
         fee_pct, slip = self._fee_pct(pos["symbol"]), self._slip_pct()
@@ -4382,6 +4386,74 @@ class PaperEngine:
                 brake=self._brake(account, ch["brake_pct"]), now=t))
         return out
 
+    # ------------------------------------------------------------------ overnight swap (app.engine.costs)
+
+    def _swap_rule(self, pos: dict) -> dict[str, float] | None:
+        """{long, short} USD per 1.00 lot and night for a position in MT5 lots (risk.swap_by_symbol), or None: the
+        simulator's positions, synthetic markets and positions without a lot pay no swap."""
+        if pos.get("origin") == "sim" or str(pos.get("symbol") or "").upper().startswith("SIM:"):
+            return None
+        if L.lot_spec(pos["symbol"], (pos.get("meta") or {}).get("instrument")) is None:
+            return None
+        return CS.swap_rule(pos["symbol"], self._setting("risk.swap_by_symbol", None))
+
+    async def _charge_swap(self, pos: dict, until_s: int) -> float:
+        """Book the swap of the rollovers an open position held through up to `until_s` (caller holds self._lock):
+        into its fees (its P&L and R include it, like the commission), the account's balance and a «Swap» fill (the
+        day's realized result counts it). Returns the amount (+ credited, − charged)."""
+        rule = self._swap_rule(pos)
+        if rule is None or pos.get("status") != "open" or float(pos.get("qty_open") or 0.0) <= 0:
+            return 0.0
+        meta = pos["meta"]
+        last = safe_float(meta.get("swap_until")) or float(pos["entry_time"])
+        events = CS.rollovers(last, int(until_s))
+        if not events:
+            return 0.0
+        spec = L.lot_spec(pos["symbol"], meta.get("instrument"))
+        lots = float(pos["qty_open"]) / float(spec["size"])
+        nights = sum(n for _, n in events)
+        total = CS.swap_for(rule, pos["side"], lots, nights)
+        meta["swap"] = float(meta.get("swap", 0.0) or 0.0) + total
+        meta["fees"] = float(meta.get("fees", 0.0) or 0.0) - total
+        meta["swap_until"] = events[-1][0]
+        label = f"Swap ({nights} {'noche' if nights == 1 else 'noches'})"
+        async with self.rt.db.transaction() as tx:
+            await tx.execute(
+                "INSERT INTO paper_fills(position_id, account_id, time, side, qty, price, fee, reason) "
+                "VALUES (?, ?, ?, ?, 0, ?, ?, ?)",
+                (pos["id"], pos["account_id"], events[-1][0], "buy" if pos["side"] == "long" else "sell",
+                 pos["entry_price"], -total, label))
+            if total:
+                await tx.execute("UPDATE paper_accounts SET balance = balance + ?, updated_at=? WHERE id=?",
+                                 (total, now_ms(), pos["account_id"]))
+            await tx.execute("UPDATE paper_positions SET meta=? WHERE id=?", (json_dumps(meta), pos["id"]))
+        return total
+
+    async def _swap_tick(self, now: int | None = None) -> None:
+        """The monitor's check: book the swap of every open position that held through a rollover."""
+        t = int(now if now is not None else now_s())
+        touched: set[int] = set()
+        for pos in list(self._open.values()):
+            rule = self._swap_rule(pos)
+            if rule is None:
+                continue
+            last = safe_float(pos["meta"].get("swap_until")) or float(pos["entry_time"])
+            if not CS.rollovers(last, t):
+                continue
+            async with self._lock:
+                amount = await self._charge_swap(pos, t) if pos["id"] in self._open else 0.0
+                if amount:
+                    touched.add(pos["account_id"])
+                    if self._is_autopilot(pos["account_id"]):
+                        lot = L.lot_info(pos["symbol"], pos["qty_open"], pos["meta"].get("instrument")) or {}
+                        self._autopilot_note(
+                            traded_symbol(pos), "info",
+                            f"Swap del rollover: {fmt_num(amount, 2, True)} $ ({SIDE_LABEL[pos['side']].lower()} de "
+                            f"{fmt_lots(lot.get('lots'))}); lleva {fmt_num(pos['meta']['swap'], 2, True)} $ acumulados",
+                            account_id=pos["account_id"])
+        for aid in touched:
+            await self.publish(aid)
+
     # ------------------------------------------------------------------ its New York session mode
 
     def _session_view(self, now: int | None = None) -> dict[str, Any]:
@@ -4507,6 +4579,7 @@ class PaperEngine:
                 await self._goal_tick()
                 await self._session_tick()
                 await self._challenge_tick()
+                await self._swap_tick()
                 await self._autopilot_watchdog()
                 if any(p["account_id"] == 1 for p in self._open.values()):
                     await self.publish(1)

@@ -596,6 +596,7 @@ export interface Position {
   advice: string | null
   warnings: NexusWarning[]
   plan?: PositionPlan | null // NEXUS automática's trades: why it opened and its target, or why it has none
+  swap?: number // overnight swap booked so far (USD; − charged, + credited; MT5 lots, risk.swap_by_symbol)
 }
 
 /** Why one of NEXUS automática's trades opened and its next pending target, or, when it has none, why not (always

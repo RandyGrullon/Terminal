@@ -55,6 +55,7 @@ const DEFAULT_TOGGLES: ChartToggles = {
   volume: true,
   ema: true,
   scorePane: true,
+  sessions: true,
 }
 
 const TOGGLES: { key: keyof ChartToggles; label: string; title: string }[] = [
@@ -65,6 +66,12 @@ const TOGGLES: { key: keyof ChartToggles; label: string; title: string }[] = [
   { key: 'volume', label: 'Volumen', title: 'Volumen en la parte inferior del gráfico' },
   { key: 'ema', label: 'EMAs', title: 'Medias móviles que usa NEXUS (rápida, lenta y de tendencia)' },
   { key: 'scorePane', label: 'Panel NEXUS', title: 'Panel inferior con la puntuación NEXUS y la probabilidad de subida' },
+  {
+    key: 'sessions',
+    label: 'Sesiones',
+    title:
+      'Franjas en velas de hasta 1h: overlap Londres-NY (12:00–16:00 UTC), rollover del bróker (23:00–01:00 del servidor de XM) y cierre del viernes. Contexto de la investigación GenXAU, no una señal',
+  },
 ]
 
 const HISTORY_INFO: Record<HistoryKind, { label: string; tone: Tone; hint: string }> = {

@@ -674,7 +674,7 @@ test('positions and history reuse the paper tables; NEXUS is the origin, never "
 test('summary: a tile per open trade (its money, the path from the stop to the target, close / see) and the latest moves', () => {
   const html = render(M.AutopilotView, { initial: snapshot() })
   const tiles = html.slice(html.indexOf('Operaciones abiertas'), html.indexOf('Qué hace ahora'))
-  assert.ok(tiles.includes('class="dk-tile"') && tiles.includes('>ETH<') && tiles.includes(' Compra</span>'), tiles)
+  assert.ok(tiles.includes('class="dk-tile dk-clickable" role="button"') && tiles.includes('>ETH<') && tiles.includes(' Compra</span>'), tiles) // a click opens its detail
   assert.ok(tiles.includes('Monto') && tiles.includes('dk-path-track') && tiles.includes('para el objetivo') && tiles.includes('el stop está a'), tiles)
   assert.ok(tiles.includes('>Cerrar</button>') && tiles.includes('>Ver</button>'), 'closable and visible on the chart')
   assert.ok(tiles.includes('Rápidas') && tiles.includes('Medidas') && tiles.includes('Largo plazo'), 'the speed filter')

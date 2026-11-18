@@ -174,7 +174,7 @@ def test_paper_lifecycle_tp1_be_tp2_trail_and_accounting(runtime_factory, no_bac
             assert set(closed) == {"id", "account_id", "symbol", "tf", "side", "qty", "qty_open", "entry_price",
                                    "entry_time", "sl", "tp1", "tp2", "tp3", "trail", "tp_hits", "status", "price", "exit_price",
                                    "exit_time", "pnl", "pnl_pct", "r_multiple", "exit_reason", "exit_label", "origin",
-                                   "gate_verdict", "gate_score", "advice", "warnings", "instrument", "lot", "hold", "plan"}
+                                   "gate_verdict", "gate_score", "advice", "warnings", "instrument", "lot", "hold", "plan", "swap"}
             assert closed["instrument"] is None and closed["hold"] is False and closed["plan"] is None  # a plain position
             assert closed["lot"]["size"] == 1.0  # its size in MT5 lots (app.engine.lots): a crypto coin per lot
             await engine.stop()

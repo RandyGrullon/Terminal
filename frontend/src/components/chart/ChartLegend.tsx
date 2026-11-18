@@ -8,6 +8,7 @@ import { fmtCompact, fmtPct, fmtPrice, fmtProb, fmtScore } from '../../lib/forma
 import { Spinner } from '../ui'
 import { candleIndexAt, fmtAuto, safeColor, valueAt, type Emitter } from './chartUtils'
 import { paramsSummary, type ResolvedIndicator } from './indicatorsModel'
+import { SESSION_COLORS, SESSION_LABELS, SESSION_NOTE, type SessionBand } from '../../lib/sessions'
 
 interface Props {
   hover: Emitter<number | null>
@@ -15,6 +16,8 @@ interface Props {
   getPrecision: () => number
   bars: NexusBars | null
   showEma: boolean
+  /** The session bands are drawn (toggle on and bars up to 1h). */
+  showSessions?: boolean
   showScore: boolean
   indicators: ResolvedIndicator[]
   onEdit: (uid: string) => void
@@ -76,6 +79,18 @@ function ChartLegend(props: Props) {
             <span key={r.key} className="row gap-1" title={r.label}>
               <span className="swatch" style={{ background: r.color }} />
               <span className="mono">{fmtPrice(valueAt(bars.time, bars[r.key], t), decimals)}</span>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {props.showSessions && (
+        <div className="legend-item" title={SESSION_NOTE}>
+          <span className="chart-legend-name">Sesiones</span>
+          {(Object.keys(SESSION_LABELS) as SessionBand[]).map((k) => (
+            <span key={k} className="row gap-1" title={`${SESSION_LABELS[k].label}: ${SESSION_LABELS[k].hint}`}>
+              <span className="swatch" style={{ background: SESSION_COLORS[k].replace(/[\d.]+\)$/, '0.6)') }} />
+              <span className="muted">{SESSION_LABELS[k].label}</span>
             </span>
           ))}
         </div>

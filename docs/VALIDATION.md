@@ -455,3 +455,31 @@ En 1d los datos de las dos ejecuciones son los mismos (velas diarias cerradas ha
 diferencias se deben solo al motor: SOLUSDT da las mismas operaciones (solo cambian milésimas por redondeo), XRPUSDT
 las mismas con filtro y casi las mismas sin él, y con filtro BTCUSDT pasa de 44 a 45 operaciones, ETHUSDT de 70 a 67 y
 BNBUSDT de 55 a 47 (−0,11R → −0,04R). En 15m, 1h y 4h, además del motor, la ventana se desplazó unas 7 horas.
+
+---------------------------------------------------------------------------------------------------------------------
+## 8. Investigación externa: GenXAU (oro M30 en MetaTrader 5)
+
+Fuera de NEXUS se buscaron estrategias para el oro (XAUUSD; en XM se llama GOLD) en velas de 30 minutos con un
+generador genético en el probador de MetaTrader 5, con el historial y los costos de XM (cuenta demo). Entrenamiento
+2019-01-01 → 2024-06-30, forward 2024-07-01 → 2025-11-16 y holdout 2025-11-17 → 2026-11-18.
+
+> **Conclusión: sin evidencia de ventaja** para estrategias de indicadores de precio en XAU M30 con los costos de XM:
+> 16.651 estrategias probadas, 0 que aguanten datos nuevos.
+
+- **Plan A** (búsqueda amplia, 3 corridas): 44.592 pasadas, 11.409 estrategias distintas, 2.418 ideas distintas.
+  516 se veían bien en 2019-24 (PF ≥ 1,3, Calmar ≥ 1, ≥ 60 % de años positivos) y **0 pasaron el Deflated Sharpe**
+  (mejor Sharpe por operación 0,28; el azar llega a 0,31 solo por probar tantas). El desempeño de 2019-24 **no predijo**
+  el forward (Spearman −0,02): las «buenas» ganaron en el forward el 16 % de las veces y el resto, el 54 %.
+- **5 finalistas** (MACD/señal + tendencia H4 EMA 50 + TP parcial, overlap Londres-NY): PF 1,16–1,40 en un Monte Carlo
+  con ticks reales; en el holdout **los 5 fallan**: #1 −11,5R (PF 0,46), #5 −6,4R (0,81), #3 +1,9R (1,06),
+  #4 +1,1R (1,04) y #6 +0,3R (1,01).
+- **Plan B** (indicadores clásicos fijos, rejilla gruesa, estabilidad por semestre, 3 corridas): 5.242 estrategias,
+  0 pasan los filtros de 2019-24, mejor Sharpe 0,17, Spearman +0,13.
+- **Costos** medidos en los finalistas: el swap pesa entre el 0 y el 7 % del resultado neto y el spread ~0,02–0,03R por
+  operación. Los costos no explican los fallos.
+
+El año del holdout ya se miró: no vale como dato nuevo para ninguna búsqueda posterior, que tendrá que validarse con
+datos futuros. En la app: la tarjeta «GenXAU — oro M30» de Aprendizaje, el Deflated Sharpe del laboratorio y de
+`investigar`, el swap del oro, las franjas «Sesiones» del gráfico y el ejemplo de PyChart «GenXAU #3/#4 · falló el
+holdout — solo estudio». Resultados simulados con datos históricos: no garantizan resultados futuros. No es asesoría
+financiera.

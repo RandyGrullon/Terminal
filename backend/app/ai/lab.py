@@ -14,6 +14,7 @@ no database (the run itself is ScriptService.run, in the PyChart sandbox).
 from __future__ import annotations
 
 import functools
+import hashlib
 import math
 import re
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ import numpy as np
 
 from app.scripting.examples import EXAMPLES_DIR
 from app.scripting.reference import REFERENCE
+from app.validation import deflated as D
 from app.validation import stats as S
 from app.validation.verdict import MIN_TRADES
 
@@ -51,6 +53,17 @@ NOTE = ("Si ajustas la estrategia mirando estos resultados, el periodo de compro
         "por suerte. Con menos de 30 operaciones no hay conclusiones. Son datos pasados: no es una garantía ni "
         "asesoría financiera.")
 FIX_HINT = "Corrige el script y vuelve a probarlo; si dudas de una función, consulta referencia_pychart."
+TRIALS_KEY = "lab.trials"  # table meta: every strategy tried in the lab (app.ai.tools._probar), no schema change
+TRIALS_KEEP = 2000
+NUMBER_RE = re.compile(r"(?<![A-Za-z_\d])\d+(?:\.\d*)?|(?<![A-Za-z_\d])\.\d+")
+COMMENT_RE = re.compile(r"#[^\n]*")
+MULTI_NOTE = ("El DSR (Deflated Sharpe, Bailey y López de Prado) descuenta cuántas ideas distintas se probaron en este "
+              "mercado y temporalidad: compara el Sharpe por operación del periodo de desarrollo con el que el azar "
+              "alcanza al probar tantas. Una idea es el script sin sus números (las variantes de SL/TP de una misma "
+              f"idea cuentan como una); solo cuentan las variantes con {D.MIN_TRADES_TRIAL} operaciones o más. "
+              "Umbral orientativo: 0,5. Pasarlo no es una garantía: sigue siendo un resultado pasado.")
+PLATEAU_NOTE = ("Mesetas: cada idea con 4 variantes o más se juzga por su variante MEDIANA, nunca por la mejor: si solo "
+                "funciona con un SL o un TP exactos, es casualidad.")
 
 
 # ----------------------------------------------------------------------------- the reference for the model
@@ -257,3 +270,119 @@ def summarize_run(result: Any, *, symbol: str, tf: str, seed: int = 0) -> dict[s
     if stdout:
         out["consola"] = stdout[:300]
     return out
+
+
+# ----------------------------------------------------------------------------- how many variants were tried
+
+
+def idea_key(code: Any) -> str:
+    """The idea of a script: its code without comments, numbers or extra spaces (the variants of its parameters count
+    as one idea), hashed."""
+    text = COMMENT_RE.sub("", str(code or ""))
+    text = NUMBER_RE.sub("#", text)
+    return hashlib.sha1(" ".join(text.split()).encode("utf-8")).hexdigest()[:12]
+
+
+def variant_key(code: Any) -> str:
+    """One exact variant (its numbers included): the same script run twice is one trial."""
+    text = COMMENT_RE.sub("", str(code or ""))
+    return hashlib.sha1(" ".join(text.split()).encode("utf-8")).hexdigest()[:12]
+
+
+def _period_stats(r: Sequence[float]) -> dict[str, Any]:
+    st = D.trade_stats(r)
+    return {"n": st["n"], "score": st["sr"], "pf": st["pf"], "sum": st["sum"]}
+
+
+def trial_from_trades(trades: Sequence[dict], split_time: int, *, idea: str, variant: str, label: str | None,
+                      symbol: str, tf: str) -> dict[str, Any]:
+    """A trial of the lab: the R per trade of its development period (in sample: the DSR is computed there, as in
+    GenXAU) and of its check period (out of sample, for the plateaus)."""
+    dev: list[float] = []
+    chk: list[float] = []
+    for t in trades:
+        r = _num(t.get("r_multiple"))
+        et = _num(t.get("entry_time"))
+        if r is None or et is None or t.get("exit_time") is None or t.get("exit_reason") == "OPEN":
+            continue
+        (dev if int(et) < split_time else chk).append(r)
+    st = D.trade_stats(dev)
+    return {"idea": idea, "variant": variant, "label": label, "symbol": symbol, "tf": tf, "n": st["n"],
+            "sr": st["sr"], "skew": st["skew"], "kurt": st["kurt"], "is": _period_stats(dev),
+            "oos": _period_stats(chk) if chk else None, "at": int(datetime.now(timezone.utc).timestamp())}
+
+
+def trial_of(result: Any, *, code: str, symbol: str, tf: str) -> dict[str, Any] | None:
+    """The trial of a ScriptRunResult (None for errors or indicators)."""
+    if not isinstance(result, dict) or not result.get("ok"):
+        return None
+    strat = result.get("strategy")
+    candles = [c for c in result.get("candles") or [] if isinstance(c, dict)]
+    if not isinstance(strat, dict) or len(candles) < 2:
+        return None
+    n = len(candles)
+    split = min(max(int(n * DEV_SHARE), 1), n - 1)
+    trades = [t for t in strat.get("trades") or [] if isinstance(t, dict)]
+    return trial_from_trades(trades, int(candles[split]["time"]), idea=idea_key(code), variant=variant_key(code),
+                             label=script_title(code) or None, symbol=symbol, tf=tf)
+
+
+def merge_trial(trials: Sequence[dict], trial: dict) -> list[dict]:
+    """The saved trials with this one added (a variant run again on the same market and timeframe replaces its
+    previous run), newest last, at most TRIALS_KEEP."""
+    kept = [t for t in trials if isinstance(t, dict) and not (
+        t.get("variant") == trial.get("variant") and t.get("symbol") == trial.get("symbol")
+        and t.get("tf") == trial.get("tf"))]
+    return [*kept, trial][-TRIALS_KEEP:]
+
+
+def family_of(trials: Sequence[dict], symbol: str, tf: str) -> list[dict]:
+    """The trials of one market and timeframe: the multiple-testing family of a new run."""
+    return [t for t in trials if isinstance(t, dict) and t.get("symbol") == symbol and t.get("tf") == tf]
+
+
+def _fmt(v: Any, nd: int) -> str:
+    f = _num(v)
+    return "—" if f is None else f"{f:.{nd}f}".replace(".", ",")
+
+
+def multiplicity(trial: dict, family: Sequence[dict]) -> dict[str, Any]:
+    """What the model gets about the number of variants tried: the family, SR, SR0, DSR and a Spanish verdict."""
+    fam = D.trial_family(family)
+    res = D.deflate({"n": trial.get("n"), "sr": trial.get("sr"), "skew": trial.get("skew"), "kurt": trial.get("kurt")},
+                    fam)
+    sr, sr0 = trial.get("sr"), fam.get("sr0")
+    if res["dsr"] is None:
+        verdict = res["reason"]
+    elif res["passes"]:
+        verdict = (f"DSR {_fmt(res['dsr'], 2)} ≥ 0,5: su Sharpe por operación en desarrollo ({_fmt(sr, 3)}) no se "
+                   f"explica solo por las {fam['ideas']} ideas probadas (el azar llega a {_fmt(sr0, 3)}). Sigue siendo "
+                   "un resultado pasado: confírmalo con datos nuevos.")
+    else:
+        verdict = (f"DSR {_fmt(res['dsr'], 2)} < 0,5: con {fam['ideas']} ideas probadas, el azar alcanza un Sharpe por "
+                   f"operación de {_fmt(sr0, 3)} y esta variante tiene {_fmt(sr, 3)}: no se distingue de la suerte de "
+                   "probar tantas.")
+    return {
+        "variantes_probadas": fam["variants"], "ideas_distintas": fam["ideas_all"],
+        f"variantes_con_{D.MIN_TRADES_TRIAL}_operaciones": fam["eligible"],
+        f"ideas_con_{D.MIN_TRADES_TRIAL}_operaciones": fam["ideas"],
+        "operaciones_en_desarrollo": trial.get("n"), "sharpe_por_operacion": _r(sr, 3),
+        "sharpe_del_azar_sr0": _r(sr0, 3), "sigma_sharpe": _r(fam.get("sigma_sr"), 3),
+        "dsr": _r(res["dsr"], 3), "pasa_dsr": res["passes"], "veredicto": verdict, "nota": MULTI_NOTE,
+    }
+
+
+def plateau_rows(family: Sequence[dict], limit: int = 5) -> list[dict[str, Any]]:
+    """The plateaus of the family (D.plateaus) for the model: in sample = development, out of sample = check."""
+    rows = []
+    for p in D.plateaus(family)[:limit]:
+        o = p["oos"] or {}
+        rows.append({"idea": p["label"], "variantes": p["variants"],
+                     "sharpe_mediano_desarrollo": _r(p["is"]["score"], 3),
+                     "pf_mediano_desarrollo": _r(p["is"]["pf"]),
+                     "pct_variantes_positivas_desarrollo": _r(p["is"]["positive"] * 100.0, 0),
+                     "variantes_con_comprobacion": o.get("variants", 0),
+                     "sharpe_mediano_comprobacion": _r(o.get("score"), 3),
+                     "pf_mediano_comprobacion": _r(o.get("pf")),
+                     "pct_variantes_positivas_comprobacion": _r(o["positive"] * 100.0, 0) if o else None})
+    return rows

@@ -27,6 +27,8 @@ EXITS = {  # reason -> (marker kind, Spanish label, short text)
     "TP1": ("TP1", "Objetivo (límite)", "TP"),
     "SIGNAL": ("EXIT_SIGNAL", "Cierre por señal", "Cierre"),
     "REVERSE": ("EXIT_REVERSE", "Señal contraria", "Reverso"),
+    "TIME": ("EXIT_TIME", "Tiempo máximo en la operación", "Tiempo"),
+    "BE": ("EXIT_SL", "Stop en punto de equilibrio", "BE"),
 }
 NOTES = [
     "Señales al cierre de la vela y ejecución en la apertura de la siguiente; stops y objetivos intrabarra "
@@ -48,6 +50,7 @@ class _Position:
     __slots__ = (
         "side", "entry_id", "qty", "price", "index", "notional", "fee", "equity_before", "fixed_stop",
         "fixed_limit", "rule_levels", "trail", "best", "sl_initial", "tp_initial", "fav", "adv",
+        "qty0", "partials", "partial_done", "partial_gross", "partial_fee", "partial_qmove", "be", "partial_price",
     )
 
     def __init__(self, **kw: Any) -> None:
@@ -69,7 +72,10 @@ class _Backtester:
             dict(r, when=r["when"].tolist(), stop=_as_list(r["stop"]), limit=_as_list(r["limit"]), qty_pct=_as_list(r["qty_pct"]))
             for r in rules.entries
         ]
-        self.exits = [dict(r, when=r["when"].tolist(), stop=_as_list(r["stop"]), limit=_as_list(r["limit"])) for r in rules.exits]
+        self.exits = [dict(r, when=r["when"].tolist(), stop=_as_list(r["stop"]), limit=_as_list(r["limit"]),
+                           partial=_as_list(r.get("partial"))) for r in rules.exits]
+        self.max_day = config.get("max_entries_per_day")
+        self.day_entries: dict[int, int] = {}
         self.closes = [dict(r, when=r["when"].tolist()) for r in rules.closes]
         need_atr = any(r["trail"] for r in self.exits)
         self.atr = T.atr(bars.high, bars.low, bars.close, 14).tolist() if need_atr else None
@@ -90,6 +96,10 @@ class _Backtester:
         """Captures exit-rule levels on bar j: fixed rules once (first bar with a finite level where ``when`` is
         true, starting at the signal bar), ``update=True`` rules on every such bar."""
         for k, rule in self._rules_for(pos.entry_id):
+            if rule.get("partial") is not None and k not in pos.partials and rule["when"][j]:
+                level = rule["partial"][j]
+                if _finite(level):  # a partial take-profit is captured once, like a fixed level
+                    pos.partials[k] = (float(level), float(rule["partial_pct"]), bool(rule["breakeven"]))
             if not rule["when"][j] or (k in pos.rule_levels and not rule["update"]):
                 continue
             stop = rule["stop"][j] if rule["stop"] is not None else None
@@ -106,9 +116,13 @@ class _Backtester:
             stops.append(pos.fixed_stop)
         if pos.fixed_limit is not None:
             limits.append(pos.fixed_limit)
+        if pos.be is not None:  # after a partial take-profit with breakeven=True: the entry price
+            stops.append(pos.be)
         pick_stop, pick_limit = (max, min) if pos.side > 0 else (min, max)
         stop = pick_stop(stops) if stops else None
         kind = "SL"
+        if pos.be is not None and stop == pos.be:
+            kind = "BE"
         if pos.trail is not None and (stop is None or pick_stop(stop, pos.trail) == pos.trail):
             stop, kind = pos.trail, "TRAIL"
         return stop, kind, pick_limit(limits) if limits else None
@@ -120,7 +134,9 @@ class _Backtester:
         equity_now = self.cash
         if not price > 0 or equity_now <= 0:
             return
-        pos = _Position(side=side, entry_id=rule["id"], price=price, index=j, rule_levels={}, trail=None)
+        pos = _Position(side=side, entry_id=rule["id"], price=price, index=j, rule_levels={}, trail=None,
+                        partials={}, partial_done=set(), partial_gross=0.0, partial_fee=0.0, partial_qmove=0.0,
+                        be=None, partial_price=None)
         stop0 = rule["stop"][i] if rule["stop"] is not None else None
         limit0 = rule["limit"][i] if rule["limit"] is not None else None
         pos.fixed_stop = stop0 if _finite(stop0) else None
@@ -138,7 +154,9 @@ class _Backtester:
         qty = notional / price
         if not qty > 0:
             return
-        pos.qty, pos.notional, pos.equity_before = qty, notional, equity_now
+        pos.qty, pos.qty0, pos.notional, pos.equity_before = qty, qty, notional, equity_now
+        day = int(self.t[j]) // 86400
+        self.day_entries[day] = self.day_entries.get(day, 0) + 1
         pos.fee = notional * self.fee
         pos.sl_initial = stop if valid_stop else None
         pos.tp_initial = limit if limit is not None and (limit - price) * side > 0 else None
@@ -171,8 +189,10 @@ class _Backtester:
         fee_exit = pos.qty * fill * self.fee
         self.cash += gross - fee_exit
         self.fees_paid += fee_exit
-        pnl = gross - pos.fee - fee_exit
+        pnl = gross + pos.partial_gross - pos.fee - pos.partial_fee - fee_exit
         kind, default_label, short = EXITS[reason]
+        if reason == "TP1" and pos.partial_done:
+            default_label = "Objetivo final"
         trade = self._trade_dict(pos, pnl)
         trade.update(
             {
@@ -180,9 +200,10 @@ class _Backtester:
                 "exit_price": fill,
                 "exit_reason": reason,
                 "exit_label": label or default_label,
-                "r_multiple": move / abs(pos.price - pos.sl_initial) if pos.sl_initial is not None else None,
+                "r_multiple": ((pos.qty * move + pos.partial_qmove) / (pos.qty0 * abs(pos.price - pos.sl_initial))
+                               if pos.sl_initial is not None else None),
                 "bars": max(1, j - pos.index + (0 if at_open else 1)),
-                "fees": pos.fee + fee_exit,
+                "fees": pos.fee + pos.partial_fee + fee_exit,
             }
         )
         self.trades.append(trade)
@@ -200,6 +221,47 @@ class _Backtester:
         )
         self.pos = None
 
+    def _partial(self, j: int, k: int, level: float, pct: float, be: bool, *, at_open: bool) -> None:
+        """Close `pct` % of the open position at `level` (or at the open of a gap beyond it), once per rule;
+        breakeven: the stop of the rest moves to the entry price."""
+        pos = self.pos
+        assert pos is not None
+        fill = self.o[j] if at_open else level
+        qty = pos.qty * pct / 100.0
+        move = (fill - pos.price) * pos.side
+        fee = qty * fill * self.fee
+        self.cash += qty * move - fee
+        self.fees_paid += fee
+        pos.qty -= qty
+        pos.partial_gross += qty * move
+        pos.partial_fee += fee
+        pos.partial_qmove += qty * move
+        pos.partial_done.add(k)
+        pos.partial_price = fill
+        if be:
+            pos.be = pos.price
+        self.markers.append(
+            {
+                "time": int(self.t[j]),
+                "kind": "TP1",
+                "position": "aboveBar" if pos.side > 0 else "belowBar",
+                "shape": "circle",
+                "color": GREEN if move > 0 else RED,
+                "text": f"TP {pct:.0f} %",
+                "tooltip": f"Cierra el {pct:.0f} % de '{pos.entry_id}' @ {fill:.6g}"
+                           + (" · el resto, con el stop en la entrada" if be else ""),
+                "price": fill,
+            }
+        )
+
+    def _pending_partial(self, pos: _Position) -> tuple[int, float, float, bool] | None:
+        """The nearest partial take-profit still to fill."""
+        todo = [(k, lv, pct, be) for k, (lv, pct, be) in pos.partials.items()
+                if k not in pos.partial_done and (lv - pos.price) * pos.side > 0]
+        if not todo:
+            return None
+        return min(todo, key=lambda x: abs(x[1] - pos.price))
+
     def _trade_dict(self, pos: _Position, pnl: float) -> dict:
         return {
             "id": len(self.trades) + 1,
@@ -210,15 +272,15 @@ class _Backtester:
             "exit_time": None,
             "exit_price": None,
             "sl_initial": pos.sl_initial,
-            "tp1": pos.tp_initial,
-            "tp2": None,
+            "tp1": pos.partial_price if pos.partial_done else pos.tp_initial,
+            "tp2": pos.tp_initial if pos.partial_done else None,
             "tp3": None,
             "exit_reason": "OPEN",
             "exit_label": "Abierta",
             "pnl": pnl,
             "pnl_pct": pnl / pos.notional * 100.0 if pos.notional > 0 else 0.0,
             "account_pct": pnl / pos.equity_before * 100.0 if pos.equity_before > 0 else 0.0,
-            "qty": pos.qty,
+            "qty": pos.qty0 if pos.qty0 is not None else pos.qty,
             "r_multiple": None,
             "bars": self.n - pos.index,
             "mfe_pct": pos.fav / pos.price * 100.0,
@@ -235,13 +297,22 @@ class _Backtester:
         assert pos is not None
         stop, kind, limit = self._effective(pos)
         op, hi, lo, s = self.o[j], self.h[j], self.l[j], pos.side
+        part = self._pending_partial(pos)
         if stop is not None and (op - stop) * s <= 0:
             self._close(j, op, kind, at_open=True)
-        elif limit is not None and (op - limit) * s >= 0:
+            return
+        if limit is not None and (op - limit) * s >= 0:
             self._close(j, op, "TP1", at_open=True)
+            return
+        if part is not None and (op - part[1]) * s >= 0:  # a gap beyond the partial level: at the open
+            self._partial(j, part[0], part[1], part[2], part[3], at_open=True)
+            part = None
         elif stop is not None and ((lo - stop) if s > 0 else (stop - hi)) <= 0:
-            self._close(j, stop, kind, at_open=False)
-        elif limit is not None and ((hi - limit) if s > 0 else (limit - lo)) >= 0:
+            self._close(j, stop, kind, at_open=False)  # the stop first when the bar touches both (prudent)
+            return
+        if part is not None and ((hi - part[1]) if s > 0 else (part[1] - lo)) >= 0:
+            self._partial(j, part[0], part[1], part[2], part[3], at_open=False)  # the new breakeven applies next bar
+        if limit is not None and ((hi - limit) if s > 0 else (limit - lo)) >= 0:
             self._close(j, limit, "TP1", at_open=False)
 
     def _update_trail(self, j: int) -> None:
@@ -291,6 +362,8 @@ class _Backtester:
         if not ruined:
             current = 0 if (pos is None or closing is not None) else pos.side
             for rule in self.entries:
+                if current != 0 and not rule.get("reverse", True):
+                    continue  # only when flat
                 if rule["when"][j] and rule["dir"] != current:
                     stop, limit = self._signal_levels(rule, j)
                     return {**base, "action": "entry", "id": rule["id"], "side": "long" if rule["dir"] > 0 else "short",
@@ -337,10 +410,19 @@ class _Backtester:
                     if rule["when"][j] and (rule["id"] is None or rule["id"] == pos.entry_id):
                         pending_close = ("SIGNAL", rule["comment"])
                         break
+                if pending_close is None:  # a time limit: the open after max_bars bars in the trade
+                    limits = [r["max_bars"] for _, r in self._rules_for(pos.entry_id) if r.get("max_bars")
+                              and r["when"][j]]
+                    if limits and j - pos.index + 1 >= min(limits):
+                        pending_close = ("TIME", None)
             if ruined:
                 continue
+            if self.max_day is not None and self.day_entries.get(int(self.t[j + 1]) // 86400, 0) >= self.max_day:
+                continue  # its entries of that UTC day are used up
             current = 0 if (pos is None or pending_close is not None) else pos.side
             for rule in self.entries:
+                if current != 0 and not rule.get("reverse", True):
+                    continue  # only when flat
                 if rule["when"][j] and rule["dir"] != current:
                     if current != 0:
                         pending_close = ("REVERSE", None)
@@ -352,9 +434,10 @@ class _Backtester:
         if self.pos is not None:  # still open at the last bar: marked to market
             pos, last = self.pos, self.n - 1
             move = (self.c[last] - pos.price) * pos.side
-            trade = self._trade_dict(pos, pos.qty * move - pos.fee)
-            trade["r_multiple"] = move / abs(pos.price - pos.sl_initial) if pos.sl_initial is not None else None
-            trade["fees"] = pos.fee
+            trade = self._trade_dict(pos, pos.qty * move + pos.partial_gross - pos.fee - pos.partial_fee)
+            trade["r_multiple"] = ((pos.qty * move + pos.partial_qmove) / (pos.qty0 * abs(pos.price - pos.sl_initial))
+                                   if pos.sl_initial is not None else None)
+            trade["fees"] = pos.fee + pos.partial_fee
             self.trades.append(trade)
         times = np.asarray(self.t, dtype=np.int64)
         equity = np.asarray(self.equity, dtype=float)
@@ -377,6 +460,7 @@ class _Backtester:
                 "risk_pct": self.risk * 100.0,
                 "fee_pct": self.fee * 100.0,
                 "slippage_pct": self.slip * 100.0,
+                "max_entries_per_day": self.max_day,
                 "notes": list(NOTES),
             },
             "metrics": metrics,

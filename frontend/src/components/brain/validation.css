@@ -164,3 +164,45 @@
   line-height: 1.45;
   color: var(--text-2);
 }
+
+/* «GenXAU — oro M30» (GenXauCard.tsx): the funnel of an external research, under the walk-forward validation */
+.val-genxau-body {
+  display: grid;
+  gap: 10px;
+}
+.val-genxau-body h4 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.val-genxau-periods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  color: var(--text-2);
+}
+.val-funnel {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.val-funnel th,
+.val-funnel td {
+  padding: 3px 10px 3px 0;
+  text-align: left;
+  vertical-align: top;
+}
+.val-funnel tbody th {
+  font-weight: 500;
+  color: var(--text-2);
+}
+.val-funnel td {
+  text-align: right;
+  white-space: nowrap;
+}
+.val-funnel thead th {
+  color: var(--muted);
+  font-weight: 500;
+}

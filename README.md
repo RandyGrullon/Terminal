@@ -56,8 +56,8 @@ tu servidor de correo.
 | **Simulación** | Mercado simulado (sintético con regímenes alcista, bajista, lateral, volátil y crash, o replay vela a vela de un activo real sin mirar el futuro), backtest **con y sin filtro** y Monte Carlo (riesgo de ruina, VaR). |
 | **Cuenta demo** | Operaciones simuladas a mercado, **órdenes límite y stop pendientes**, gestión automática de SL, TP parciales y stop dinámico, avisos de salida, **límites de riesgo de cartera** y auto-trading opcional que solo abre señales TOMAR. Además, **NEXUS automática**: una segunda cuenta demo, propia de NEXUS, que opera sola con sus señales (apagada por defecto), lleva un diario de sus operaciones, deja de entrar donde pierde con evidencia, puede seguir tus estrategias de PyChart y, si quieres, se repite en una cuenta de práctica de Alpaca o en los entornos de práctica de Binance (sin dinero real). |
 | **PyChart** | Indicadores y estrategias en **Python** con una API estilo Pine Script (`ta.ema`, `plot`, `plotshape`, `strategy.entry`…): errores por línea, ejecución aislada (sandbox) y backtest. |
-| **Copiloto** | Una IA en tu propio PC (Ollama) que entiende tus datos de NEXUS con herramientas de solo lectura: explica qué hizo NEXUS automática y por qué, resume su diario, mira un mercado o las noticias, busca en internet si añades una clave y, en su **laboratorio**, escribe y prueba estrategias de PyChart con resultados honestos (desarrollo y comprobación frente a entrar al azar). No opera ni cambia ajustes. |
-| **Aprendizaje** | Cómo se retroalimenta el sistema: acierto fuera de muestra frente a la referencia, calibración, pesos aprendidos, decisiones del filtro y la **validación walk-forward** («¿hay ventaja real?»). |
+| **Copiloto** | Una IA en tu propio PC (Ollama) que entiende tus datos de NEXUS con herramientas de solo lectura: explica qué hizo NEXUS automática y por qué, resume su diario, mira un mercado o las noticias, busca en internet si añades una clave y, en su **laboratorio**, escribe y prueba estrategias de PyChart con resultados honestos (desarrollo y comprobación frente a entrar al azar, y el Deflated Sharpe, que descuenta cuántas variantes llevas probadas en ese mercado). No opera ni cambia ajustes. |
+| **Aprendizaje** | Cómo se retroalimenta el sistema: acierto fuera de muestra frente a la referencia, calibración, pesos aprendidos, decisiones del filtro, la **validación walk-forward** («¿hay ventaja real?») y la tarjeta «GenXAU — oro M30» (una investigación externa de oro: 16.651 estrategias, ninguna aguantó datos nuevos). |
 | **Ajustes** | Riesgo, NEXUS, filtro, escáner, proveedores de datos y sus claves, cuenta demo, alertas, riesgo de cartera, tiempo real, bróker de práctica (Alpaca y testnet de Binance), copiloto y validación; estado del sistema y de la base de datos. |
 | **Semáforo** (cabecera) | *Operar*, *Precaución* o *No operar* según la Fed, el calendario económico de esta semana y la próxima, la volatilidad (VIX), futuros, dólar, tipos y *funding*. En rojo, el filtro dice NO TOMAR. |
 | **Terminal** (botón de la cabecera o ``Ctrl+` ``) | Todo lo que pasa, en vivo (señales, operaciones, escaneos, aprendizaje, errores), y una línea de comandos con alias en español. |
@@ -148,7 +148,9 @@ en la cabecera (buscador, que se enfoca con `/`, y botones de 1m a 1w).
 Busca un símbolo (`btc`, `aapl`, `eurusd`, `BINANCE:ETHUSDT`…) y elige la temporalidad. En **Gráfico** verás:
 
 - las señales de NEXUS y las que el filtro rechazó (capa «Rechazadas»: pasa el cursor para ver el motivo). Las capas
-  (señales, niveles SL/TP, cono de predicción, volumen, EMAs, panel NEXUS) se activan con los botones de la barra;
+  (señales, niveles SL/TP, cono de predicción, volumen, EMAs, panel NEXUS y «Sesiones»: en velas de hasta 1h, franjas
+  del overlap Londres-NY de 12:00 a 16:00 UTC, del rollover del bróker y del cierre del viernes, como contexto y no como
+  señal) se activan con los botones de la barra;
 - **Indicadores** (atajo `i`): más de 100, cada uno con sus parámetros y en su propio panel;
 - el panel lateral: la señal actual con su consejo, la tarjeta «¿Tomo esta operación?» y tu lista de seguimiento;
 - la etiqueta de frescura del precio: «Tiempo real · fuente», «Retraso 15 min · TradingView», «Mercado cerrado»,
@@ -399,7 +401,10 @@ comportan las señales sin tocar tu cuenta.
 
 ### 7. PyChart
 
-**PyChart** es un editor de scripts en Python con una API estilo Pine Script. Empieza por uno de los «Ejemplos»,
+**PyChart** es un editor de scripts en Python con una API estilo Pine Script (las estrategias admiten además cierre
+parcial con stop a la entrada, tiempo máximo en la operación, entradas que no giran la posición y un máximo de
+entradas al día). Entre los «Ejemplos» está «GenXAU #3/#4 · falló el holdout — solo estudio», dos finalistas de una
+investigación de oro M30 que no aguantaron datos nuevos: para estudiarlas en el gráfico, no para operar. Empieza por uno de los «Ejemplos»,
 pulsa **Compilar** (`Ctrl+Shift+B`) para ver los errores por línea, **Ejecutar** (`Ctrl+Enter`) para dibujarlo sobre el
 gráfico y ajusta sus entradas; las estrategias (`strategy(...)`, `strategy.entry`…) muestran su backtest. `Ctrl+S`
 guarda (un ejemplo se guarda como copia).
@@ -544,7 +549,7 @@ NEXUS funciona sin configurar nada. Lo que quieras cambiar está en **Ajustes** 
 
 | Grupo | Para qué |
 |---|---|
-| Riesgo | Capital de la cuenta demo, riesgo por operación, comisiones por clase de activo, deslizamiento |
+| Riesgo | Capital de la cuenta demo, riesgo por operación, comisiones por clase de activo, swap por noche de los lotes MT5 (oro: el de XM, −75 $ las compras y +16 $ las ventas por lote; triple el miércoles), deslizamiento |
 | NEXUS · Filtro · Vigilancia | Parámetros del motor, umbrales de TOMAR / ESPERAR, temporalidad de la lista vigilada |
 | Escáner · Grabador local | Mercados y frecuencia del escaneo en segundo plano · grabación de velas propias |
 | Proveedores de datos | TradingView sí o no, exchange cripto por defecto y claves **opcionales** de Twelve Data, Alpha Vantage y Polygon |
@@ -621,8 +626,10 @@ suerte. NEXUS puede guardar años de historial y probar en él todas tus estrate
   formato; arma las velas de 5m a 1d a partir de las de 1 minuto.
 - `investigar btc 1h` prueba todas las estrategias de PyChart y NEXUS (con y sin filtro) en hasta 20.000 velas: cada
   una en un periodo de desarrollo (el primer 70 %) y otro de comprobación (el último 30 %), frente a entrar al azar
-  con la misma dirección, duración y costes. Solo es «candidata» si supera al azar en los dos; aun así, confírmala en
-  otro mercado. `investigar estado` muestra el progreso e `investigar resultado`, el informe.
+  con la misma dirección, duración y costes. Solo es «candidata» si supera al azar en los dos y, cuando se puede
+  calcular, su **Deflated Sharpe** (DSR) llega a 0,5: descuenta cuántas estrategias se probaron, porque con muchas
+  alguna sale bien por suerte (en la investigación GenXAU de oro M30, 516 se veían bien y ninguna pasó). Aun así,
+  confírmala en otro mercado. `investigar estado` muestra el progreso e `investigar resultado`, el informe.
 
 El historial importado no se borra con el mantenimiento. No es una garantía: son datos pasados.
 

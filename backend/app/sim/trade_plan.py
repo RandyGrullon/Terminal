@@ -118,6 +118,9 @@ def params_of(pos: dict, meta: dict, ctx: dict, risk_unit: float | None, *, stra
         margin = (safe_float(inst.get("margin")) or 0.0) * n
         add("Apalancamiento", f"{fmt_num(safe_float(inst.get('leverage')) or 0.0, 0)}x · margen ~{fmt_num(margin, 2)} $ · "
                               f"liquidación ~{fmt_price(inst.get('liquidation'))}")
+    swap = safe_float(meta.get("swap"))
+    if swap:
+        add("Swap acumulado", f"{fmt_num(swap, 2, True)} $ (rollover de las 17:00 de Nueva York; triple el miércoles)")
     tps = [safe_float(pos.get(k)) for k in ("tp1", "tp2", "tp3")]
     shown = [fmt_price(t) for t in tps if t is not None]
     add("Objetivos", " · ".join(shown) if shown else "ninguno")

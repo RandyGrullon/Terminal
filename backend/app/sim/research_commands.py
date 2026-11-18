@@ -57,6 +57,13 @@ def _period(p: dict | None) -> str:
     return f"{p.get('veredicto')} · {n} ops · {'—' if diff is None else f'{diff:+.3f} %'.replace('.', ',')} vs azar"
 
 
+def _dsr(m: dict | None) -> str:
+    """'0,12 (no pasa)' / '0,61 (pasa)' / '—' (not computable: too few trades or strategies)."""
+    if not isinstance(m, dict) or m.get("dsr") is None:
+        return "—"
+    return f"{m['dsr']:.2f} ({'pasa' if m.get('pasa_dsr') else 'no pasa'})".replace(".", ",")
+
+
 def _report(ctx: CommandContext, rep: dict) -> None:
     ctx.print(f"Investigación de {rep['simbolo']} {rep['temporalidad']}: {rep['velas']} velas "
               f"({_when(rep.get('desde'))} → {_when(rep.get('hasta'))})", "system")
@@ -64,12 +71,13 @@ def _report(ctx: CommandContext, rep: dict) -> None:
     for r in rep.get("estrategias") or []:
         if not r.get("ok"):
             err = (r.get("errores") or [{}])[0].get("mensaje", "falló")
-            rows.append([r["nombre"], "—", f"falló: {str(err)[:60]}", "—", ""])
+            rows.append([r["nombre"], "—", f"falló: {str(err)[:60]}", "—", "—", ""])
             continue
         per = r.get("periodos") or [None, None]
         rows.append([r["nombre"], (r.get("total") or {}).get("ganadoras", "—"), _period(per[0]),
-                     _period(per[1] if len(per) > 1 else None), "candidata" if r.get("candidata") else ""])
-    ctx.table(["Estrategia", "Ganadoras", "Desarrollo (70 %)", "Comprobación (30 %)", ""], rows)
+                     _period(per[1] if len(per) > 1 else None), _dsr(r.get("multiplicidad")),
+                     "candidata" if r.get("candidata") else ""])
+    ctx.table(["Estrategia", "Ganadoras", "Desarrollo (70 %)", "Comprobación (30 %)", "DSR", ""], rows)
     ctx.print(rep.get("conclusion") or "", "success" if rep.get("candidatas") else "info")
     ctx.print(rep.get("nota") or "", "muted")
 

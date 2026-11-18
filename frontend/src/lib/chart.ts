@@ -266,6 +266,29 @@ export function addVolume(chart: IChartApi, pane = 0): ISeriesApi<'Histogram'> {
   return s
 }
 
+/** Background bands behind the candles (session windows): a histogram of full-height translucent columns on its own
+ *  hidden scale, drawn under everything else. */
+export function addBands(chart: IChartApi, pane = 0): ISeriesApi<'Histogram'> {
+  const s = chart.addSeries(
+    HistogramSeries,
+    {
+      priceScaleId: 'nexus-bands',
+      priceLineVisible: false,
+      lastValueVisible: false,
+      base: 0,
+      autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 1 } }),
+    },
+    pane,
+  )
+  s.priceScale().applyOptions({ visible: false, scaleMargins: { top: 0, bottom: 0 } })
+  try {
+    s.setSeriesOrder(0)
+  } catch {
+    /* older engines: drawn above, still translucent */
+  }
+  return s
+}
+
 export interface LineOpts {
   color: string
   width?: 1 | 2 | 3 | 4

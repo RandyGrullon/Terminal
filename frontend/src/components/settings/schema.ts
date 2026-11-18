@@ -22,6 +22,7 @@ export type FieldKind =
   | 'tp3' // three ascending R multiples
   | 'symbols' // list of symbols (tags)
   | 'fee_classes' // number per asset class (risk.fee_pct_by_class)
+  | 'swap_rules' // long / short swap per asset (risk.swap_by_symbol)
 
 export interface FieldDef {
   key: string
@@ -129,6 +130,17 @@ const BASE_GROUPS: GroupDef[] = [
         unit: '%',
         wide: true,
         help: 'Comisión más diferencial típicos por lado según el tipo de activo; se usan en NEXUS, el filtro, los backtests y la cuenta demo. Son estimaciones: tu bróker real puede cobrar otra cosa.',
+      },
+      {
+        key: 'risk.swap_by_symbol',
+        label: 'Swap por noche (lotes MT5)',
+        kind: 'swap_rules',
+        min: -1000,
+        max: 1000,
+        step: 1,
+        unit: '$ por lote',
+        wide: true,
+        help: 'Lo que el bróker cobra (−) o paga (+) por mantener 1,00 lote de un día para otro, en el rollover de las 17:00 de Nueva York (00:00 del servidor de XM); el miércoles cuenta triple. Entra en el resultado y en el R de cada operación, como la comisión. Oro: el swap actual de XM (compras −75 $, ventas +16 $): cambia con las tasas de interés.',
       },
       {
         key: 'risk.slippage_pct',

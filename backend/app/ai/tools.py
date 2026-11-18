@@ -12,6 +12,7 @@ import json
 from typing import Any, Awaitable, Callable
 
 from app.ai import lab
+from app.sim.common import json_dumps, json_loads
 from app.util import http_client, safe_float
 from app.validation.stats import seed_for
 
@@ -243,7 +244,40 @@ async def _probar(rt: Any, args: dict, cfg: dict) -> dict:
         return {"error": str(exc)}
     strat = result.get("strategy") if isinstance(result, dict) and isinstance(result.get("strategy"), dict) else {}
     resolved = str(strat.get("symbol") or symbol)
-    return lab.summarize_run(result, symbol=resolved, tf=tf, seed=seed_for("lab", resolved, tf, code))
+    summary = lab.summarize_run(result, symbol=resolved, tf=tf, seed=seed_for("lab", resolved, tf, code))
+    trial = lab.trial_of(result, code=code, symbol=resolved, tf=tf) if summary.get("ok") else None
+    if trial is not None:  # how many variants were tried here: the deflated Sharpe and the plateaus
+        trials = lab.merge_trial(await _lab_trials(rt), trial)
+        await _save_lab_trials(rt, trials)
+        family = lab.family_of(trials, resolved, tf)
+        summary["multiplicidad"] = lab.multiplicity(trial, family)
+        rows = lab.plateau_rows(family)
+        if rows:
+            summary["mesetas"] = {"ideas": rows, "nota": lab.PLATEAU_NOTE}
+    return summary
+
+
+async def _lab_trials(rt: Any) -> list[dict]:
+    """The strategies tried in the lab so far (table meta, key lab.trials)."""
+    db = getattr(rt, "db", None)
+    if db is None:
+        return []
+    try:
+        raw = await db.fetchval("SELECT value FROM meta WHERE key=?", (lab.TRIALS_KEY,))
+    except Exception:  # noqa: BLE001 - no history only means no deflation yet
+        return []
+    data = json_loads(raw, [])
+    return [t for t in data if isinstance(t, dict)] if isinstance(data, list) else []
+
+
+async def _save_lab_trials(rt: Any, trials: list[dict]) -> None:
+    db = getattr(rt, "db", None)
+    if db is None:
+        return
+    try:
+        await db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (lab.TRIALS_KEY, json_dumps(trials)))
+    except Exception:  # noqa: BLE001 - the run's own summary is still returned
+        pass
 
 
 RUNNERS: dict[str, Callable[[Any, dict, dict], Awaitable[dict]]] = {

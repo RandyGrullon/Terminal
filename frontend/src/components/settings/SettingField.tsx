@@ -313,6 +313,35 @@ function FeeClassesField({ value, onChange, def, a11y }: { value: unknown; onCha
   )
 }
 
+/** risk.swap_by_symbol: per asset (XAU…), USD per 1.00 lot and night for longs and for shorts. */
+function SwapRulesField({ value, onChange, def, a11y }: { value: unknown; onChange: (v: Record<string, unknown>) => void; def: FieldDef; a11y: A11y }) {
+  const map = value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+  const keys = Object.keys(map)
+  if (!keys.length) return <span className="tiny muted">Sin swap configurado.</span>
+  const rule = (k: string) => (map[k] && typeof map[k] === 'object' ? (map[k] as Record<string, unknown>) : {})
+  return (
+    <div className="set-tp3">
+      {keys.map((k) =>
+        (['long', 'short'] as const).map((side) => (
+          <label key={`${k}-${side}`} className="set-tp">
+            <span className="tiny muted">
+              {k === 'XAU' ? 'Oro' : k} · {side === 'long' ? 'compras' : 'ventas'}
+            </span>
+            <NumField
+              def={def}
+              value={rule(k)[side]}
+              small
+              a11y={{ describedBy: a11y.describedBy, invalid: a11y.invalid }}
+              onChange={(n) => onChange({ ...map, [k]: { ...rule(k), [side]: n } })}
+            />
+            <span className="tiny muted">{def.unit ?? ''}</span>
+          </label>
+        )),
+      )}
+    </div>
+  )
+}
+
 function valueHint(def: FieldDef, value: unknown): string | null {
   if (!finite(value)) return null
   if (def.kind === 'seconds') return `= ${humanSeconds(value)}`
@@ -331,7 +360,7 @@ interface Props {
 }
 
 /** Kinds rendered as several controls: their label names the group instead of pointing at one control. */
-const GROUP_KINDS = new Set<FieldDef['kind']>(['markets', 'multi', 'tp3', 'fee_classes'])
+const GROUP_KINDS = new Set<FieldDef['kind']>(['markets', 'multi', 'tp3', 'fee_classes', 'swap_rules'])
 
 function SettingField({ def, value, dirty, error, markets, onChange, onRevert }: Props) {
   const set = (v: unknown) => onChange(def.key, v)
@@ -398,6 +427,9 @@ function SettingField({ def, value, dirty, error, markets, onChange, onRevert }:
       break
     case 'fee_classes':
       control = <FeeClassesField def={def} value={value} onChange={set} a11y={a11y} />
+      break
+    case 'swap_rules':
+      control = <SwapRulesField def={def} value={value} onChange={set} a11y={a11y} />
       break
     case 'symbols':
       control = <SymbolsField value={value} onChange={set} a11y={a11y} />
