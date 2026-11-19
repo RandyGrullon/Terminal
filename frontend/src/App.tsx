@@ -323,31 +323,14 @@ export default function App() {
 
   if (mode === 'simple') {
     return (
-      <div className="app-simple">
-        <header className="simple-header">
-          <div className="brand">
-            <span className="brand-mark">N</span>
-            NEXUS <small>DEMO</small>
-          </div>
-          <div className="grow" />
-          <span className="row gap-1 small muted nowrap" title="Conexión en tiempo real">
-            <span className={`ws-dot ${wsStatus}`} />
-            {wsStatus === 'open' ? 'En vivo' : wsStatus === 'connecting' ? 'Conectando…' : 'Sin conexión'}
-          </span>
-          <Button size="sm" onClick={() => setMode('pro')} title="Todas las herramientas: gráfico, escáner, PyChart, ajustes…">
-            Modo Pro
-          </Button>
-          {authEnabled() && <IconButton icon={<LogOut size={15} />} title="Cerrar sesión" onClick={() => void signOut()} />}
-        </header>
-        <PageBoundary name="simple">
-          <Suspense fallback={<PageLoading />}>
-            <SimpleView />
-          </Suspense>
-        </PageBoundary>
+      <PageBoundary name="simple">
+        <Suspense fallback={<PageLoading />}>
+          <SimpleView wsStatus={wsStatus} onPro={() => setMode('pro')} onSignOut={authEnabled() ? () => void signOut() : undefined} />
+        </Suspense>
         <div className="toasts" aria-live="polite">
           <TradeAlerts />
         </div>
-      </div>
+      </PageBoundary>
     )
   }
 
