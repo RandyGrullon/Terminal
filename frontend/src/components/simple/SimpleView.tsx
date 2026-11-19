@@ -3,7 +3,7 @@
 // and, on a tap, why it opened each one (TradeDetailModal, a bottom sheet on a phone). Read-only; everything else is
 // in the Pro mode. Same data as the Pro view: GET /api/paper/autopilot + the live socket.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Activity, Briefcase, ChevronRight, History, LayoutGrid, LogOut, PieChart } from 'lucide-react'
+import { Activity, Briefcase, ChevronRight, CircleHelp, History, LayoutGrid, LogOut, PieChart } from 'lucide-react'
 import { api } from '../../api/client'
 import type { Position } from '../../api/types'
 import type { AutopilotSnapshot } from '../../api/types-autopilot'
@@ -11,7 +11,8 @@ import type { WsStatus } from '../../api/ws'
 import { fmtAgo, fmtDateTime, fmtInt, fmtPct, fmtPrice, fmtR } from '../../lib/format'
 import { normalizeAutopilot, subscribeAutopilot } from '../paper/AutopilotView'
 import TradeDetailModal from '../paper/TradeDetailModal'
-import { Loading } from '../ui'
+import { Button, Loading, Modal } from '../ui'
+import { GLOSSARY, friendlyReason, nexusNow, priceBarOf, sideWords, sourceOf, speedOf, todayOf, type PriceBar } from './friendly'
 import './simple.css'
 
 const money = (v: number | null | undefined, signed = false) => {
@@ -103,30 +104,164 @@ export function accountsOf(snap: AutopilotSnapshot): SimpleAccount[] {
   return [main, ...challenges]
 }
 
+function PriceBarView({ bar, p }: { bar: PriceBar; p: Position }) {
+  const winning = p.pnl >= 0 // the result, fees included (the price can sit at the entry with the trade still losing)
+  return (
+    <span
+      className="sm-bar-track"
+      aria-label={`Precio ${fmtPrice(p.price)}: entre el stop ${fmtPrice(bar.stop)} y ${bar.hasTarget ? `el objetivo ${fmtPrice(bar.end)}` : 'sin objetivo fijo'}`}
+    >
+      <span className="sm-bar-rail">
+        <span className="sm-bar-loss" style={{ width: `${bar.entry * 100}%` }} />
+        <span className="sm-bar-entry" style={{ left: `${bar.entry * 100}%` }} />
+        <span className={`sm-bar-now ${winning ? 'pos' : 'neg'}`} style={{ left: `${bar.now * 100}%` }} />
+      </span>
+      <span className="sm-bar-labels">
+        <span>Stop {fmtPrice(bar.stop)}</span>
+        <span>{bar.hasTarget ? `Objetivo ${fmtPrice(bar.end)}` : bar.endLabel}</span>
+      </span>
+    </span>
+  )
+}
+
+const resultWord = (p: Position) =>
+  p.status === 'open' ? (p.pnl >= 0 ? 'ganando' : 'perdiendo') : p.pnl > 0 ? 'ganó' : p.pnl < 0 ? 'perdió' : 'quedó igual'
+
 export function TradeRow({ p, onDetail }: { p: Position; onDetail: (p: Position) => void }) {
   const open = p.status === 'open'
   const long = p.side === 'long'
+  const side = sideWords(p)
+  const src = sourceOf(p)
+  const bar = priceBarOf(p)
   return (
     <button type="button" className={`sm-trade ${long ? 'is-long' : 'is-short'}`} onClick={() => onDetail(p)}>
-      <span className="sm-trade-main">
-        <span className="sm-trade-top">
-          <b className="sm-sym">{shortSym(p.symbol)}</b>
-          <span className={`sm-side ${long ? 'pos' : 'neg'}`}>{long ? 'Compra' : 'Venta'}</span>
-          <span className="sm-chip">{p.tf}</span>
+      <span className="sm-trade-row">
+        <span className="sm-trade-main">
+          <span className="sm-trade-top">
+            <b className="sm-sym">{shortSym(p.symbol)}</b>
+            <span className={`sm-side ${long ? 'pos' : 'neg'}`}>{side.label}</span>
+            <span className="sm-chip">{p.hold ? src.short : `${src.short} · ${speedOf(p.tf).label.toLowerCase()}`}</span>
+          </span>
+          <span className="sm-trade-sub">
+            {open
+              ? `Abierta ${fmtAgo(p.entry_time * 1000)} · ${side.hope}`
+              : `${exitLabel(p.exit_reason)} · ${fmtDateTime((p.exit_time ?? p.entry_time) * 1000)}`}
+          </span>
         </span>
-        <span className="sm-trade-sub">
-          {open
-            ? `Entró a ${fmtPrice(p.entry_price)} · ${fmtAgo(p.entry_time * 1000)}`
-            : `${exitLabel(p.exit_reason)} · ${fmtDateTime(p.entry_time * 1000)}`}
+        <span className="sm-trade-side">
+          <b className={`mono ${tone(p.pnl)}`}>{money(p.pnl, true)}</b>
+          <span className={`sm-r ${tone(p.pnl)}`}>{resultWord(p)}</span>
+          <ChevronRight size={16} className="sm-chev" aria-hidden />
         </span>
-        {p.plan?.why && <span className="sm-why">{p.plan.why}</span>}
       </span>
-      <span className="sm-trade-side">
-        <b className={`mono ${tone(p.pnl)}`}>{money(p.pnl, true)}</b>
-        {p.r_multiple !== null && <span className={`sm-r mono ${tone(p.r_multiple)}`}>{fmtR(p.r_multiple)}</span>}
-        <ChevronRight size={16} className="sm-chev" aria-hidden />
-      </span>
+      <span className="sm-why">{friendlyReason(p)}</span>
+      {bar && <PriceBarView bar={bar} p={p} />}
     </button>
+  )
+}
+
+function TradeSheet({ p, onClose, onFull }: { p: Position | null; onClose: () => void; onFull: () => void }) {
+  if (!p) return null
+  const open = p.status === 'open'
+  const side = sideWords(p)
+  const speed = speedOf(p.tf)
+  const src = sourceOf(p)
+  const bar = priceBarOf(p)
+  const param = (re: RegExp) => p.plan?.params?.find((x) => re.test(x.label))?.value ?? null
+  const target = p.plan?.target ?? p.tp1
+  const rows: [string, string | null][] = [
+    ['Entró a', fmtPrice(p.entry_price)],
+    [open ? 'Precio ahora' : 'Salió a', fmtPrice(open ? p.price : p.exit_price)],
+    ['Stop (corta la pérdida)', p.hold ? `${fmtPrice(p.sl)} (de emergencia)` : fmtPrice(p.sl)],
+    ['Objetivo', target !== null && target !== undefined ? fmtPrice(target) : 'sin objetivo fijo'],
+    ['Si toca el stop inicial', param(/^Pérdida si toca el stop/)],
+    ['Tamaño', param(/^Tamaño/)],
+  ]
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={
+        <span className="sm-sheet-title">
+          {shortSym(p.symbol)} <span className={p.side === 'long' ? 'pos' : 'neg'}>{side.label}</span>
+        </span>
+      }
+      footer={
+        <>
+          <Button variant="ghost" onClick={onFull}>
+            Detalle técnico
+          </Button>
+          <Button onClick={onClose}>Listo</Button>
+        </>
+      }
+    >
+      <div className="sm-sheet">
+        <div className="sm-sheet-result">
+          <b className={`mono ${tone(p.pnl)}`}>{money(p.pnl, true)}</b>
+          <span>
+            {open ? `Abierta ${fmtAgo(p.entry_time * 1000)} · va ${resultWord(p)}` : `${exitLabel(p.exit_reason)} · ${resultWord(p)}`}
+            {p.r_multiple !== null ? ` (${fmtR(p.r_multiple)})` : ''}
+          </span>
+        </div>
+        <section>
+          <h4>¿Por qué la abrió?</h4>
+          <p>{friendlyReason(p)}</p>
+          {p.plan?.why && <p className="sm-sheet-tech">{p.plan.why}</p>}
+        </section>
+        {bar && (
+          <section>
+            <h4>¿Dónde va el precio?</h4>
+            <PriceBarView bar={bar} p={p} />
+          </section>
+        )}
+        {open && p.plan?.no_target && (
+          <section>
+            <h4>¿Cuándo sale?</h4>
+            <p>{p.plan.no_target}</p>
+          </section>
+        )}
+        <section>
+          <h4>Los números</h4>
+          <dl className="sm-sheet-rows">
+            {rows
+              .filter(([, v]) => v)
+              .map(([k, v]) => (
+                <div key={k}>
+                  <dt>{k}</dt>
+                  <dd className="mono">{v}</dd>
+                </div>
+              ))}
+          </dl>
+        </section>
+        <div className="sm-sheet-tags">
+          <span className="sm-chip">{src.kind === 'strategy' ? `Estrategia ${src.strategy}` : src.kind === 'hold' ? 'Cartera de largo plazo' : 'Señal de NEXUS'}</span>
+          {!p.hold && <span className="sm-chip">{`${speed.label} · ${speed.detail}`}</span>}
+          <span className="sm-chip">{side.hope}</span>
+        </div>
+        <p className="sm-sheet-tech">Simulado, sin dinero real. No es asesoría financiera.</p>
+      </div>
+    </Modal>
+  )
+}
+
+function HelpSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
+  return (
+    <Modal open={open} onClose={onClose} title="¿Cómo leer esto?" footer={<Button onClick={onClose}>Entendido</Button>}>
+      <div className="sm-sheet">
+        <p>
+          NEXUS opera solo en cuentas <b>simuladas</b>: nada de esto es dinero real. Toca cualquier operación para ver por qué la abrió.
+        </p>
+        <dl className="sm-glossary">
+          {GLOSSARY.map((g) => (
+            <div key={g.term}>
+              <dt>{g.term}</dt>
+              <dd>{g.text}</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="sm-sheet-tech">La validación de NEXUS no encontró evidencia de ventaja: puede ganar o perder. No es asesoría financiera.</p>
+      </div>
+    </Modal>
   )
 }
 
@@ -196,12 +331,46 @@ function Hero({ acc }: { acc: SimpleAccount }) {
   )
 }
 
+function NowCard({ snap, acc, open }: { snap: AutopilotSnapshot; acc: SimpleAccount; open: Position[] }) {
+  const now = nexusNow(snap, acc.id, open)
+  return (
+    <section className={`sm-now ${now.tone}`}>
+      <span className="sm-now-dot" aria-hidden />
+      <div>
+        <b>{now.title}</b>
+        <p>{now.detail}</p>
+      </div>
+    </section>
+  )
+}
+
+function TodayCard({ history }: { history: Position[] }) {
+  const t = todayOf(history)
+  return (
+    <section className="sm-today">
+      <span className="sm-label">Hoy</span>
+      {t.closed ? (
+        <div className="sm-today-row">
+          <b className={`mono ${tone(t.pnl)}`}>{money(t.pnl, true)}</b>
+          <span>
+            en {fmtInt(t.closed)} {t.closed === 1 ? 'operación cerrada' : 'operaciones cerradas'} · {fmtInt(t.wins)} de {fmtInt(t.closed)} ganaron
+          </span>
+        </div>
+      ) : (
+        <span className="sm-today-empty">Todavía no cerró ninguna operación hoy.</span>
+      )}
+    </section>
+  )
+}
+
 export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: WsStatus; onPro: () => void; onSignOut?: () => void }) {
   const [snap, setSnap] = useState<AutopilotSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [accId, setAccId] = useState<number | null>(null)
   const [detailId, setDetailId] = useState<number | null>(null)
   const [tab, setTab] = useState<Tab>('home')
+  const [full, setFull] = useState(false)
+  const [help, setHelp] = useState(false)
   const alive = useRef(true)
 
   const load = useCallback(async () => {
@@ -248,7 +417,10 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
     }
     return null
   }, [accounts, detailId])
-  const onDetail = (p: Position) => setDetailId(p.id)
+  const onDetail = (p: Position) => {
+    setFull(false)
+    setDetailId(p.id)
+  }
   const trades = acc ? acc.positions.filter((p) => !p.hold) : []
   const holdings = acc ? acc.positions.filter((p) => p.hold) : []
   const holdValue = holdings.reduce((s, p) => s + (Number.isFinite(p.pnl) ? p.pnl : 0), 0)
@@ -270,6 +442,9 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
             {wsStatus === 'open' ? 'En vivo' : wsStatus === 'connecting' ? 'Conectando…' : 'Sin conexión'}
           </span>
         </div>
+        <button type="button" className="sm-icon-btn" onClick={() => setHelp(true)} title="¿Cómo leer esto?" aria-label="¿Cómo leer esto?">
+          <CircleHelp size={18} />
+        </button>
         <button type="button" className="sm-icon-btn" onClick={onPro} title="Modo Pro: todas las herramientas">
           <LayoutGrid size={18} />
           <span>Pro</span>
@@ -305,6 +480,8 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
         {acc && tab === 'home' && (
           <>
             <Hero acc={acc} />
+            {snap && <NowCard snap={snap} acc={acc} open={trades} />}
+            <TodayCard history={acc.history} />
             {acc.note && (
               <div className="sm-note">
                 <span className="sm-note-label">Última decisión{acc.noteAt ? ` · ${fmtAgo(acc.noteAt)}` : ''}</span>
@@ -390,7 +567,12 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
         ))}
       </nav>
 
-      <TradeDetailModal p={detail} onClose={() => setDetailId(null)} />
+      {full ? (
+        <TradeDetailModal p={detail} onClose={() => setDetailId(null)} />
+      ) : (
+        <TradeSheet p={detail} onClose={() => setDetailId(null)} onFull={() => setFull(true)} />
+      )}
+      <HelpSheet open={help} onClose={() => setHelp(false)} />
     </div>
   )
 }
