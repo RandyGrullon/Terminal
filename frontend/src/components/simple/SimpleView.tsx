@@ -403,8 +403,9 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
     }
   }, [load])
 
+  const scroller = useRef<HTMLDivElement>(null)
   useEffect(() => {
-    window.scrollTo({ top: 0 })
+    scroller.current?.scrollTo({ top: 0 }) // the app scrolls inside .sm-app (the page body never scrolls)
   }, [tab, accId])
 
   const accounts = useMemo(() => (snap ? accountsOf(snap) : []), [snap])
@@ -432,7 +433,7 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
   ]
 
   return (
-    <div className="sm-app">
+    <div className="sm-app" ref={scroller}>
       <header className="sm-bar">
         <span className="brand-mark">N</span>
         <div className="sm-bar-title">
