@@ -45,6 +45,8 @@ globalThis.localStorage ??= {
   removeItem: (k) => void memory.delete(k),
 }
 globalThis.__impPagesLoaded = []
+// the Pro shell (every section) is what these tests measure; the simple mode is the default for a new viewer
+memory.set('nexus.ui.mode', 'pro')
 
 // ----------------------------------------------------------------------------- module graph of the real sources
 

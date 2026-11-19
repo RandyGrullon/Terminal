@@ -1,0 +1,40 @@
+/* Modo simple: one column, made for a phone first. */
+.sm-page { max-width: 720px; margin: 0 auto; padding: 12px 16px 32px; display: flex; flex-direction: column; gap: 14px; }
+.sm-accounts { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; }
+.sm-acc { flex: 0 0 auto; display: flex; flex-direction: column; gap: 2px; align-items: flex-start; padding: 8px 12px;
+  border-radius: 10px; border: 1px solid var(--border, #263040); background: var(--bg-2, #111722); color: inherit; cursor: pointer; font: inherit; }
+.sm-acc span { font-size: 12px; opacity: .75; }
+.sm-acc.active { border-color: var(--accent, #16c784); }
+.sm-hero { display: flex; flex-direction: column; gap: 8px; padding: 16px; border-radius: 14px; border: 1px solid var(--border, #263040);
+  background: var(--bg-2, #111722); }
+.sm-label { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; opacity: .7; }
+.sm-value { font-size: 34px; font-weight: 700; line-height: 1.1; }
+.sm-change { font-size: 14px; }
+.sm-figs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
+.sm-figs > div { display: flex; flex-direction: column; gap: 2px; padding: 10px; border-radius: 10px; background: rgba(255,255,255,.03); }
+.sm-figs span { font-size: 12px; opacity: .7; }
+.sm-figs b { font-size: 16px; }
+.sm-goal { display: flex; flex-direction: column; gap: 4px; }
+.sm-goal-bar { height: 8px; border-radius: 4px; background: rgba(255,255,255,.08); overflow: hidden; }
+.sm-goal-bar span { display: block; height: 100%; background: var(--accent, #16c784); }
+.sm-note { font-size: 13px; opacity: .85; display: flex; gap: 6px; align-items: baseline; }
+.sm-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent, #16c784); flex: 0 0 auto; }
+.sm-block { display: flex; flex-direction: column; gap: 8px; }
+.sm-block h3 { margin: 4px 0 0; font-size: 15px; display: flex; gap: 8px; align-items: center; }
+.sm-count { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: rgba(255,255,255,.08); }
+.sm-trade { display: flex; flex-direction: column; gap: 4px; text-align: left; width: 100%; padding: 12px; border-radius: 12px;
+  border: 1px solid var(--border, #263040); background: var(--bg-2, #111722); color: inherit; font: inherit; cursor: pointer; }
+.sm-trade:hover, .sm-trade:focus-visible { border-color: var(--accent, #16c784); }
+.sm-trade-top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sm-side { font-size: 12px; font-weight: 600; }
+.sm-chip { font-size: 11px; padding: 1px 6px; border-radius: 6px; background: rgba(255,255,255,.08); }
+.sm-pnl { margin-left: auto; font-weight: 700; }
+.sm-trade-sub { font-size: 12px; opacity: .7; }
+.sm-why { font-size: 13px; opacity: .9; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.sm-empty { font-size: 13px; opacity: .7; padding: 12px; border-radius: 12px; border: 1px dashed var(--border, #263040); }
+.pos { color: var(--pos, #16c784); }
+.neg { color: var(--neg, #ea3943); }
+.simple-header { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border, #263040);
+  padding-top: max(10px, env(safe-area-inset-top)); }
+.simple-header .grow { flex: 1; }
+.app-simple { min-height: 100vh; min-height: 100dvh; overflow-y: auto; }

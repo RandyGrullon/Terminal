@@ -44,6 +44,30 @@ El **modo local no cambia**: `start.bat` sigue usando SQLite en tu PC, sin login
 No tienes que crear tablas: el backend crea el esquema `nexus` al arrancar (fuera del esquema público, con
 Row Level Security activado, así la API pública de Supabase nunca expone tus datos).
 
+## Paso 1b — Llevar tus cuentas locales a Supabase (opcional)
+
+Sin este paso la nube empieza de cero. Con él empieza con todo lo de `data/nexus.db`: cuentas (también NEXUS
+automática y sus cuentas de reto), posiciones, historial, órdenes, ajustes y claves, retos y metas, memoria de NEXUS,
+historial del escáner, scripts y backtests. Las velas no se copian (la nube las vuelve a descargar), salvo las
+grabadas en vivo sin historial descargable (`--candles recorded`, por defecto; `all` = todas, cuidado con los 500 MB).
+
+1. Cierra NEXUS en tu PC (la copia se niega si el servidor local responde: lo que pasara después quedaría solo aquí).
+2. Hazlo **antes** del paso 2, o con el servicio de Railway detenido (la copia se niega si otra instancia tiene el
+   bloqueo de líder de esa base).
+3. 👤 En PowerShell, desde `backend\` (la URI lleva tu contraseña: escríbela tú, no la pegues en ningún chat):
+
+   ```powershell
+   $env:PYTHONUTF8 = "1"
+   $env:NEXUS_DATABASE_URL = "postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres"
+   .venv\Scripts\python -m app.dbcopy --dry-run    # qué copiaría, sin escribir
+   .venv\Scripts\python -m app.dbcopy              # la copia
+   ```
+
+Todo va en una transacción (un error deja el destino como estaba) y al final compara filas y saldos de cada cuenta
+con la base local («Copia terminada y comprobada»). Si el destino ya tiene datos se niega; `--replace` vacía esas
+tablas y copia encima. Después de copiar, usa solo la nube: si vuelves a abrir NEXUS local con SQLite, esa copia
+sigue por su lado.
+
 ## Paso 2 — Backend en Railway
 
 1. 👤 [railway.com](https://railway.com) → **New Project → Deploy from GitHub repo** → `RandyGrullon/Terminal`.

@@ -50,6 +50,9 @@ import './components/settings/settings.css'
 import './components/sim/sim.css'
 import './components/studio/studio.css'
 import TradeAlerts from './components/paper/TradeAlerts'
+import { useUiMode } from './lib/uiMode'
+
+const SimpleView = lazy(() => import('./components/simple/SimpleView'))
 import { runUiAction, useApp } from './store'
 
 const NAV: { page: Page; label: string; icon: LucideIcon }[] = [
@@ -234,6 +237,7 @@ export default function App() {
   const dismiss = useApp((s) => s.dismiss)
   const notify = useApp((s) => s.notify)
   const [health, setHealth] = useState<Health | null>(null)
+  const [mode, setMode] = useUiMode()
 
   useEffect(() => {
     socket.connect()
@@ -317,6 +321,36 @@ export default function App() {
 
   const loadErrors = health?.load_errors ?? []
 
+  if (mode === 'simple') {
+    return (
+      <div className="app-simple">
+        <header className="simple-header">
+          <div className="brand">
+            <span className="brand-mark">N</span>
+            NEXUS <small>DEMO</small>
+          </div>
+          <div className="grow" />
+          <span className="row gap-1 small muted nowrap" title="Conexión en tiempo real">
+            <span className={`ws-dot ${wsStatus}`} />
+            {wsStatus === 'open' ? 'En vivo' : wsStatus === 'connecting' ? 'Conectando…' : 'Sin conexión'}
+          </span>
+          <Button size="sm" onClick={() => setMode('pro')} title="Todas las herramientas: gráfico, escáner, PyChart, ajustes…">
+            Modo Pro
+          </Button>
+          {authEnabled() && <IconButton icon={<LogOut size={15} />} title="Cerrar sesión" onClick={() => void signOut()} />}
+        </header>
+        <PageBoundary name="simple">
+          <Suspense fallback={<PageLoading />}>
+            <SimpleView />
+          </Suspense>
+        </PageBoundary>
+        <div className="toasts" aria-live="polite">
+          <TradeAlerts />
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="app">
       <header className="app-header">
@@ -349,6 +383,9 @@ export default function App() {
           {wsStatus === 'open' ? 'En vivo' : wsStatus === 'connecting' ? 'Conectando…' : 'Sin conexión'}
         </span>
         <HeaderClock />
+        <Button size="sm" variant="ghost" onClick={() => setMode('simple')} title="Solo la cuenta demo: dinero, operaciones y por qué se abrieron">
+          Modo simple
+        </Button>
         <IconButton
           icon={<SquareTerminal size={16} />}
           title="Terminal (Ctrl+`)"
