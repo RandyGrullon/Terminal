@@ -30,6 +30,8 @@ class Runtime:
         # app.broker.mt5_mirror.Mt5MirrorService (account 3 mirrored in the MT5 account open on this PC: demo, or real
         # only for the account number the user authorized)
         self.broker_mt5: Any = None
+        # app.system_monitor.SystemMonitor: where the server runs, its starts and downtime, internet, battery
+        self.sysmon: Any = None
         self.research: Any = None  # app.sim.research.ResearchService (imported history and strategy research)
         self.auth: Any = None  # app.auth.SupabaseVerifier (cloud mode only)
         # "single": the only instance (SQLite or no background work) · "leader": holds the PostgreSQL leader lock and

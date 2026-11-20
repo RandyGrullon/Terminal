@@ -1,0 +1,58 @@
+/* NEXUS automática's accounts: 10k blue, 1k yellow, vault green. Shared by the Pro panel and the simple mode. */
+:root {
+  --acct-10k: #3b82f6;
+  --acct-10k-bg: rgba(59, 130, 246, 0.14);
+  --acct-1k: #f5b301;
+  --acct-1k-bg: rgba(245, 179, 1, 0.14);
+  --acct-500: #ff7a1a;
+  --acct-500-bg: rgba(255, 122, 26, 0.14);
+  --acct-100: #ec4899;
+  --acct-100-bg: rgba(236, 72, 153, 0.14);
+  --acct-vault: #16c784;
+  --acct-vault-bg: rgba(22, 199, 132, 0.13);
+  --acct-other: #a97bff;
+  --acct-other-bg: rgba(169, 123, 255, 0.13);
+}
+
+.nx-panel { display: flex; flex-direction: column; gap: 12px; margin: 12px 0; }
+.nx-accts { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.nx-acct {
+  --tone: var(--acct-other);
+  --tone-bg: var(--acct-other-bg);
+  display: flex; flex-direction: column; gap: 6px; padding: 14px 14px 12px; border-radius: 14px;
+  border: 1px solid var(--border); border-top: 3px solid var(--tone);
+  background: linear-gradient(180deg, var(--tone-bg), transparent 70%), var(--panel);
+  min-width: 0;
+}
+.nx-10k { --tone: var(--acct-10k); --tone-bg: var(--acct-10k-bg); }
+.nx-1k { --tone: var(--acct-1k); --tone-bg: var(--acct-1k-bg); }
+.nx-500 { --tone: var(--acct-500); --tone-bg: var(--acct-500-bg); }
+.nx-100 { --tone: var(--acct-100); --tone-bg: var(--acct-100-bg); }
+.nx-vault { --tone: var(--acct-vault); --tone-bg: var(--acct-vault-bg); }
+.nx-acct-head { display: flex; align-items: center; gap: 8px; color: var(--tone); }
+.nx-acct-head b { color: var(--text); font-size: 14px; }
+.nx-base { margin-left: auto; font-size: 11.5px; color: var(--muted); }
+.nx-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--tone); box-shadow: 0 0 0 3px var(--tone-bg); flex: 0 0 auto; }
+.nx-dot-1k { --tone: var(--acct-1k); --tone-bg: var(--acct-1k-bg); display: inline-block; }
+.nx-dot-500 { --tone: var(--acct-500); --tone-bg: var(--acct-500-bg); display: inline-block; }
+.nx-dot-100 { --tone: var(--acct-100); --tone-bg: var(--acct-100-bg); display: inline-block; }
+.nx-acct-value { font-size: 24px; font-weight: 700; line-height: 1.1; }
+.nx-acct-change { font-size: 12.5px; color: var(--text-2); }
+.nx-acct-figs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-size: 12px; color: var(--text-2); }
+.nx-acct-figs span { display: flex; justify-content: space-between; gap: 6px; min-width: 0; }
+.nx-acct-figs b { color: var(--text); white-space: nowrap; }
+.nx-acct-note { margin: 2px 0 0; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.nx-empty { justify-content: space-between; }
+.nx-acct .pos { color: var(--pos); }
+.nx-acct .neg { color: var(--neg); }
+
+.nx-twin-trades h4 { display: flex; align-items: center; gap: 8px; margin: 2px 0 8px; font-size: 13px; }
+.nx-tiles-1k .dk-tile { border-left: 3px solid var(--acct-1k); }
+.nx-tiles-500 .dk-tile { border-left: 3px solid var(--acct-500); }
+.nx-tiles-100 .dk-tile { border-left: 3px solid var(--acct-100); }
+.nx-tiles-10k .dk-tile { border-left: 3px solid var(--acct-10k); }
+.nx-hero-10k { border-radius: 16px; box-shadow: inset 3px 0 0 var(--acct-10k); }
+.nx-goal { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-2); }
+.nx-goal b { color: var(--text); }
+.nx-goal-bar { height: 7px; border-radius: 999px; background: rgba(255, 255, 255, .08); overflow: hidden; }
+.nx-goal-bar span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--tone), var(--acct-vault)); }

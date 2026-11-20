@@ -178,6 +178,10 @@ class MirrorService:
 
     # ------------------------------------------------------------------ settings
 
+    def _source_positions(self) -> list[dict]:
+        """The open positions it copies: NEXUS automática's (account 3); the MT5 mirror can copy the 1k account."""
+        return self.rt.paper.open_positions(AUTOPILOT_ACCOUNT)
+
     def _setting(self, key: str, default: Any = None) -> Any:
         settings = getattr(self.rt, "settings", None)
         if settings is None:
@@ -295,7 +299,7 @@ class MirrorService:
                 return cache["positions"].get(symbol.replace("/", ""))
 
             try:
-                positions = {int(p["id"]): p for p in self.rt.paper.open_positions(AUTOPILOT_ACCOUNT)}
+                positions = {int(p["id"]): p for p in self._source_positions()}
                 for pid, pos in positions.items():
                     if pid not in self._entries:
                         self._entries[pid] = await self._new(pos, cfg, client, market_open)

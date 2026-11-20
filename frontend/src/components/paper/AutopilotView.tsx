@@ -64,6 +64,7 @@ import AutopilotScripts, { normalizeScripts } from './AutopilotScripts'
 import AutopilotGoalCard, { normalizeGoal, normalizeGoalResult } from './AutopilotGoal'
 import AutopilotSessionCard, { normalizeMarkets, normalizeSession } from './AutopilotSession'
 import AutopilotChallengesCard, { normalizeChallenges } from './AutopilotChallenges'
+import NexusAccountsPanel, { normalizeMainGoal, normalizeTwin, normalizeVault } from './NexusAccounts'
 import TradeDetailModal from './TradeDetailModal'
 import BrokerCard from './BrokerCard'
 import PortfolioCard from './PortfolioCard'
@@ -233,6 +234,10 @@ export function normalizeAutopilot(raw: unknown): AutopilotSnapshot | null {
     risk: normalizeRisk(o.risk),
     autopilot,
     challenges: normalizeChallenges(o.challenges, normalizeLog, normalizeBrake),
+    twin: normalizeTwin(o.twin, normalizeLog, normalizeBrake),
+    twins: (Array.isArray(o.twins) ? o.twins : []).map((t) => normalizeTwin(t, normalizeLog, normalizeBrake)).filter((t): t is NonNullable<typeof t> => t !== null),
+    vault: normalizeVault(o.vault),
+    main_goal: normalizeMainGoal(o.main_goal),
   }
 }
 
@@ -1703,7 +1708,7 @@ export default function AutopilotView({ initial = null, section }: { initial?: A
     >
       {speedFilter}
       {tabPositions.length > 0 ? (
-        <div className="dk-tiles">
+        <div className="dk-tiles nx-tiles-10k">
           {tabPositions.map((p) => (
             <TradeTile key={p.id} p={p} closingId={closingId} tag={tagOf(p)} onClose={(x) => void closePosition(x)} onShow={openPosition} onDetail={showDetail} />
           ))}
@@ -1953,6 +1958,7 @@ export default function AutopilotView({ initial = null, section }: { initial?: A
           {status && <AutopilotChallengesCard challenges={snap.challenges} enabled={status.enabled} onSnapshot={showFresh} />}
           {status && <HealthNotice health={status.health} enabled={status.enabled} />}
           {status && <LearnedNotice contexts={status.paused_contexts} enabled={status.learn_guard} />}
+<div className="nx-hero-10k">
           <AccountHero
             account={snap.account}
             history={history}
@@ -1965,6 +1971,8 @@ export default function AutopilotView({ initial = null, section }: { initial?: A
               </>
             }
           />
+          </div>
+          <NexusAccountsPanel snap={snap} onSnapshot={showFresh} onDetail={showDetail} onShow={openPosition} />
           <SectionTabs label="Secciones de NEXUS automática" tabs={sectionTabs} value={shown} onChange={setSection} />
           {body}
         </>
@@ -1977,7 +1985,8 @@ export default function AutopilotView({ initial = null, section }: { initial?: A
           detailId === null || !snap
             ? null
             : (snap.positions.find((x) => x.id === detailId) ?? snap.history.find((x) => x.id === detailId) ??
-                snap.challenges.flatMap((c) => [...c.positions, ...c.history]).find((x) => x.id === detailId) ?? null)
+                snap.challenges.flatMap((c) => [...c.positions, ...c.history]).find((x) => x.id === detailId) ??
+                (snap.twin ? [...snap.twin.positions, ...snap.twin.history].find((x) => x.id === detailId) : undefined) ?? null)
         }
         onClose={() => setDetailId(null)}
         onOpenChart={(p) => {

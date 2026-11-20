@@ -3,11 +3,12 @@
 // verify the session (Supabase unreachable) or because this instance is in standby while another one is active
 // (deploys) is transient: the session is kept and GET requests are retried.
 import { authEnabled, currentSession, ensureFreshSession, getAccessToken, refreshSession, signOut, type Session } from '../auth/session'
-import { apiUrl } from '../lib/config'
+import { apiUrl, discoverApiBase } from '../lib/config'
 import type {
   AIChatMessage,
   AIChatReply,
   AIStatus,
+  SystemStatus,
   AutopilotComparison,
   BrokerStatus,
   AutopilotJournal,
@@ -144,6 +145,8 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
       })
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') throw err
+      // The backend may have moved (fixed link, phone tunnel restarted): retry once at its new address.
+      if (!retried && (await discoverApiBase())) return request<T>(method, path, opts, true)
       throw new ApiError('No hay conexión con el servidor NEXUS', 0, null)
     }
     if (res.status === 401 && authEnabled() && currentSession()) {
@@ -188,6 +191,8 @@ const del = <T>(path: string, query?: Query) => request<T>('DELETE', path, { que
 export const api = {
   // ------------------------------------------------------------------ system
   health: () => get<Health>('/api/health'),
+  // How the server itself is doing: where it runs, its starts and downtime, internet, battery (simple mode «Servidor»)
+  systemStatus: () => get<SystemStatus>('/api/system/status'),
   settings: {
     get: () => get<{ settings: Settings }>('/api/settings'),
     update: (values: Settings) => put<{ settings: Settings }>('/api/settings', values),
@@ -319,6 +324,8 @@ export const api = {
       stopGoal: (close = false) => post<AutopilotSnapshot>('/api/paper/autopilot/goal/stop', { close }),
       // Its challenge accounts: create, end now (close = its trades too) and delete with their trades
       createChallenge: (body: AutopilotChallengeRequest) => post<AutopilotSnapshot>('/api/paper/autopilot/challenges', body),
+      // The 1k account (one at a time): ended or deleted like a challenge account
+      createTwin: (body: { initial_balance?: number; name?: string } = {}) => post<AutopilotSnapshot>('/api/paper/autopilot/twin', body),
       stopChallenge: (id: number, close = true) => post<AutopilotSnapshot>(`/api/paper/autopilot/challenges/${id}/stop`, { close }),
       deleteChallenge: (id: number) => del<AutopilotSnapshot>(`/api/paper/autopilot/challenges/${id}`),
       // Against random entries in the same markets (computed on demand, cached by the server; fresh = recompute)

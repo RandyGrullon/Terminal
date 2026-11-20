@@ -77,4 +77,5 @@ export interface BrokerStatus {
   max_lots?: number // MT5: cap per order (lots)
   allow_real?: boolean // MT5: the user's switch to allow one REAL account
   blocked?: string | null // MT5: why it sends nothing to the account open now (a real one not authorized…)
+  source_account?: string // MT5: the NEXUS account it copies, "1k" or "10k"
 }

@@ -154,6 +154,22 @@ detenga (`kill_timeout`); si la prueba de la imagen en CI avisa de que la parada
    `403 Origen no permitido (…)` y los registros del backend lo avisan (como mucho una vez cada 5 min).
 6. 👤 Supabase → **Authentication → URL Configuration → Site URL** = tu URL de Vercel.
 
+### Variante: backend con dirección cambiante (teléfono + túnel rápido de Cloudflare)
+
+Cuando el backend corre detrás de un túnel rápido (`https://….trycloudflare.com`, que cambia en cada reinicio), la
+interfaz de Vercel no lleva `VITE_API_BASE`, sino:
+
+- `VITE_NEXUS_DISCOVERY_URL` = la URL del proyecto de Supabase;
+- `VITE_NEXUS_DISCOVERY_KEY` = su clave **publicable** (pública por diseño; el backend ya la entrega en
+  `/api/auth/config`).
+
+El backend publica su dirección del momento con `python tools/publish_endpoint.py https://…` (usa
+`NEXUS_DATABASE_URL`; crea la tabla `public.nexus_endpoint` con RLS: lectura para la clave publicable, escritura solo
+por la conexión de la base). La interfaz la lee al abrir y otra vez cuando el servidor deja de responder, y recuerda la
+última. En el teléfono lo hace `~/nexus-run.sh` cada vez que el túnel obtiene un enlace nuevo, y exporta
+`NEXUS_CORS_ORIGINS=https://<tu-proyecto>.vercel.app`. La dirección del túnel no es secreta: cada llamada sigue
+necesitando sesión.
+
 ## Paso 4 — Probar
 
 Abre tu URL de Vercel → inicia sesión con el correo del paso 1.4 → deberías ver el gráfico, la terminal

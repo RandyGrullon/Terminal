@@ -4,7 +4,7 @@
 // reconnect) or with 1013 when it cannot serve it right now (Supabase unreachable, or this instance is in standby
 // during a deploy: keep the session, back off).
 import { authEnabled, getAccessToken, onAuthChange, refreshSession, signOut } from '../auth/session'
-import { wsUrl } from '../lib/config'
+import { discoverApiBase, onApiBaseChange, wsUrl } from '../lib/config'
 import type { CommandResult, ServerMessage, ServerMessageType } from './types'
 
 export type WsStatus = 'connecting' | 'open' | 'closed'
@@ -57,6 +57,8 @@ class NexusSocket {
   private authRejects = 0 // 4401 closes since a socket last stayed usable for AUTH_STABLE_MS (or since the login)
 
   constructor() {
+    // Fixed link with a moving backend: a new address found in Supabase means a new socket there.
+    onApiBaseChange(() => this.restart())
     // Reconnect when the user logs in or out, and after a 4401 as soon as the session has a new token. A plain token
     // refresh needs no new socket: the refreshed token is handed to the open one ({type: 'auth'}) so the server keeps
     // it past the old token's expiry; a server that ignores it closes with 4401 at expiry and we reconnect.
@@ -151,6 +153,8 @@ class NexusSocket {
         this.onAuthRejected()
         return
       }
+      // The backend may have moved (its tunnel restarted): look up its address again (no-op without discovery).
+      if (ev.code !== 1013) void discoverApiBase()
       // 1013 (try again later): the server could not verify the session right now. Transient: keep the session and
       // reconnect with backoff, like after any other drop.
       this.scheduleReconnect(ev.code === 1013 ? 2000 : 0)

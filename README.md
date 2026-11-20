@@ -374,6 +374,14 @@ que la actives en «Cómo opera»:
   en lotes, 20x), cada una con el tamaño que le da su propio capital, y las cierra solas al llegar a la meta, a la hora
   límite o al freno. Cada una muestra su progreso, sus operaciones y sus decisiones; puedes terminarla o borrarla. Una
   cuenta pequeña solo cabe en monedas baratas. Un reto no crea ventaja.
+- **Cuenta de 1k y vault**: NEXUS automática opera dos cuentas de oro a la vez: la de **10k** (azul) y la de **1k**
+  (amarilla, se crea con «Crear la cuenta de 1k»). La de 1k usa las mismas señales con mentalidad de cuenta pequeña:
+  como mucho 2 operaciones a la vez, 2 % por operación (el lote mínimo de 0,01 solo si arriesga 3 % o menos), 10x,
+  freno del día al 4 % y freno total al 25 %, nunca en modo agresivo. El **vault** (verde, `autopilot.vault`) guarda la
+  ganancia ya cerrada de cada cuenta por encima de su base: la cuenta vuelve a 10.000 $ o 1.000 $ y lo ganado queda
+  aparte; no opera y una pérdida después no le quita nada. En el modo simple, «Todo NEXUS» muestra las tres juntas y
+  cada operación lleva el color de su cuenta; en el modo Pro están debajo del valor de la cuenta de 10k. El espejo de
+  MetaTrader 5 copia la de 1k por defecto (`broker.mt5_account`). Todo simulado; no es asesoría financiera.
 - **Horario de mercados y sesión de Nueva York**: la tarjeta «Horario de mercados» muestra qué está abierto y cuándo
   abre o cierra cada mercado en tu hora: cripto y oro (24/7), la bolsa de Nueva York (9:30–16:00 de Nueva York con los
   festivos y cierres anticipados de la NYSE) y los futuros de índices de la CME. Con «Modo agresivo en la sesión de

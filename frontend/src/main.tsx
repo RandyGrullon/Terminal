@@ -19,3 +19,13 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => undefined)
   })
 }
+
+// Behave like a phone app: no pinch / double-tap zoom (iOS ignores user-scalable=no without this), no page bounce.
+document.addEventListener('gesturestart', (e) => e.preventDefault(), { passive: false })
+document.addEventListener(
+  'touchmove',
+  (e) => {
+    if ((e as TouchEvent).touches.length > 1) e.preventDefault()
+  },
+  { passive: false },
+)

@@ -27,6 +27,7 @@ export const SERVICE_LABEL: Record<string, string> = {
   broker: 'Espejo en Alpaca (práctica)',
   broker_binance: 'Espejo en el testnet de Binance (práctica)',
   broker_mt5: 'Espejo en MetaTrader 5',
+  sysmon: 'Estado del servidor',
   research: 'Investigación de estrategias',
   auth: 'Autenticación',
 }

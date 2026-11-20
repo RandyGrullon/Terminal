@@ -19,8 +19,75 @@ export function normalizeApiBase(raw: string | null | undefined): string {
   return `${local ? 'http' : 'https'}://${base}`
 }
 
-export const API_BASE = normalizeApiBase(RAW_API_BASE)
-export const IS_REMOTE_API = API_BASE !== ''
+// Fixed link (Vercel) with a backend whose address changes (the phone's Cloudflare quick tunnel): the backend
+// publishes its current address in Supabase (public.nexus_endpoint, written by tools/publish_endpoint.py) and the page
+// reads it there at start and again when the backend stops answering. VITE_NEXUS_DISCOVERY_URL = the Supabase project
+// URL, VITE_NEXUS_DISCOVERY_KEY = its publishable key (public by design: the backend already serves it at
+// /api/auth/config). The last address found is remembered, so the page opens at once on the next visit.
+const ENV = import.meta.env as Partial<ImportMetaEnv> | undefined // undefined in the test bundles
+const DISCOVERY_URL = String(ENV?.VITE_NEXUS_DISCOVERY_URL ?? '').trim().replace(/\/+$/, '')
+const DISCOVERY_KEY = String(ENV?.VITE_NEXUS_DISCOVERY_KEY ?? '').trim()
+export const DISCOVERY_ENABLED = DISCOVERY_URL !== '' && DISCOVERY_KEY !== '' && RAW_API_BASE.trim() === ''
+const CACHE_KEY = 'nexus.api_base'
+const REDISCOVER_MIN_MS = 8_000
+
+function cachedBase(): string {
+  try {
+    return normalizeApiBase(localStorage.getItem(CACHE_KEY))
+  } catch {
+    return ''
+  }
+}
+
+export let API_BASE = DISCOVERY_ENABLED ? cachedBase() : normalizeApiBase(RAW_API_BASE)
+export let IS_REMOTE_API = API_BASE !== '' || DISCOVERY_ENABLED
+
+type BaseListener = (base: string) => void
+const baseListeners = new Set<BaseListener>()
+/** Called when discovery finds a new backend address (the WebSocket reconnects to it). */
+export function onApiBaseChange(fn: BaseListener): () => void {
+  baseListeners.add(fn)
+  return () => baseListeners.delete(fn)
+}
+
+let inflight: Promise<boolean> | null = null
+let lastTry = 0
+
+/** Reads the backend's current address from Supabase. True when it changed. Never throws. */
+export function discoverApiBase(force = false): Promise<boolean> {
+  if (!DISCOVERY_ENABLED) return Promise.resolve(false)
+  if (inflight) return inflight
+  if (!force && Date.now() - lastTry < REDISCOVER_MIN_MS) return Promise.resolve(false)
+  lastTry = Date.now()
+  const ctrl = new AbortController()
+  const timer = window.setTimeout(() => ctrl.abort(), 6_000)
+  inflight = fetch(`${DISCOVERY_URL}/rest/v1/nexus_endpoint?id=eq.1&select=url`, {
+    headers: { apikey: DISCOVERY_KEY },
+    signal: ctrl.signal,
+    cache: 'no-store',
+  })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((rows: unknown) => {
+      const raw = Array.isArray(rows) && rows[0] && typeof rows[0].url === 'string' ? rows[0].url : ''
+      const base = normalizeApiBase(raw)
+      if (!/^https:\/\//i.test(base) || base === API_BASE) return false
+      API_BASE = base
+      IS_REMOTE_API = true
+      try {
+        localStorage.setItem(CACHE_KEY, base)
+      } catch {
+        /* private mode: discovery runs again next time */
+      }
+      baseListeners.forEach((fn) => fn(base))
+      return true
+    })
+    .catch(() => false)
+    .finally(() => {
+      window.clearTimeout(timer)
+      inflight = null
+    })
+  return inflight
+}
 
 export function apiUrl(path: string): string {
   return API_BASE ? `${API_BASE}${path}` : path

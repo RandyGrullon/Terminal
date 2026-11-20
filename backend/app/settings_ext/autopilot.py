@@ -69,4 +69,9 @@ DEFAULTS: dict = {
     # XAUUSD trades at once (one per timeframe; also its challenge accounts). Still within the portfolio risk limits
     # (positions per correlated group, open risk)
     "autopilot.per_tf_positions": False,
+    # the vault (app.sim.autopilot_vault): the realized balance of the 10k and the 1k accounts above their initial
+    # balance is set aside there (they keep trading from their base); off by default
+    "autopilot.vault": False,
+    # the 10k account's goal in $ (0 = none): its progress counts the account plus what it put in the vault
+    "autopilot.main_target": 0.0,
 }

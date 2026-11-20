@@ -93,7 +93,7 @@ async def _setup(rt, monkeypatch, fake: FakeMt5, **settings):
     engine = await _engine(rt, dict(PRICES), BarNexus(default=make_current("WAIT")))
     rt.paper = engine
     await rt.settings.update({"paper.max_open_risk_pct": 0, "paper.max_positions_per_group": 0,
-                              "broker.mt5_enabled": True, **settings})
+                              "broker.mt5_enabled": True, "broker.mt5_account": "10k", **settings})
     svc = Mt5MirrorService(rt)
     await svc.start()
     return engine, svc
@@ -247,3 +247,25 @@ def test_api_and_terminal(api_client):
     res = api_client.post("/api/terminal", json={"text": "espejo mt5"}).json()
     assert res["ok"] and "Espejo en MetaTrader 5 desactivado" in "\n".join(l["text"] for l in res["lines"])
     assert api_client.get("/api/health").json()["services"]["broker_mt5"]["enabled"] is False
+
+
+def test_by_default_it_copies_the_1k_account(runtime_factory, no_background, monkeypatch):
+    async def scenario():
+        async with runtime_factory() as rt:
+            fake = FakeMt5(kind=0)
+            engine, svc = await _setup(rt, monkeypatch, fake, **{"broker.mt5_account": "1k"})
+            await _open(engine, XAU, qty=4.0)  # a trade of the 10k account: not copied
+            await svc.sync()
+            assert fake.requests == [] and "No hay cuenta de 1k" in svc._error
+            snap = await engine.create_twin()
+            twin = snap["twin"]["id"]
+            res = await engine.open_position(twin, XAU, "long", "15m", qty=1.0, sl=3690.0, origin="autopilot",
+                                             check_gate=False, price=PRICES[XAU])
+            await svc.sync()
+            assert [(r["symbol"], r["volume"], r["comment"]) for r in fake.requests] == [
+                ("GOLD", 0.01, f"nexus-{res['position']['id']}-o1")]
+            assert (await svc.overview())["source_account"] == "1k"
+            await svc.stop()
+            await engine.stop()
+
+    asyncio.run(scenario())

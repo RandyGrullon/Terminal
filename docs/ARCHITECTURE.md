@@ -1266,7 +1266,20 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     its daily loss limit is its brake), keeps its own decision log (`_ch_logs`, saved with `autopilot.state`), never
     mirrors to a broker and pauses with account 3. The monitor's `_challenge_tick` ends each one at its target, its
     deadline or its brake with nothing open (`_challenge_end`: closes its trades, `G.goal_result`); its events carry
-    its name; account 2 stays the simulator's nor in a market that is not live (`_market_live`: every class but crypto needs a quote with
+    its name. The small accounts (1k, 500, 100…) are records of kind `twin` among them (`CH.parse_twin`,
+    `POST /api/paper/autopilot/twin` {initial_balance?, name?, target?}, up to `CH.TWIN_MAX_RUNNING` at once;
+    `twin_ids()` largest first, `twin_id()` = the first; `tools/add_small_accounts.py` adds them in the database with
+    the server stopped): a goal (10× by default; `POST …/twin/target` {target, account_id?}) but no deadline, never
+    aggressive (`_aggressive_now` false), their own overlay `CH.twin_profile(rec)` in `_ap_setting` whatever the mode
+    (5m/15m/1h, 2 % per trade, 10x, at most 2 positions; MT5 lots with the minimum lot only at ≤ 3 % from
+    `CH.TWIN_LOTS_MIN` = 1.000 $ up, fractional size below it) and `CH.TWIN_RISK` in `_risk_limits` (daily 4 %, open
+    risk 6 %, 2 per group); the brake (25 %) stops new entries but `_challenge_tick` never ends them; they travel as
+    AutopilotSnapshot.twins (and the first as .twin; `mindset` = its rules in Spanish, `CH.twin_text`), not in
+    `challenges`. The vault (`app/sim/autopilot_vault.py`, meta `autopilot.vault`, setting
+    `autopilot.vault`, off by default): the monitor's `_vault_tick` moves the realized balance of account 3 and of the
+    1k account above their initial balance out of `paper_accounts.balance` into the vault (no fill: the day's realized
+    P&L and the daily block do not see it), logs it and publishes; a later loss never takes anything back;
+    AutopilotSnapshot.vault = {enabled, total, by_account, entries (last 20), note}. account 2 stays the simulator's nor in a market that is not live (`_market_live`: every class but crypto needs a quote with
     `market_open` ≠ false and a live price, so stocks only trade in their session), are capped as a cash account
     (`open_position(max_exposure_pct=)`, atomic with the insert: everything but futures held, an option at its
     premium, ≤ that % of equity; a smaller position when it does not fit whole, in whole contracts for an option, rule
@@ -2623,6 +2636,8 @@ futures: demo.binance.com → API Management), not valid on the live exchange. O
   and the symbol's maximum, rounded down to its step; under its minimum lot it is not mirrored. Closes and partial
   exits are sent against the position's ticket (hedging accounts); if MT5 switched to another account, nothing of the
   old account is closed until the user goes back to it.
+- Source: `broker.mt5_account` "1k" (default: the 1k account, `paper.twin_id()`; none → nothing, with the reason) or
+  "10k" (account 3); the base mirror's `_source_positions()` hook (Alpaca and Binance keep account 3).
 - Settings: `broker.mt5_enabled` false, `broker.mt5_path` "" (terminal64.exe; empty = the MT5 already open),
   `broker.mt5_symbols` "", `broker.mt5_max_lots` 0.1, `broker.mt5_allow_real` false, `broker.mt5_real_login` "".
 - API: `GET /api/broker/mt5/status?refresh=` and `POST /api/broker/mt5/sync` → BrokerStatus with provider `mt5`,

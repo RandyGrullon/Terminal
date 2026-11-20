@@ -154,6 +154,8 @@ class Mt5MirrorService(MirrorService):
                 "max_lots": max(max_lots, 0.0),
                 "allow_real": bool(self._setting("broker.mt5_allow_real", False)),
                 "real_login": str(self._setting("broker.mt5_real_login", "") or "").strip(),
+                "source": "10k" if str(self._setting("broker.mt5_account", "1k") or "1k").strip().lower() == "10k"
+                else "1k",
                 "key_id": "mt5", "stocks": True, "crypto": True, "perps": True}
 
     def _client(self, cfg: dict[str, Any]) -> mt5lib.Mt5Client:
@@ -190,9 +192,22 @@ class Mt5MirrorService(MirrorService):
             self._acct_cache = hit
         return hit[1]
 
+    def source_account(self, cfg: dict | None = None) -> int | None:
+        """The NEXUS account it copies: the 1k account (broker.mt5_account "1k", by default) or account 3 ("10k")."""
+        cfg = cfg or self._cfg()
+        if cfg["source"] == "10k":
+            return 3
+        paper = getattr(self.rt, "paper", None)
+        return paper.twin_id() if paper is not None and hasattr(paper, "twin_id") else None
+
     async def sync(self) -> None:
         cfg = self._cfg()
         if not cfg["ready"] or getattr(self.rt, "paper", None) is None:
+            return
+        source = self.source_account(cfg)
+        if source is None:
+            self._error = "No hay cuenta de 1k que copiar: créala o elige la de 10k en Ajustes → MetaTrader 5."
+            self._last_sync_ms = now_ms()
             return
         try:
             acct = await self._read_account(cfg, refresh=True)
@@ -212,7 +227,7 @@ class Mt5MirrorService(MirrorService):
             # what NEXUS opens while the account cannot be used is never sent later (a real account authorized
             # afterwards only gets the positions opened from then on)
             async with self._lock:
-                for pos in self.rt.paper.open_positions(3):
+                for pos in self.rt.paper.open_positions(source):
                     pid = int(pos["id"])
                     if pid not in self._entries:
                         e = await MirrorService._new(self, {**pos, "symbol": "SIM:BLOCKED"}, cfg, None, None)
@@ -222,7 +237,11 @@ class Mt5MirrorService(MirrorService):
             return
         self._blocked = None
         self._login = acct.get("login")
+        self._source = source
         await super().sync()
+
+    def _source_positions(self) -> list[dict]:
+        return self.rt.paper.open_positions(getattr(self, "_source", None) or 3)
 
     # ------------------------------------------------------------------ venue hooks
 
@@ -333,6 +352,7 @@ class Mt5MirrorService(MirrorService):
             return out
         out = await super().overview(refresh)
         out["max_lots"] = cfg["max_lots"]
+        out["source_account"] = cfg["source"]
         out["allow_real"] = cfg["allow_real"]
         out["blocked"] = self._blocked
         acct = None

@@ -576,6 +576,39 @@ async def paper_autopilot_challenge_create(req: ChallengeRequest) -> dict:
         raise _paper_error(exc) from None
 
 
+class TwinRequest(BaseModel):
+    initial_balance: float | None = None  # default 1000
+    name: str | None = None  # default «NEXUS 1k» / «NEXUS 500» / «NEXUS 100»…
+    target: float | None = None  # default 10× the initial balance
+
+
+@router.post("/api/paper/autopilot/twin")
+async def paper_autopilot_twin_create(req: TwinRequest | None = None) -> dict:
+    """The 1k account: a second account of NEXUS automática with the small-account mindset
+    (app.sim.autopilot_challenges.TWIN_PROFILE); ended or deleted like a challenge account."""
+    paper = _service("paper", "La cuenta demo")
+    try:
+        return clean_json(await paper.create_twin(req.initial_balance if req else None, req.name if req else None,
+                                                req.target if req else None))
+    except PaperError as exc:
+        raise _paper_error(exc) from None
+
+
+class TwinTargetRequest(BaseModel):
+    target: float  # the small account's goal, above its initial balance (at most 100×)
+    account_id: int | None = None  # which small account (default: the first one, the 1k)
+
+
+@router.post("/api/paper/autopilot/twin/target")
+async def paper_autopilot_twin_target(req: TwinTargetRequest) -> dict:
+    """Change the 1k account's goal (by default 10× its initial balance: 1.000 $ -> 10.000 $)."""
+    paper = _service("paper", "La cuenta demo")
+    try:
+        return clean_json(await paper.set_twin_target(req.target, req.account_id))
+    except PaperError as exc:
+        raise _paper_error(exc) from None
+
+
 @router.post("/api/paper/autopilot/challenges/{account_id}/stop")
 async def paper_autopilot_challenge_stop(account_id: int, req: ChallengeStopRequest | None = None) -> dict:
     paper = _service("paper", "La cuenta demo")

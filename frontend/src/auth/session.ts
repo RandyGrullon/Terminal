@@ -5,7 +5,7 @@
 // and 429 keep it and retry with backoff (and at once when the browser is back online or the tab becomes visible again), so a laptop waking
 // up before its Wi-Fi, or a short Supabase outage, never signs the user out of every tab.
 import type { AuthConfig } from '../api/types'
-import { apiUrl, IS_REMOTE_API } from '../lib/config'
+import { apiUrl, discoverApiBase, DISCOVERY_ENABLED, IS_REMOTE_API } from '../lib/config'
 
 export interface Session {
   access_token: string
@@ -148,6 +148,7 @@ export async function loadAuthConfig(): Promise<AuthConfig> {
   if (config) return config
   let res: Response
   try {
+    if (DISCOVERY_ENABLED) await discoverApiBase(true)
     res = await fetch(apiUrl('/api/auth/config'))
   } catch {
     if (IS_REMOTE_API) throw new Error('No se pudo contactar con el servidor NEXUS. Revisa tu conexión o que el backend esté en marcha.')

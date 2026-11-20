@@ -51,6 +51,7 @@ import './components/sim/sim.css'
 import './components/studio/studio.css'
 import TradeAlerts from './components/paper/TradeAlerts'
 import { useUiMode } from './lib/uiMode'
+import { useMediaQuery } from './components/paper/useMediaQuery'
 
 const SimpleView = lazy(() => import('./components/simple/SimpleView'))
 import { runUiAction, useApp } from './store'
@@ -238,6 +239,15 @@ export default function App() {
   const notify = useApp((s) => s.notify)
   const [health, setHealth] = useState<Health | null>(null)
   const [mode, setMode] = useUiMode()
+  // phones (and narrow tablets): the menu becomes a bottom bar and the terminal an overlay, closed until asked for
+  const phone = useMediaQuery('(max-width: 820px)')
+  const [phoneTerminal, setPhoneTerminal] = useState(false)
+  const showTerminal = phone ? phoneTerminal : terminalOpen
+  const onToggleTerminal = () => (phone ? setPhoneTerminal((v) => !v) : toggleTerminal())
+  useEffect(() => {
+    // on a phone the menu is a sliding bottom bar: keep the open section in view
+    if (phone) document.querySelector('.app-nav .nav-item.active')?.scrollIntoView({ inline: 'center', block: 'nearest' })
+  }, [phone, page])
 
   useEffect(() => {
     socket.connect()
@@ -341,17 +351,17 @@ export default function App() {
           <span className="brand-mark">N</span>
           NEXUS <small>TERMINAL</small>
         </div>
-        <div style={{ width: 340, maxWidth: '32vw' }}>
+        <div className="hdr-search" style={{ width: 340, maxWidth: '32vw' }}>
           <SymbolSearch />
         </div>
-        <div className="btn-group" role="group" aria-label="Temporalidad">
+        <div className="btn-group hdr-tfs" role="group" aria-label="Temporalidad">
           {HEADER_TFS.map((t) => (
             <button key={t} type="button" className={`btn btn-sm ${t === tf ? 'active' : ''}`} onClick={() => setTf(t)}>
               {t}
             </button>
           ))}
         </div>
-        <span className="mono small text-2 ellipsis" title="Símbolo activo">
+        <span className="mono small text-2 ellipsis hdr-symbol" title="Símbolo activo">
           {symbol}
         </span>
         <div className="header-spacer" />
@@ -363,17 +373,19 @@ export default function App() {
         )}
         <span className="row gap-1 small muted nowrap" title="Conexión en tiempo real">
           <span className={`ws-dot ${wsStatus}`} />
-          {wsStatus === 'open' ? 'En vivo' : wsStatus === 'connecting' ? 'Conectando…' : 'Sin conexión'}
+          <span className="hdr-ws-label">{wsStatus === 'open' ? 'En vivo' : wsStatus === 'connecting' ? 'Conectando…' : 'Sin conexión'}</span>
         </span>
-        <HeaderClock />
+        <span className="hdr-clock">
+          <HeaderClock />
+        </span>
         <Button size="sm" variant="ghost" onClick={() => setMode('simple')} title="Solo la cuenta demo: dinero, operaciones y por qué se abrieron">
           Modo simple
         </Button>
         <IconButton
           icon={<SquareTerminal size={16} />}
           title="Terminal (Ctrl+`)"
-          active={terminalOpen}
-          onClick={toggleTerminal}
+          active={showTerminal}
+          onClick={onToggleTerminal}
         />
         {authEnabled() && (
           <>
@@ -410,7 +422,7 @@ export default function App() {
             </Suspense>
           </PageBoundary>
         </div>
-        {terminalOpen && (
+        {showTerminal && (
           <div className="terminal-dock" style={{ height: terminalHeight }}>
             <div className="terminal-resizer" onMouseDown={onResizeStart} title="Arrastra para cambiar el tamaño" />
             <PageBoundary name="terminal">

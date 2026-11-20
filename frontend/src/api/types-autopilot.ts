@@ -180,7 +180,70 @@ export interface AutopilotSnapshot {
   history: Position[] // closed positions, newest first
   risk: PaperRisk | null // the portfolio risk rules also apply to account 3
   autopilot: AutopilotStatus
-  challenges: AutopilotChallenge[] // its challenge accounts: running first, then the newest
+  challenges: AutopilotChallenge[] // its challenge accounts: running first, then the newest (never the 1k account)
+  twin: AutopilotTwin | null // the 1k account (POST /api/paper/autopilot/twin creates it), null when there is none
+  twins: AutopilotTwin[] // every running small account (1k, 500, 100…), the largest first; twin = the first
+  vault: AutopilotVault | null // the vault: the 10k account's realized excess over its initial balance
+  main_goal: AutopilotMainGoal | null // the 10k account's goal (autopilot.main_target; null = none)
+}
+
+/** The 10k account's goal: its total is the account's equity plus what it put in the vault. */
+export interface AutopilotMainGoal {
+  target: number
+  total: number // equity + saved
+  saved: number // what it put in the vault
+  initial: number
+  progress_pct: number // 0..100 from its initial balance to the target
+  remaining: number
+  reached: boolean
+}
+
+/** The 1k account («NEXUS 1k», kind 'twin'): a second account of NEXUS automática with its own balance, the same
+ * candidates and signals, and the small-account mindset (`mindset`, shown verbatim). No target, no deadline, never
+ * aggressive; its brake stops new entries but never ends it. */
+export interface AutopilotTwin {
+  id: number
+  name: string
+  status: string
+  kind: 'twin'
+  initial: number
+  brake_pct: number
+  started_at: number
+  account: PaperAccount
+  positions: Position[]
+  history: Position[] // its last 30 closed, newest first
+  log: AutopilotLogEntry[]
+  brake: AutopilotBrake
+  mindset: string // Spanish: its rules, verbatim
+  target: number | null // its goal (10× its initial balance by default: 1.000 $ -> 10.000 $; it keeps its gains)
+  progress_pct: number | null // 0..100
+  remaining: number | null
+  reached_at: number | null // unix s when it first reached the goal (it keeps trading)
+}
+
+/** What one account put in the vault (also 0 for an account that never did). */
+export interface AutopilotVaultAccount {
+  account_id: number
+  name: string
+  amount: number
+}
+
+/** One sweep into the vault. */
+export interface AutopilotVaultEntry {
+  ts: number // unix seconds
+  account_id: number
+  name: string
+  amount: number
+  base: number // the account's initial balance it went back to
+}
+
+/** The vault (setting autopilot.vault): a number that never trades. */
+export interface AutopilotVault {
+  enabled: boolean
+  total: number
+  by_account: AutopilotVaultAccount[]
+  entries: AutopilotVaultEntry[] // the last 20, newest first
+  note: string
 }
 
 /** A challenge account («cuenta de reto»): its own balance, target, optional deadline and loss brake, traded by NEXUS's

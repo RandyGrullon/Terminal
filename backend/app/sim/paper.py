@@ -76,6 +76,7 @@ from app.engine.levels import ev_hold
 from app.engine.nexus_current import EARLY_EV
 from app.engine.service_watch import gate_target_ms
 from app.sim import autopilot_challenges as CH
+from app.sim import autopilot_vault as V
 from app.sim import autopilot_goal as G
 from app.sim import market_session as MS
 from app.sim import journal as J
@@ -767,6 +768,7 @@ class PaperEngine:
         self._session_state: tuple[bool, bool] | None = None
         # its challenge accounts (app.sim.autopilot_challenges): id -> record, and each one's decision log
         self._challenges: dict[int, dict[str, Any]] = {}
+        self._vault: dict[str, Any] = V.load(None)  # app.sim.autopilot_vault: what the vault keeps
         self._ch_logs: dict[int, deque[dict[str, Any]]] = {}
         self._ny_cache: tuple[int, dict[str, Any]] | None = None
 
@@ -790,6 +792,7 @@ class PaperEngine:
             # prices moved while NEXUS was stopped are unknown: bars that began before this start count by close only
             self._watch_from[order["id"]] = max(int(order["created_at"] // 1000), self._started_s)
         await self._load_challenges()
+        self._vault = V.load(json_loads(await self._meta_get(V.VAULT_KEY), None))
         await self._load_day_low()
         await self._expire_orders()  # orders whose expiry passed while NEXUS was stopped
         await self._register_listener()
@@ -975,12 +978,15 @@ class PaperEngine:
         that mode, or the New York session mode while the session is open."""
         ch = self._challenges.get(account_id)
         if ch is not None:
-            return bool(ch["aggressive"])
+            return bool(ch["aggressive"]) and not CH.is_twin(ch)
         return (self._goal is not None and self._goal["aggressive"]) or self._session_on()
 
     def _ap_setting(self, key: str, default: Any = None, account_id: int = AUTOPILOT_ACCOUNT) -> Any:
         """A setting of one of NEXUS's accounts as it applies now: the aggressive mode overrides some of them while it
         applies (app.sim.autopilot_goal.AGGRESSIVE); the saved settings never change."""
+        if key in CH.TWIN_PROFILE and CH.is_twin(self._challenges.get(account_id)):
+            value = CH.twin_profile(self._challenges.get(account_id))[key]  # its own mindset, whatever the mode
+            return list(value) if isinstance(value, list) else value
         if key in G.AGGRESSIVE and self._aggressive_now(account_id):
             value = G.AGGRESSIVE[key]
             return list(value) if isinstance(value, list) else value
@@ -1516,7 +1522,9 @@ class PaperEngine:
             "crypto_one_group": bool(self._setting("paper.crypto_one_group", True)),
             "daily_loss_limit_pct": positive("paper.daily_loss_limit_pct", 3.0, 100.0),
         }
-        if account_id is not None and self._is_autopilot(account_id) and self._aggressive_now(account_id):
+        if account_id is not None and CH.is_twin(self._challenges.get(account_id)):
+            limits.update(CH.TWIN_RISK)
+        elif account_id is not None and self._is_autopilot(account_id) and self._aggressive_now(account_id):
             limits.update(G.aggressive_risk(self._autopilot_cfg(account_id)["max_drawdown_pct"]))
         return limits
 
@@ -3723,6 +3731,10 @@ class PaperEngine:
             "risk": risk,
             "autopilot": status,
             "challenges": await self._challenges_view(),
+            "twin": await self._twin_view(),
+            "twins": [await self._twin_view(a) for a in self.twin_ids()],
+            "vault": self._vault_view(),
+            "main_goal": V.main_goal_view(account, self._vault, self._setting("autopilot.main_target", 0.0)),
         }
 
     @staticmethod
@@ -4268,6 +4280,121 @@ class PaperEngine:
         await self.publish(AUTOPILOT_ACCOUNT)
         return await self.autopilot_snapshot()
 
+    def twin_ids(self) -> list[int]:
+        """The running small accounts (kind 'twin': 1k, 500, 100…), the largest initial balance first."""
+        ids = [a for a, c in self._challenges.items() if CH.is_twin(c) and c["status"] == "running"]
+        return sorted(ids, key=lambda a: (-float(self._challenges[a]["initial"]), a))
+
+    def twin_id(self) -> int | None:
+        """The first running small account (the 1k one when it exists; None when there is none)."""
+        ids = self.twin_ids()
+        return ids[0] if ids else None
+
+    async def create_twin(self, initial: Any = None, name: Any = None, target: Any = None) -> dict[str, Any]:
+        """A small account of NEXUS automática (1k, 500, 100…) with its own balance, goal (10× by default) and the
+        small-account mindset (app.sim.autopilot_challenges.twin_profile / TWIN_RISK)."""
+        if len(self.twin_ids()) >= CH.TWIN_MAX_RUNNING:
+            raise PaperError(f"Como mucho {CH.TWIN_MAX_RUNNING} cuentas pequeñas a la vez")
+        ini = safe_float(initial if initial not in (None, "") else CH.TWIN_INITIAL)
+        if name in (None, "") and ini is not None and ini > 0:
+            name = f"NEXUS {fmt_num(ini / 1000.0, 0)}k" if ini >= 1000 and ini % 1000 == 0 else f"NEXUS {fmt_num(ini, 0)}"
+        try:
+            rec = CH.parse_twin(initial, name, now=now_s(), taken={ch["name"] for ch in self._challenges.values()},
+                                target=target)
+        except ValueError as exc:
+            raise PaperError(str(exc)) from None
+        top = safe_float(await self.rt.db.fetchval("SELECT MAX(id) FROM paper_accounts")) or 0
+        aid = max(CH.FIRST_ID, int(top) + 1, *(a + 1 for a in self._challenges))
+        ts = now_ms()
+        await self.rt.db.execute(
+            "INSERT INTO paper_accounts(id, name, balance, initial_balance, currency, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'USD', ?, ?)", (aid, rec["name"], rec["initial"], rec["initial"], ts, ts))
+        self._challenges[aid] = {"id": aid, **rec}
+        await self._save_challenges()
+        self._autopilot_note("—", "info", f"Empieza con {CH.money(rec['initial'])}, meta {CH.money(rec['target'])}. "
+                             f"{CH.twin_text(rec)}", account_id=aid)
+        self._emit("info", "paper", f"Nueva cuenta «{rec['name']}» de {CH.money(rec['initial'])} → "
+                   f"{CH.money(rec['target'])} (cuenta pequeña)",
+                   {"account_id": aid})
+        if config.BACKGROUND:
+            await self._sync_subscriptions()
+        await self.publish(AUTOPILOT_ACCOUNT)
+        return await self.autopilot_snapshot()
+
+    async def set_twin_target(self, target: Any, account_id: Any = None) -> dict[str, Any]:
+        """Change a small account's goal (by default 10× its initial balance); without account_id, the first one."""
+        aid: int | None
+        if account_id in (None, ""):
+            aid = self.twin_id()
+        else:
+            aid = int(safe_float(account_id) or 0)
+            if aid not in self.twin_ids():
+                aid = None
+        if aid is None:
+            raise PaperError("No hay una cuenta pequeña en marcha con ese número")
+        ch = self._challenges[aid]
+        try:
+            goal = CH.parse_twin_target(target, float(ch["initial"]))
+        except ValueError as exc:
+            raise PaperError(str(exc)) from None
+        ch.update({"target": goal, "reached_at": None})
+        await self._save_challenges()
+        self._autopilot_note("—", "info", f"Meta de la cuenta: {CH.money(ch['initial'])} → {CH.money(goal)}",
+                             account_id=aid)
+        await self.publish(AUTOPILOT_ACCOUNT)
+        return await self.autopilot_snapshot()
+
+    async def _twin_view(self, aid: int | None = None) -> dict[str, Any] | None:
+        """AutopilotChallenge (kind 'twin') of a running small account (default: the first one), or None."""
+        aid = self.twin_id() if aid is None else aid
+        if aid is None:
+            return None
+        ch = self._challenges[aid]
+        account = await self.account(aid)
+        return CH.challenge_view(ch, account=account, positions=self.open_positions(aid),
+                                 history=await self.history(aid, 30), log=list(self._ch_logs.get(aid, ()))[:15],
+                                 brake=self._brake(account, ch["brake_pct"]), now=now_s())
+
+    # ------------------------------------------------------------------ the vault (savings, app.sim.autopilot_vault)
+
+    def _vault_accounts(self) -> list[int]:
+        """The accounts whose realized excess over their initial balance goes to the vault: the 10k account only. The
+        1k account keeps its gains: its challenge is to compound from 1.000 $ to its goal (10.000 $)."""
+        return [AUTOPILOT_ACCOUNT]
+
+    async def _vault_tick(self, now: int | None = None) -> None:
+        """The monitor's check: when autopilot.vault is on, move each account's realized balance above its initial
+        balance into the vault (a number that never trades). Losses never take anything back from it."""
+        if not bool(self._setting("autopilot.vault", False)):
+            return
+        t = int(now if now is not None else now_s())
+        moved: list[tuple[int, float]] = []
+        async with self._lock:
+            for aid in self._vault_accounts():
+                row = await self.rt.db.fetchone("SELECT balance, initial_balance FROM paper_accounts WHERE id=?", (aid,))
+                if not row:
+                    continue
+                excess = round(float(row["balance"]) - float(row["initial_balance"]), 2)
+                if excess < V.MIN_SWEEP:
+                    continue
+                await self.rt.db.execute("UPDATE paper_accounts SET balance = balance - ?, updated_at=? WHERE id=?",
+                                         (excess, now_ms(), aid))
+                V.add(self._vault, aid, excess, t, float(row["initial_balance"]))
+                moved.append((aid, excess))
+            if moved:
+                await self._meta_put(V.VAULT_KEY, json_dumps(self._vault))
+        for aid, amount in moved:
+            self._autopilot_note("—", "info", f"Ganancia guardada en el vault: {CH.money(amount)} (la cuenta vuelve a "
+                                              f"su base)", account_id=aid)
+            self._emit("info", "paper", f"Vault: +{CH.money(amount)} de «{self._account_label(aid, 'NEXUS automática')}»; "
+                                        f"guardado en total {CH.money(self._vault['total'])}", {"account_id": aid})
+        if moved:
+            await self.publish(AUTOPILOT_ACCOUNT)
+
+    def _vault_view(self) -> dict[str, Any]:
+        names = {aid: self._account_label(aid, "NEXUS automática") for aid in self._vault_accounts()}
+        return V.view(self._vault, enabled=bool(self._setting("autopilot.vault", False)), names=names)
+
     def _challenge(self, account_id: Any) -> dict[str, Any]:
         try:
             ch = self._challenges.get(int(account_id))
@@ -4324,6 +4451,18 @@ class PaperEngine:
         for aid, ch in list(self._challenges.items()):
             if ch["status"] != "running":
                 continue
+            if CH.is_twin(ch):
+                # the 1k account never ends by itself (its brake only stops new entries); reaching its goal is noted
+                if ch.get("target") and not ch.get("reached_at"):
+                    acct = await self.account(aid)
+                    if float(acct["equity"]) >= float(ch["target"]):
+                        ch["reached_at"] = t
+                        await self._save_challenges()
+                        text = (f"¡Meta alcanzada! {CH.money(ch['initial'])} → {CH.money(float(acct['equity']))} "
+                                f"(meta {CH.money(ch['target'])}). Sigue operando; cambia la meta si quieres otra.")
+                        self._autopilot_note("—", "info", text, account_id=aid)
+                        self._emit("success", "paper", f"«{ch['name']}»: {text}", {"account_id": aid})
+                continue
             account = await self.account(aid)
             equity = float(account["equity"])
             if equity >= ch["target"]:
@@ -4372,7 +4511,7 @@ class PaperEngine:
         first."""
         out: list[dict[str, Any]] = []
         t = now_s()
-        chs = list(self._challenges.values())
+        chs = [c for c in self._challenges.values() if not CH.is_twin(c)]
         order = (sorted((c for c in chs if c["status"] == "running"), key=lambda c: (c["initial"], c["id"]))
                  + sorted((c for c in chs if c["status"] != "running"), key=lambda c: -(c["ended_at"] or 0)))
         for ch in order:
@@ -4580,6 +4719,7 @@ class PaperEngine:
                 await self._session_tick()
                 await self._challenge_tick()
                 await self._swap_tick()
+                await self._vault_tick()
                 await self._autopilot_watchdog()
                 if any(p["account_id"] == 1 for p in self._open.values()):
                     await self.publish(1)

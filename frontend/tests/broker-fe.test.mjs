@@ -82,7 +82,7 @@ test('contract: types-broker.ts has one field per line and is re-exported by typ
   }
   assert.deepEqual(fields('BrokerStatus'), ['enabled', 'provider', 'paper', 'configured', 'connected', 'account', 'error',
     'last_sync_ms', 'mirror_stocks', 'mirror_crypto', 'mirror_perps', 'entries', 'stats', 'note',
-    'max_lots?', 'allow_real?', 'blocked?']) // the last three: MetaTrader 5 only
+    'max_lots?', 'allow_real?', 'blocked?', 'source_account?']) // the last four: MetaTrader 5 only
   assert.deepEqual(fields('BrokerAccount'), ['equity', 'cash', 'buying_power', 'status', 'currency',
     'login?', 'server?', 'company?', 'kind?', 'leverage?']) // the optional ones: MetaTrader 5 only
   assert.equal(fields('BrokerMirrorEntry').length, 19)

@@ -82,6 +82,16 @@ async def put_settings(values: dict[str, Any] = Body(...)) -> dict:
     return {"settings": clean_json(rt.settings.all())}
 
 
+@router.get("/api/system/status")
+async def system_status() -> dict:
+    """SystemStatus: where the server runs, since when, its starts with the downtime before each one, the internet as
+    it sees it, the battery (when the machine has one), its memory and the database size (app.system_monitor)."""
+    svc = getattr(rt, "sysmon", None)
+    if svc is None:
+        raise HTTPException(status_code=503, detail="El monitor del servidor no está cargado")
+    return clean_json(await svc.view())
+
+
 @router.get("/api/events")
 async def get_events(limit: int = 300, level: str | None = None, source: str | None = None) -> dict:
     return {"events": rt.bus.recent(min(max(limit, 1), 3000), level=level, source=source)}

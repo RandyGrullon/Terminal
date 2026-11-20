@@ -112,6 +112,16 @@ export const GROUPS_EXT: GroupDef[] = [
         help: 'Cada 15 s compara las posiciones de NEXUS automática con tu cuenta de MT5 y envía las órdenes que faltan, en lotes y con el símbolo de tu bróker. Solo replica posiciones nuevas, abiertas con el espejo activado.',
       },
       {
+        key: 'broker.mt5_account',
+        label: 'Cuenta de NEXUS que copia',
+        kind: 'select',
+        options: [
+          { value: '1k', label: 'La cuenta de 1k (lotes pensados para 1.000 $)' },
+          { value: '10k', label: 'La cuenta de 10k' },
+        ],
+        help: 'Copia las operaciones de esa cuenta con su mismo tamaño en lotes. Si tu cuenta de MT5 tiene unos 1.000 $, la de 1k es la que corresponde: copiar la de 10k arriesgaría unas 10 veces más.',
+      },
+      {
         key: 'broker.mt5_max_lots',
         label: 'Tope de lotes por orden',
         kind: 'number',

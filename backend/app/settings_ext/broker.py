@@ -26,4 +26,5 @@ DEFAULTS: dict = {
     "broker.mt5_max_lots": 0.1,  # cap per order, every account type (0 = send nothing)
     "broker.mt5_allow_real": False,  # the user's own switch: never turned on by the app
     "broker.mt5_real_login": "",  # the only REAL account number allowed while mt5_allow_real is on
+    "broker.mt5_account": "1k",  # which NEXUS account it copies: "1k" (the 1k account) or "10k" (account 3)
 }

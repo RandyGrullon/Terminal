@@ -3,7 +3,7 @@
 // and, on a tap, why it opened each one (TradeDetailModal, a bottom sheet on a phone). Read-only; everything else is
 // in the Pro mode. Same data as the Pro view: GET /api/paper/autopilot + the live socket.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Activity, Briefcase, ChevronRight, CircleHelp, History, LayoutGrid, LogOut, PieChart } from 'lucide-react'
+import { Activity, Briefcase, ChevronDown, ChevronRight, CircleHelp, History, LayoutGrid, LogOut, PieChart, PiggyBank, Plus, Server } from 'lucide-react'
 import { api } from '../../api/client'
 import type { Position } from '../../api/types'
 import type { AutopilotSnapshot } from '../../api/types-autopilot'
@@ -11,8 +11,11 @@ import type { WsStatus } from '../../api/ws'
 import { fmtAgo, fmtDateTime, fmtInt, fmtPct, fmtPrice, fmtR } from '../../lib/format'
 import { normalizeAutopilot, subscribeAutopilot } from '../paper/AutopilotView'
 import TradeDetailModal from '../paper/TradeDetailModal'
+import { TONE_LABEL, accountLabel, toneOf, twinLabel, twinTone, twinsOf, vaultOf, type AccountTone } from '../paper/NexusAccounts'
+import '../paper/nexus-accounts.css'
 import { Button, Loading, Modal } from '../ui'
 import { GLOSSARY, friendlyReason, nexusNow, priceBarOf, sideWords, sourceOf, speedOf, todayOf, type PriceBar } from './friendly'
+import ServerView from './ServerView'
 import './simple.css'
 
 const money = (v: number | null | undefined, signed = false) => {
@@ -52,6 +55,10 @@ export interface SimpleAccount {
   status: string | null
   note: string | null
   noteAt: number | null
+  tone: AccountTone // 10k blue, 1k yellow, challenges neutral
+  saved: number // what it put in the vault
+  mindset: string | null // the 1k account's rules
+  goalNote: string | null // how its goal is counted (the 10k account: account + vault)
 }
 
 const CHALLENGE_STATUS: Record<string, string> = {
@@ -81,7 +88,36 @@ export function accountsOf(snap: AutopilotSnapshot): SimpleAccount[] {
     status: snap.autopilot?.enabled ? 'Operando' : 'En pausa',
     note: snap.autopilot?.log?.[0]?.text ?? null,
     noteAt: snap.autopilot?.log?.[0]?.ts ?? null,
+    tone: '10k',
+    saved: vaultOf(snap.vault, a.id),
+    mindset: null,
+    goalNote: snap.main_goal ? `Cuenta + vault: ${money(snap.main_goal.total)}` : null,
   }
+  if (snap.main_goal) {
+    main.target = snap.main_goal.target
+    main.progress = snap.main_goal.progress_pct
+  }
+  const twin: SimpleAccount[] = twinsOf(snap).map((t) => ({
+          id: t.id,
+          name: twinLabel(t.initial),
+          equity: t.account.equity,
+          balance: t.account.balance,
+          initial: t.initial,
+          unrealized: t.account.unrealized_pnl,
+          trades: t.account.trades,
+          wins: t.account.wins,
+          positions: t.positions,
+          history: t.history,
+          target: t.target,
+          progress: t.progress_pct,
+          status: t.reached_at ? '¡Meta alcanzada!' : t.brake.active ? 'Freno activo' : snap.autopilot?.enabled ? 'Operando' : 'En pausa',
+          note: t.log?.[0]?.text ?? null,
+          noteAt: t.log?.[0]?.ts ?? null,
+          tone: twinTone(t.initial),
+          saved: vaultOf(snap.vault, t.id),
+          mindset: t.mindset || null,
+          goalNote: null,
+        }))
   const challenges = (snap.challenges ?? [])
     .filter((c) => c.status === 'running')
     .map<SimpleAccount>((c) => ({
@@ -100,8 +136,12 @@ export function accountsOf(snap: AutopilotSnapshot): SimpleAccount[] {
       status: CHALLENGE_STATUS[c.status] ?? c.status,
       note: c.log?.[0]?.text ?? null,
       noteAt: c.log?.[0]?.ts ?? null,
+      tone: 'other' as AccountTone,
+      saved: 0,
+      mindset: null,
+      goalNote: null,
     }))
-  return [main, ...challenges]
+  return [{ ...main, name: 'Cuenta 10k' }, ...twin, ...challenges]
 }
 
 function PriceBarView({ bar, p }: { bar: PriceBar; p: Position }) {
@@ -127,17 +167,18 @@ function PriceBarView({ bar, p }: { bar: PriceBar; p: Position }) {
 const resultWord = (p: Position) =>
   p.status === 'open' ? (p.pnl >= 0 ? 'ganando' : 'perdiendo') : p.pnl > 0 ? 'ganó' : p.pnl < 0 ? 'perdió' : 'quedó igual'
 
-export function TradeRow({ p, onDetail }: { p: Position; onDetail: (p: Position) => void }) {
+export function TradeRow({ p, onDetail, tone: accTone, showAccount = false }: { p: Position; onDetail: (p: Position) => void; tone?: AccountTone; showAccount?: boolean }) {
   const open = p.status === 'open'
   const long = p.side === 'long'
   const side = sideWords(p)
   const src = sourceOf(p)
   const bar = priceBarOf(p)
   return (
-    <button type="button" className={`sm-trade ${long ? 'is-long' : 'is-short'}`} onClick={() => onDetail(p)}>
+    <button type="button" className={`sm-trade ${long ? 'is-long' : 'is-short'}${accTone ? ` t-${accTone}` : ''}`} onClick={() => onDetail(p)}>
       <span className="sm-trade-row">
         <span className="sm-trade-main">
           <span className="sm-trade-top">
+            {showAccount && accTone && <span className={`sm-acct-chip t-${accTone}`}>{TONE_LABEL[accTone].replace('Cuenta ', '')}</span>}
             <b className="sm-sym">{shortSym(p.symbol)}</b>
             <span className={`sm-side ${long ? 'pos' : 'neg'}`}>{side.label}</span>
             <span className="sm-chip">{p.hold ? src.short : `${src.short} · ${speedOf(p.tf).label.toLowerCase()}`}</span>
@@ -157,6 +198,80 @@ export function TradeRow({ p, onDetail }: { p: Position; onDetail: (p: Position)
       <span className="sm-why">{friendlyReason(p)}</span>
       {bar && <PriceBarView bar={bar} p={p} />}
     </button>
+  )
+}
+
+/** An open trade as a square card (the grid of open trades): account, symbol, direction, result, price bar. */
+export function TradeCard({ p, onDetail, tone: accTone, showAccount = false }: { p: Position; onDetail: (p: Position) => void; tone?: AccountTone; showAccount?: boolean }) {
+  const long = p.side === 'long'
+  const side = sideWords(p)
+  const src = sourceOf(p)
+  const bar = priceBarOf(p)
+  return (
+    <button
+      type="button"
+      className={`sm-card ${long ? 'is-long' : 'is-short'}${accTone ? ` t-${accTone}` : ''}`}
+      onClick={() => onDetail(p)}
+      aria-label={`${shortSym(p.symbol)} ${side.label}: ${money(p.pnl, true)}, ${resultWord(p)}`}
+    >
+      <span className="sm-card-top">
+        {showAccount && accTone && <span className={`sm-acct-chip t-${accTone}`}>{TONE_LABEL[accTone].replace('Cuenta ', '')}</span>}
+        <span className={`sm-side ${long ? 'pos' : 'neg'}`}>{side.label}</span>
+      </span>
+      <b className="sm-card-sym">{shortSym(p.symbol)}</b>
+      <span className="sm-card-pnl">
+        <b className={`mono ${tone(p.pnl)}`}>{money(p.pnl, true)}</b>
+        <span className={`sm-r ${tone(p.pnl)}`}>{resultWord(p)}</span>
+      </span>
+      <span className="sm-card-sub">
+        {p.hold ? src.short : speedOf(p.tf).label} · {fmtAgo(p.entry_time * 1000)}
+      </span>
+      {bar && (
+        <span className="sm-card-bar" aria-hidden>
+          <span className="sm-bar-rail">
+            <span className="sm-bar-loss" style={{ width: `${bar.entry * 100}%` }} />
+            <span className="sm-bar-entry" style={{ left: `${bar.entry * 100}%` }} />
+            <span className={`sm-bar-now ${p.pnl >= 0 ? 'pos' : 'neg'}`} style={{ left: `${bar.now * 100}%` }} />
+          </span>
+        </span>
+      )}
+    </button>
+  )
+}
+
+/** A section that folds (accordion), remembering per device whether it is open. */
+function Fold({ id, title, count, defaultOpen = false, action, children }: { id: string; title: ReactNode; count?: number; defaultOpen?: boolean; action?: ReactNode; children: ReactNode }) {
+  const key = `nexus.fold.${id}`
+  const [open, setOpen] = useState<boolean>(() => {
+    try {
+      const v = localStorage.getItem(key)
+      return v === null ? defaultOpen : v === '1'
+    } catch {
+      return defaultOpen
+    }
+  })
+  const toggle = () => {
+    setOpen((o) => {
+      try {
+        localStorage.setItem(key, o ? '0' : '1')
+      } catch {
+        /* private mode: not remembered */
+      }
+      return !o
+    })
+  }
+  return (
+    <section className={`sm-fold ${open ? 'open' : ''}`}>
+      <h2 className="sm-h sm-fold-head">
+        <button type="button" className="sm-fold-btn" aria-expanded={open} onClick={toggle}>
+          <ChevronDown size={16} className="sm-fold-chev" aria-hidden />
+          {title}
+          {count !== undefined && <span className="sm-count">{fmtInt(count)}</span>}
+        </button>
+        {action}
+      </h2>
+      {open && <div className="sm-fold-body">{children}</div>}
+    </section>
   )
 }
 
@@ -265,27 +380,51 @@ function HelpSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   )
 }
 
-function List({ items, empty, onDetail }: { items: Position[]; empty: ReactNode; onDetail: (p: Position) => void }) {
+function List({
+  items,
+  empty,
+  onDetail,
+  toneFor,
+  showAccount = false,
+  grid = false,
+}: {
+  items: Position[]
+  empty: ReactNode
+  onDetail: (p: Position) => void
+  toneFor?: (p: Position) => AccountTone
+  showAccount?: boolean
+  grid?: boolean
+}) {
   return items.length ? (
-    <div className="sm-list">
-      {items.map((p) => (
-        <TradeRow key={p.id} p={p} onDetail={onDetail} />
-      ))}
-    </div>
+    grid ? (
+      <div className="sm-grid">
+        {items.map((p) => (
+          <TradeCard key={p.id} p={p} onDetail={onDetail} tone={toneFor?.(p)} showAccount={showAccount} />
+        ))}
+      </div>
+    ) : (
+      <div className="sm-list">
+        {items.map((p) => (
+          <TradeRow key={p.id} p={p} onDetail={onDetail} tone={toneFor?.(p)} showAccount={showAccount} />
+        ))}
+      </div>
+    )
   ) : (
     <div className="sm-empty">{empty}</div>
   )
 }
 
-type Tab = 'home' | 'history' | 'portfolio'
+type Tab = 'home' | 'history' | 'portfolio' | 'server'
 
 function Hero({ acc }: { acc: SimpleAccount }) {
   const change = acc.equity - acc.initial
   const realized = acc.balance - acc.initial
   return (
-    <section className="sm-hero" data-tone={tone(change) || undefined}>
+    <section className={`sm-hero acct-${acc.tone}`} data-tone={tone(change) || undefined}>
       <div className="sm-hero-head">
-        <span className="sm-label">Valor de la cuenta</span>
+        <span className="sm-label">
+          <span className={`sm-acct-dot t-${acc.tone}`} aria-hidden /> {acc.name}
+        </span>
         {acc.status && <span className="sm-status">{acc.status}</span>}
       </div>
       <div className="sm-value mono">{money(acc.equity)}</div>
@@ -301,8 +440,11 @@ function Hero({ acc }: { acc: SimpleAccount }) {
             <span style={{ width: `${Math.max(0, Math.min(100, acc.progress ?? 0))}%` }} />
           </div>
           <div className="sm-goal-text tiny">
-            <span>Meta {money(acc.target)}</span>
-            <b>{fmtInt(Math.round(acc.progress ?? 0))} %</b>
+            <span>
+              Reto {money(acc.target)}
+              {acc.goalNote ? ` · ${acc.goalNote}` : ''}
+            </span>
+            <b>{(acc.progress ?? 0).toFixed(1).replace('.', ',')} %</b>
           </div>
         </div>
       )}
@@ -326,7 +468,105 @@ function Hero({ acc }: { acc: SimpleAccount }) {
           </b>
         </div>
       </div>
+      {acc.saved > 0 && (
+        <div className="sm-saved">
+          <PiggyBank size={14} aria-hidden /> Guardado en el vault: <b className="mono">{money(acc.saved)}</b>
+        </div>
+      )}
+      {acc.mindset && <div className="sm-hint">{acc.mindset}</div>}
       {acc.trades > 0 && acc.trades < 30 && <div className="sm-hint">Menos de 30 operaciones cerradas: todavía sin conclusiones.</div>}
+    </section>
+  )
+}
+
+/** One account as a tappable box of the combined view (it opens that account). */
+function AccountBox({ acc, onOpen }: { acc: SimpleAccount; onOpen: () => void }) {
+  const change = acc.equity - acc.initial
+  const open = acc.positions.filter((p) => !p.hold).length
+  return (
+    <button type="button" className={`sm-box acct-${acc.tone}`} onClick={onOpen}>
+      <span className="sm-box-head">
+        <span className={`sm-acct-dot t-${acc.tone}`} aria-hidden />
+        <b>{acc.name}</b>
+        <span className="sm-box-base">base {money(acc.initial)}</span>
+        <ChevronRight size={16} className="sm-chev-inline" aria-hidden />
+      </span>
+      <span className="sm-box-value mono">{money(acc.equity)}</span>
+      <span className="sm-box-row">
+        <span className={`sm-pill mono ${tone(change)}`}>{money(change, true)}</span>
+        <span>
+          {fmtInt(open)} {open === 1 ? 'abierta' : 'abiertas'} · {fmtInt(acc.wins)} de {fmtInt(acc.trades)} ganaron
+        </span>
+      </span>
+      {acc.target !== null && (
+        <span className="sm-box-goal">
+          <span className="sm-goal-bar">
+            <span style={{ width: `${Math.max(1, Math.min(100, acc.progress ?? 0))}%` }} />
+          </span>
+          <span className="tiny">
+            Reto {money(acc.target)} · <b>{(acc.progress ?? 0).toFixed(1).replace('.', ',')} %</b>
+            {acc.goalNote ? ` · ${acc.goalNote}` : ''}
+          </span>
+        </span>
+      )}
+      {acc.saved > 0 && (
+        <span className="sm-box-saved">
+          <PiggyBank size={13} aria-hidden /> {money(acc.saved)} en el vault
+        </span>
+      )}
+    </button>
+  )
+}
+
+function VaultBox({ snap }: { snap: AutopilotSnapshot }) {
+  const v = snap.vault
+  const last = v?.entries[0]
+  return (
+    <section className="sm-box acct-vault sm-box-static">
+      <span className="sm-box-head">
+        <PiggyBank size={16} aria-hidden />
+        <b>Vault</b>
+        <span className={`sm-status ${v?.enabled ? 'on' : ''}`}>{v?.enabled ? 'Guardando' : 'Apagado'}</span>
+      </span>
+      <span className="sm-box-value mono">{money(v?.total ?? 0)}</span>
+      <span className="sm-box-row">
+        <span>{last ? `Último: +${money(last.amount)} de la ${accountLabel(last.account_id, twinsOf(snap), last.name).replace('Cuenta ', '')} ${fmtAgo(last.ts * 1000)}` : 'Guarda lo ganado ya cerrado por encima de cada base.'}</span>
+      </span>
+      {!v?.enabled && <span className="sm-hint">Actívalo en el modo Pro (Cuenta demo → NEXUS automática).</span>}
+    </section>
+  )
+}
+
+function CreateTwinBox({ onCreated }: { onCreated: (s: AutopilotSnapshot) => void }) {
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  return (
+    <section className="sm-box acct-1k sm-box-static">
+      <span className="sm-box-head">
+        <span className="sm-acct-dot t-1k" aria-hidden />
+        <b>Cuenta 1k</b>
+      </span>
+      <span className="sm-hint">Una segunda cuenta de 1.000 $ con las mismas señales y mentalidad de cuenta pequeña.</span>
+      <button
+        type="button"
+        className="sm-cta"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true)
+          setErr(null)
+          try {
+            const s = normalizeAutopilot(await api.paper.autopilot.createTwin())
+            if (s) onCreated(s)
+          } catch (e) {
+            setErr(e instanceof Error ? e.message : String(e))
+          } finally {
+            setBusy(false)
+          }
+        }}
+      >
+        <Plus size={15} /> {busy ? 'Creando…' : 'Crear la cuenta de 1k'}
+      </button>
+      {err && <span className="sm-hint neg">{err}</span>}
     </section>
   )
 }
@@ -366,11 +606,12 @@ function TodayCard({ history }: { history: Position[] }) {
 export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: WsStatus; onPro: () => void; onSignOut?: () => void }) {
   const [snap, setSnap] = useState<AutopilotSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [accId, setAccId] = useState<number | null>(null)
+  const [accId, setAccId] = useState<number | null>(null) // null: the combined view (10k, 1k and the vault)
   const [detailId, setDetailId] = useState<number | null>(null)
   const [tab, setTab] = useState<Tab>('home')
   const [full, setFull] = useState(false)
   const [help, setHelp] = useState(false)
+  const [serverHealth, setServerHealth] = useState<'ok' | 'warn' | 'bad'>('ok')
   const alive = useRef(true)
 
   const load = useCallback(async () => {
@@ -409,7 +650,16 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
   }, [tab, accId])
 
   const accounts = useMemo(() => (snap ? accountsOf(snap) : []), [snap])
-  const acc = accounts.find((a) => a.id === accId) ?? accounts[0] ?? null
+  const nexus = accounts.filter((a) => a.tone !== 'other' && a.tone !== 'vault') // the combined view: 10k + the small accounts
+  const combined = accId === null
+  const acc = combined ? null : (accounts.find((a) => a.id === accId) ?? null)
+  const twinList = twinsOf(snap)
+  const toneFor = (p: Position) => toneOf(p.account_id, twinList)
+  const [historyFilter, setHistoryFilter] = useState<'all' | AccountTone>('all')
+  const byTime = (field: 'entry_time' | 'exit_time') => (a: Position, b: Position) => ((b[field] ?? 0) as number) - ((a[field] ?? 0) as number)
+  const allOpen = nexus.flatMap((a) => a.positions.filter((p) => !p.hold)).sort(byTime('entry_time'))
+  const allClosed = nexus.flatMap((a) => a.history).sort(byTime('exit_time'))
+  const totalNexus = nexus.reduce((s, a) => s + a.equity, 0) + (snap?.vault?.total ?? 0)
   const detail = useMemo(() => {
     if (detailId === null) return null
     for (const a of accounts) {
@@ -422,14 +672,15 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
     setFull(false)
     setDetailId(p.id)
   }
-  const trades = acc ? acc.positions.filter((p) => !p.hold) : []
-  const holdings = acc ? acc.positions.filter((p) => p.hold) : []
+  const trades = acc ? acc.positions.filter((p) => !p.hold) : allOpen
+  const holdings = (acc ?? nexus[0] ?? null)?.positions.filter((p) => p.hold) ?? []
   const holdValue = holdings.reduce((s, p) => s + (Number.isFinite(p.pnl) ? p.pnl : 0), 0)
 
   const tabs: { id: Tab; label: string; icon: ReactNode; count?: number }[] = [
     { id: 'home', label: 'Inicio', icon: <Activity size={20} />, count: trades.length || undefined },
     { id: 'history', label: 'Historial', icon: <History size={20} /> },
     { id: 'portfolio', label: 'Cartera', icon: <PieChart size={20} />, count: holdings.length || undefined },
+    { id: 'server', label: 'Servidor', icon: <Server size={20} /> },
   ]
 
   return (
@@ -457,18 +708,34 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
         )}
       </header>
 
-      {accounts.length > 1 && (
+      {accounts.length > 0 && tab !== 'server' && (
         <div className="sm-accounts" role="tablist" aria-label="Cuentas demo">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={combined}
+            className={`sm-acc acct-all ${combined ? 'active' : ''}`}
+            onClick={() => setAccId(null)}
+          >
+            <span>
+              <span className="sm-acct-dot t-10k" aria-hidden />
+              <span className="sm-acct-dot t-1k" aria-hidden />
+              <span className="sm-acct-dot t-vault" aria-hidden /> Todo NEXUS
+            </span>
+            <b className="mono">{money(totalNexus)}</b>
+          </button>
           {accounts.map((a) => (
             <button
               key={a.id}
               type="button"
               role="tab"
               aria-selected={a.id === acc?.id}
-              className={`sm-acc ${a.id === acc?.id ? 'active' : ''}`}
+              className={`sm-acc acct-${a.tone} ${a.id === acc?.id ? 'active' : ''}`}
               onClick={() => setAccId(a.id)}
             >
-              <span>{a.name}</span>
+              <span>
+                <span className={`sm-acct-dot t-${a.tone}`} aria-hidden /> {a.name}
+              </span>
               <b className={`mono ${tone(a.equity - a.initial)}`}>{money(a.equity)}</b>
             </button>
           ))}
@@ -476,8 +743,77 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
       )}
 
       <main className="sm-content">
-        {!snap && !error && <Loading label="Cargando la cuenta…" />}
+        {tab === 'server' && <ServerView wsStatus={wsStatus} onHealth={setServerHealth} />}
+        {!snap && !error && tab !== 'server' && <Loading label="Cargando la cuenta…" />}
         {error && !snap && <div className="errorbox">No se pudo cargar la cuenta: {error}</div>}
+        {snap && combined && tab === 'home' && (
+          <>
+            <div className="sm-stack">
+              {nexus.map((a) => (
+                <AccountBox key={a.id} acc={a} onOpen={() => setAccId(a.id)} />
+              ))}
+              {!twinList.some((t) => t.initial >= 1000) && <CreateTwinBox onCreated={setSnap} />}
+              <VaultBox snap={snap} />
+            </div>
+            <NowCard snap={snap} acc={nexus[0]} open={allOpen.filter((p) => p.account_id === nexus[0]?.id)} />
+            <TodayCard history={allClosed} />
+            <h2 className="sm-h">
+              Operaciones abiertas <span className="sm-count">{fmtInt(allOpen.length)}</span>
+            </h2>
+            <List
+              items={allOpen}
+              onDetail={onDetail}
+              toneFor={toneFor}
+              showAccount
+              grid
+              empty="Sin operaciones abiertas en ninguna cuenta. NEXUS abre una cuando su señal al cierre de una vela lo indica."
+            />
+            {allClosed.length > 0 && (
+              <Fold
+                id="closed-all"
+                title="Últimas cerradas"
+                count={Math.min(allClosed.length, 6)}
+                action={
+                  <button type="button" className="sm-link" onClick={() => setTab('history')}>
+                    Ver todas <ChevronRight size={14} />
+                  </button>
+                }
+              >
+                <List items={allClosed.slice(0, 6)} onDetail={onDetail} toneFor={toneFor} showAccount empty={null} />
+              </Fold>
+            )}
+          </>
+        )}
+        {snap && combined && tab === 'history' && (
+          <>
+            <h2 className="sm-h sm-h-first">
+              Historial <span className="sm-count">{fmtInt(allClosed.length)}</span>
+            </h2>
+            <div className="sm-filter" role="group" aria-label="Filtrar por cuenta">
+              {(['all', '10k', ...twinList.map((t) => twinTone(t.initial))] as Array<'all' | AccountTone>).map((f) => (
+                <button key={f} type="button" className={`sm-filter-btn ${f !== 'all' ? `t-${f}` : ''} ${historyFilter === f ? 'active' : ''}`} onClick={() => setHistoryFilter(f)}>
+                  {f === 'all' ? 'Todas' : TONE_LABEL[f].replace('Cuenta ', '')}
+                </button>
+              ))}
+            </div>
+            <List
+              items={historyFilter === 'all' ? allClosed : allClosed.filter((p) => toneFor(p) === historyFilter)}
+              onDetail={onDetail}
+              toneFor={toneFor}
+              showAccount
+              empty="Todavía ninguna operación cerrada."
+            />
+          </>
+        )}
+        {snap && combined && tab === 'portfolio' && (
+          <>
+            <h2 className="sm-h sm-h-first">
+              Cartera de la cuenta 10k <span className="sm-count">{fmtInt(holdings.length)}</span>
+            </h2>
+            <p className="sm-hint">Comprar y mantener: no busca objetivos; se queda hasta que la vendas o toque su stop de emergencia.</p>
+            <List items={holdings} onDetail={onDetail} toneFor={toneFor} empty={<><Briefcase size={18} /> No hay cartera de largo plazo ahora.</>} />
+          </>
+        )}
         {acc && tab === 'home' && (
           <>
             <Hero acc={acc} />
@@ -492,17 +828,20 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
             <h2 className="sm-h">
               Operaciones abiertas <span className="sm-count">{fmtInt(trades.length)}</span>
             </h2>
-            <List items={trades} onDetail={onDetail} empty="Sin operaciones abiertas. NEXUS abre una cuando su señal al cierre de una vela lo indica." />
+            <List items={trades} onDetail={onDetail} toneFor={toneFor} grid empty="Sin operaciones abiertas. NEXUS abre una cuando su señal al cierre de una vela lo indica." />
             {acc.history.length > 0 && (
-              <>
-                <h2 className="sm-h">
-                  Últimas cerradas
+              <Fold
+                id="closed-one"
+                title="Últimas cerradas"
+                count={Math.min(acc.history.length, 6)}
+                action={
                   <button type="button" className="sm-link" onClick={() => setTab('history')}>
                     Ver todas <ChevronRight size={14} />
                   </button>
-                </h2>
-                <List items={acc.history.slice(0, 3)} onDetail={onDetail} empty={null} />
-              </>
+                }
+              >
+                <List items={acc.history.slice(0, 6)} onDetail={onDetail} toneFor={toneFor} empty={null} />
+              </Fold>
             )}
           </>
         )}
@@ -523,7 +862,7 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
                 <b className={`mono ${tone(acc.balance - acc.initial)}`}>{money(acc.balance - acc.initial, true)}</b>
               </div>
             </div>
-            <List items={acc.history} onDetail={onDetail} empty="Todavía ninguna operación cerrada." />
+            <List items={acc.history} onDetail={onDetail} toneFor={toneFor} empty="Todavía ninguna operación cerrada." />
           </>
         )}
         {acc && tab === 'portfolio' && (
@@ -562,6 +901,9 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
             <span className="sm-tab-icon">
               {t.icon}
               {t.count !== undefined && <span className="sm-badge">{t.count}</span>}
+              {t.id === 'server' && (wsStatus !== 'open' || serverHealth !== 'ok') && (
+                <span className={`sm-health ${wsStatus !== 'open' ? 'bad' : serverHealth}`} aria-label="Hay avisos del servidor" />
+              )}
             </span>
             <span>{t.label}</span>
           </button>
