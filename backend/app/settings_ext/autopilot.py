@@ -74,4 +74,9 @@ DEFAULTS: dict = {
     "autopilot.vault": False,
     # the 10k account's goal in $ (0 = none): its progress counts the account plus what it put in the vault
     "autopilot.main_target": 0.0,
+    # plans by account size (app.sim.account_plan): risk, daily goal and daily loss limit scaled to each account
+    "autopilot.account_plans": False,
+    # these symbols trade on every timeframe of autopilot.tfs; the others only on autopilot.wide_tfs (empty = all)
+    "autopilot.focus_symbols": [],
+    "autopilot.wide_tfs": [],
 }

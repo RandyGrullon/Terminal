@@ -383,3 +383,12 @@
 .sm-fold-chev { transition: transform .18s ease; transform: rotate(-90deg); color: var(--text-2); }
 .sm-fold.open .sm-fold-chev { transform: rotate(0deg); }
 .sm-fold-body { margin-top: 8px; }
+
+/* ---- an account's plan by size: today's realized result vs its daily goal ---- */
+.sm-plan { display: flex; flex-direction: column; gap: 3px; width: 100%; }
+.sm-plan-bar { height: 5px; border-radius: 999px; background: rgba(255, 255, 255, .08); overflow: hidden; }
+.sm-plan-bar span { display: block; height: 100%; border-radius: 999px; background: var(--acct, var(--accent)); }
+.sm-plan.hit .sm-plan-bar span { background: var(--pos); }
+.sm-plan.loss .sm-plan-bar span { background: var(--neg); }
+.sm-plan.hit .tiny { color: var(--pos); }
+.sm-plan.loss .tiny { color: var(--neg); }

@@ -67,8 +67,8 @@ def test_the_1k_account_has_its_own_mindset(runtime_factory, no_background):
     async def scenario():
         async with runtime_factory() as rt:
             engine = await _engine(rt)
+            snap = await engine.create_twin()  # before NEXUS automática decides a bar: an account joins from the next one
             await engine.set_autopilot(enabled=True, source="list", symbols=[PERP])
-            snap = await engine.create_twin()
             twin = snap["twin"]
             aid = twin["id"]
             assert (twin["name"], twin["initial"], twin["kind"]) == ("NEXUS 1k", 1000.0, "twin")

@@ -7,6 +7,7 @@ import { PiggyBank, Plus, Wallet } from 'lucide-react'
 import { api, errorMessage } from '../../api/client'
 import type {
   AutopilotBrake,
+  AutopilotAccountPlan,
   AutopilotLogEntry,
   AutopilotMainGoal,
   AutopilotSnapshot,
@@ -97,6 +98,48 @@ export function normalizeTwin(
     remaining: isNum(o.remaining) ? o.remaining : null,
     reached_at: isNum(o.reached_at) ? o.reached_at : null,
   }
+}
+
+export function normalizePlans(raw: unknown): AutopilotAccountPlan[] {
+  if (!Array.isArray(raw)) return []
+  const out: AutopilotAccountPlan[] = []
+  for (const x of raw) {
+    if (!x || typeof x !== 'object') continue
+    const o = x as Record<string, unknown>
+    if (!isNum(o.account_id) || !isNum(o.risk_pct) || !isNum(o.day_target_pct)) continue
+    const tier = (['grande', 'media', 'pequeña', 'micro'] as const).find((t) => t === o.tier) ?? 'media'
+    const num = (v: unknown) => (isNum(v) ? v : null)
+    out.push({
+      account_id: o.account_id,
+      tier,
+      risk_pct: o.risk_pct,
+      risk_usd: num(o.risk_usd),
+      day_target_pct: o.day_target_pct,
+      day_target: num(o.day_target),
+      day_loss_pct: isNum(o.day_loss_pct) ? o.day_loss_pct : 0,
+      day_loss_limit: num(o.day_loss_limit),
+      day_pnl: isNum(o.day_pnl) ? o.day_pnl : 0,
+      day_progress_pct: num(o.day_progress_pct),
+      target_hit: o.target_hit === true,
+      loss_hit: o.loss_hit === true,
+      text: isStr(o.text) ? o.text : '',
+    })
+  }
+  return out
+}
+
+/** «Hoy +12,30 $ de +150 $» and its state, for an account's day under its plan. */
+export function planLine(p: AutopilotAccountPlan): { label: string; state: 'hit' | 'loss' | 'on'; progress: number } {
+  const label = `Hoy ${p.day_pnl >= 0 ? '+' : '−'}${fmtMoney(Math.abs(p.day_pnl))} de meta +${p.day_target !== null ? fmtMoney(p.day_target) : `${p.day_target_pct} %`} · riesgo ${p.risk_pct.toLocaleString('es-ES')} % por operación`
+  return { label, state: p.target_hit ? 'hit' : p.loss_hit ? 'loss' : 'on', progress: Math.max(0, Math.min(100, p.day_progress_pct ?? 0)) }
+}
+
+/** The Pro panel's note of an account under its plan (null without one). */
+export function planNote(plans: AutopilotAccountPlan[] | undefined, accountId: number): string | null {
+  const p = plans?.find((x) => x.account_id === accountId)
+  if (!p) return null
+  const l = planLine(p)
+  return `${l.state === 'hit' ? 'Meta del día alcanzada · ' : l.state === 'loss' ? 'Pérdida máxima del día · ' : ''}${l.label}`
 }
 
 export function normalizeMainGoal(raw: unknown): AutopilotMainGoal | null {
@@ -294,6 +337,7 @@ export default function NexusAccountsPanel({
           trades={a.trades}
           open={snap.positions.filter((p) => !p.hold).length}
           saved={vaultOf(snap.vault, a.id)}
+          note={planNote(snap.plans, a.id)}
           goal={
             snap.main_goal
               ? { target: snap.main_goal.target, progress: snap.main_goal.progress_pct, label: `Reto ${fmtMoney(snap.main_goal.target)} (cuenta + vault: ${fmtMoney(snap.main_goal.total)})` }
@@ -313,7 +357,7 @@ export default function NexusAccountsPanel({
             open={twin.positions.length}
             saved={vaultOf(snap.vault, twin.id)}
             goal={twin.target !== null ? { target: twin.target, progress: twin.progress_pct ?? 0, label: `Reto ${fmtMoney(twin.target)}${twin.reached_at ? ' · ¡alcanzado!' : ''}` } : null}
-            note={twin.brake.active ? `Freno activo: no abre nuevas (−${twin.brake.drawdown_pct.toFixed(1)} %)` : twin.mindset}
+            note={twin.brake.active ? `Freno activo: no abre nuevas (−${twin.brake.drawdown_pct.toFixed(1)} %)` : planNote(snap.plans, twin.id) ?? twin.mindset}
           />
         ))}
         {!has1k && (

@@ -1421,6 +1421,16 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     repeated cause of its losses (its journal), saved in meta `autopilot.weekly`, shown in `status.weekly`, noted and
     sent as an opt-in alert (kind weekly). Terminal: `autopilot` prints the health line, `autopilot semana` the
     report.
+  - **Plans by account size** (`app.sim.account_plan`, setting `autopilot.account_plans`, off by default;
+    `PaperEngine._plan`): each of NEXUS's accounts gets, from its INITIAL balance, a tier (≥ 5.000 $ grande, ≥ 1.000 $
+    media, ≥ 300 $ pequeña, else micro) with its risk per trade (0,75 / 1,5 / 2 / 2,5 %, in `_ap_setting` before the
+    twin profile and the aggressive mode), a daily goal (2 × the risk: when the UTC day's realized P&L reaches it,
+    `_daily` latches `target_hit` and blocks new entries until 00:00 UTC, reason «Meta del día alcanzada») and a daily
+    loss limit (3 × the risk, in `_risk_limits`). AutopilotSnapshot.plans = AutopilotAccountPlan[] (tier, risk_pct /
+    risk_usd, day_target_pct / day_target, day_loss_pct / day_loss_limit, day_pnl, day_progress_pct, target_hit,
+    loss_hit, text). **Focus symbols** (`autopilot.focus_symbols`, `autopilot.wide_tfs`, empty = off): the focus
+    symbols trade on every timeframe of `autopilot.tfs`, the other candidates only on `wide_tfs`
+    (`_autopilot_entry_profiles`). `tools/fresh_start.py` backs up and wipes NEXUS's trades for a new start.
   - **Trading calendar** (`app.sim.calendar_log`, `PaperEngine.calendar(start, end)`,
     `GET /api/paper/autopilot/calendar?start=&end=` → AutopilotCalendar {start, end, trades: CalendarTrade[], truncated,
     note}): the closed trades of account 3 and of the small / challenge accounts whose exit falls in [start, end) (unix

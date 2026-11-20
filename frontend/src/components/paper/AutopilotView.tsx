@@ -64,7 +64,7 @@ import AutopilotScripts, { normalizeScripts } from './AutopilotScripts'
 import AutopilotGoalCard, { normalizeGoal, normalizeGoalResult } from './AutopilotGoal'
 import AutopilotSessionCard, { normalizeMarkets, normalizeSession } from './AutopilotSession'
 import AutopilotChallengesCard, { normalizeChallenges } from './AutopilotChallenges'
-import NexusAccountsPanel, { normalizeMainGoal, normalizeTwin, normalizeVault } from './NexusAccounts'
+import NexusAccountsPanel, { normalizeMainGoal, normalizePlans, normalizeTwin, normalizeVault } from './NexusAccounts'
 import TradeDetailModal from './TradeDetailModal'
 import BrokerCard from './BrokerCard'
 import PortfolioCard from './PortfolioCard'
@@ -235,6 +235,7 @@ export function normalizeAutopilot(raw: unknown): AutopilotSnapshot | null {
     autopilot,
     challenges: normalizeChallenges(o.challenges, normalizeLog, normalizeBrake),
     twin: normalizeTwin(o.twin, normalizeLog, normalizeBrake),
+    plans: normalizePlans(o.plans),
     twins: (Array.isArray(o.twins) ? o.twins : []).map((t) => normalizeTwin(t, normalizeLog, normalizeBrake)).filter((t): t is NonNullable<typeof t> => t !== null),
     vault: normalizeVault(o.vault),
     main_goal: normalizeMainGoal(o.main_goal),

@@ -188,7 +188,7 @@ test('contract: types-autopilot.ts has one field per line (contract_check), re-e
   assert.deepEqual(t.AutopilotHealth, ['ok', 'last_decision', 'stale', 'downtime', 'text'])
   assert.deepEqual(t.AutopilotDowntime, ['from', 'to'])
   assert.deepEqual(t.AutopilotWeekly, ['week_start', 'week_end', 'trades', 'wins', 'total_r', 'mean_r', 'pnl', 'text', 'generated_at'])
-  assert.deepEqual(t.AutopilotSnapshot, ['account', 'positions', 'history', 'risk', 'autopilot', 'challenges', 'twin', 'twins', 'vault', 'main_goal'])
+  assert.deepEqual(t.AutopilotSnapshot, ['account', 'positions', 'history', 'risk', 'autopilot', 'challenges', 'twin', 'twins', 'plans', 'vault', 'main_goal'])
   assert.deepEqual(t.AutopilotTwin, ['id', 'name', 'status', 'kind', 'initial', 'brake_pct', 'started_at', 'account', 'positions', 'history',
     'log', 'brake', 'mindset', 'target', 'progress_pct', 'remaining', 'reached_at'])
   assert.deepEqual(t.AutopilotMainGoal, ['target', 'total', 'saved', 'initial', 'progress_pct', 'remaining', 'reached'])

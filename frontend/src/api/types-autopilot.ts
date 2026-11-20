@@ -183,6 +183,7 @@ export interface AutopilotSnapshot {
   challenges: AutopilotChallenge[] // its challenge accounts: running first, then the newest (never the 1k account)
   twin: AutopilotTwin | null // the 1k account (POST /api/paper/autopilot/twin creates it), null when there is none
   twins: AutopilotTwin[] // every running small account (1k, 500, 100…), the largest first; twin = the first
+  plans: AutopilotAccountPlan[] // its accounts' plans by size (empty while autopilot.account_plans is off)
   vault: AutopilotVault | null // the vault: the 10k account's realized excess over its initial balance
   main_goal: AutopilotMainGoal | null // the 10k account's goal (autopilot.main_target; null = none)
 }
@@ -468,4 +469,21 @@ export interface CalendarTrade {
   gate_line: string | null
   regime: string | null
   lesson: string // Spanish: why it ended as it did
+}
+
+/** The plan of one of NEXUS's accounts by its size (app.sim.account_plan) and where its day stands. */
+export interface AutopilotAccountPlan {
+  account_id: number
+  tier: 'grande' | 'media' | 'pequeña' | 'micro'
+  risk_pct: number
+  risk_usd: number | null
+  day_target_pct: number
+  day_target: number | null // $: the day's goal on the balance it started the day with
+  day_loss_pct: number
+  day_loss_limit: number | null
+  day_pnl: number // realized today (UTC day)
+  day_progress_pct: number | null // -100..100 of the goal
+  target_hit: boolean // goal reached: no new entries until 00:00 UTC
+  loss_hit: boolean
+  text: string // Spanish
 }

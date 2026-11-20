@@ -81,6 +81,7 @@ from app.sim import autopilot_goal as G
 from app.sim import market_session as MS
 from app.sim import journal as J
 from app.sim import calendar_log as CAL
+from app.sim import account_plan as AP
 from app.sim import trade_plan as TP
 from app.validation.stats import seed_for as S_seed
 from app.sim import metrics as M
@@ -761,6 +762,8 @@ class PaperEngine:
         # block holds until 00:00 UTC even if later closes recover part of the loss (or the server restarts).
         self._day_low: dict[int, tuple[int, float]] = {}
         self._day_block_warned: dict[int, int] = {}
+        self._acct_initial: dict[int, float] = {}  # initial balance of each account (its plan's tier)
+        self._day_target_hit: dict[int, int] = {}  # account -> UTC day its daily goal was reached (latched)
         # NEXUS automática's challenge (app.sim.autopilot_goal): the running one, how the last one ended
         self._goal: dict[str, Any] | None = None
         self._goal_last: dict[str, Any] | None = None
@@ -985,6 +988,8 @@ class PaperEngine:
     def _ap_setting(self, key: str, default: Any = None, account_id: int = AUTOPILOT_ACCOUNT) -> Any:
         """A setting of one of NEXUS's accounts as it applies now: the aggressive mode overrides some of them while it
         applies (app.sim.autopilot_goal.AGGRESSIVE); the saved settings never change."""
+        if key == "autopilot.risk_pct" and (plan := self._plan(account_id)) is not None:
+            return plan["risk_pct"]  # its plan by size, whatever the mode
         if key in CH.TWIN_PROFILE and CH.is_twin(self._challenges.get(account_id)):
             value = CH.twin_profile(self._challenges.get(account_id))[key]  # its own mindset, whatever the mode
             return list(value) if isinstance(value, list) else value
@@ -1091,15 +1096,19 @@ class PaperEngine:
         if not self._autopilot_cfg()["enabled"]:
             return []
         watch = frozenset(self._autopilot_watch)
+        # autopilot.focus_symbols trade on every timeframe; the rest only on autopilot.wide_tfs (empty = all)
+        focus = frozenset(str(s).upper() for s in (self._setting("autopilot.focus_symbols", []) or []))
+        wide = {normalize_tf(str(t)) for t in (self._setting("autopilot.wide_tfs", []) or []) if t}
         out: list[AutoProfile] = []
         for aid in self._ap_account_ids():
             cfg = self._autopilot_cfg(aid)
             if not cfg["enabled"]:
                 continue
             held = self._autopilot_held(aid)
-            out += [AutoProfile(aid, "autopilot", tf, watch | frozenset(held.get(tf, set())), cfg["max_positions"],
-                                cfg["risk_pct"], self._account_label(aid, "NEXUS automática"))
-                    for tf in cfg["tfs"]]
+            for tf in cfg["tfs"]:
+                seen = watch if not wide or not focus or tf in wide else frozenset(s for s in watch if s.upper() in focus)
+                out.append(AutoProfile(aid, "autopilot", tf, seen | frozenset(held.get(tf, set())), cfg["max_positions"],
+                                       cfg["risk_pct"], self._account_label(aid, "NEXUS automática")))
         return out
 
     def _autopilot_profiles(self) -> list[AutoProfile]:
@@ -1349,6 +1358,7 @@ class PaperEngine:
         ) or {}
         balance = float(row["balance"])
         initial = float(row["initial_balance"])
+        self._acct_initial[account_id] = initial
         unreal = 0.0
         open_n = 0
         for pos in self._open.values():
@@ -1527,6 +1537,8 @@ class PaperEngine:
             limits.update(CH.TWIN_RISK)
         elif account_id is not None and self._is_autopilot(account_id) and self._aggressive_now(account_id):
             limits.update(G.aggressive_risk(self._autopilot_cfg(account_id)["max_drawdown_pct"]))
+        if (plan := self._plan(account_id)) is not None:
+            limits["daily_loss_limit_pct"] = plan["day_loss_pct"]
         return limits
 
     def _position_risk(self, pos: dict) -> float:
@@ -1580,7 +1592,22 @@ class PaperEngine:
         limit = start_balance * pct / 100.0 if pct > 0 and start_balance > 0 else None
         blocked = limit is not None and low <= -limit + 1e-9
         reason = None
-        if blocked:
+        plan = self._plan(account_id)
+        target_hit = False
+        if plan is not None and start_balance > 0:
+            target = start_balance * plan["day_target_pct"] / 100.0
+            if realized >= target - 1e-9 and self._day_target_hit.get(account_id) != day:
+                self._day_target_hit[account_id] = day
+                self._emit("info", "paper", f"{self._account_label(account_id, 'NEXUS automática')}: meta del día "
+                           f"alcanzada ({fmt_num(realized, 2, True)}, +{fmt_num(plan['day_target_pct'], 1)} %); no abre "
+                           "nuevas hasta las 00:00 UTC", {"account_id": account_id, "rule": "daily_target", "day": day})
+            target_hit = self._day_target_hit.get(account_id) == day
+        if target_hit and not blocked:
+            blocked = True
+            reason = (f"Meta del día alcanzada: lleva {fmt_num(realized, 2, True)} realizado hoy (día UTC) y su meta es "
+                      f"+{fmt_num(plan['day_target_pct'], 1)} % del saldo con el que empezó el día. Hasta las 00:00 UTC "
+                      "no abre operaciones nuevas; las abiertas siguen con sus salidas")
+        elif blocked:
             low_pct = low / start_balance * 100.0 if start_balance > 0 else None
             reason = (f"Límite de pérdida diaria alcanzado: la pérdida realizada hoy (día UTC) llegó a "
                       f"{fmt_num(low, 2, True)} ({fmt_pct(low_pct, 2)}) y el límite es {fmt_pct(pct, 1, False)} del "
@@ -1592,7 +1619,7 @@ class PaperEngine:
                 self._emit("warn", "paper", f"Cuenta demo: {reason[0].lower()}{reason[1:]}.",
                            {"account_id": account_id, "rule": "daily_loss", "day": day})
         return {"day": day, "realized": realized, "low": low, "start_balance": start_balance, "pct": pct,
-                "limit": limit, "blocked": blocked, "reason": reason, "until": day + DAY_S}
+                "limit": limit, "blocked": blocked, "reason": reason, "until": day + DAY_S, "target_hit": target_hit}
 
     async def risk_state(self, account_id: int = 1, account: dict | None = None) -> dict[str, Any]:
         """PaperRisk: open risk vs its cap, positions per correlated group, the day's realized P&L vs the daily loss
@@ -3734,6 +3761,7 @@ class PaperEngine:
             "challenges": await self._challenges_view(),
             "twin": await self._twin_view(),
             "twins": [await self._twin_view(a) for a in self.twin_ids()],
+            "plans": await self._plans_view(),
             "vault": self._vault_view(),
             "main_goal": V.main_goal_view(account, self._vault, self._setting("autopilot.main_target", 0.0)),
         }
@@ -4222,6 +4250,15 @@ class PaperEngine:
 
     # ------------------------------------------------------------------ its challenge accounts
 
+    def _plan(self, account_id: int | None) -> dict[str, Any] | None:
+        """Its plan by size (app.sim.account_plan) while autopilot.account_plans is on, for NEXUS's accounts only."""
+        if account_id is None or not bool(self._setting(AP.PLANS_KEY, False)) or not self._is_autopilot(account_id):
+            return None
+        ch = self._challenges.get(account_id)
+        initial = (ch["initial"] if ch is not None else
+                   self._acct_initial.get(account_id) or self._initial_size(account_id))
+        return AP.plan_for(initial)
+
     def _is_autopilot(self, account_id: int) -> bool:
         """One of NEXUS's accounts: account 3 or a challenge account."""
         return account_id == AUTOPILOT_ACCOUNT or account_id in self._challenges
@@ -4344,6 +4381,15 @@ class PaperEngine:
                              account_id=aid)
         await self.publish(AUTOPILOT_ACCOUNT)
         return await self.autopilot_snapshot()
+
+    async def _plans_view(self) -> list[dict[str, Any]]:
+        """AutopilotAccountPlan[] of account 3 and the running small accounts (empty while the plans are off)."""
+        out = []
+        for aid in [AUTOPILOT_ACCOUNT, *self.twin_ids()]:
+            plan = self._plan(aid)
+            if plan is not None:
+                out.append(AP.view(aid, plan, await self._daily(aid)))
+        return out
 
     async def calendar(self, start: Any = None, end: Any = None) -> dict[str, Any]:
         """AutopilotCalendar: the closed trades of NEXUS automática's accounts (3, the small and the challenge accounts)

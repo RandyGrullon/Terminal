@@ -6,12 +6,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Activity, Briefcase, CalendarDays, ChevronDown, ChevronRight, CircleHelp, History, LayoutGrid, LogOut, PieChart, PiggyBank, Plus, Server } from 'lucide-react'
 import { api } from '../../api/client'
 import type { Position } from '../../api/types'
-import type { AutopilotSnapshot } from '../../api/types-autopilot'
+import type { AutopilotAccountPlan, AutopilotSnapshot } from '../../api/types-autopilot'
 import type { WsStatus } from '../../api/ws'
 import { fmtAgo, fmtDateTime, fmtInt, fmtPct, fmtPrice, fmtR } from '../../lib/format'
 import { normalizeAutopilot, subscribeAutopilot } from '../paper/AutopilotView'
 import TradeDetailModal from '../paper/TradeDetailModal'
-import { TONE_LABEL, accountLabel, toneOf, twinLabel, twinTone, twinsOf, vaultOf, type AccountTone } from '../paper/NexusAccounts'
+import { TONE_LABEL, accountLabel, planLine, toneOf, twinLabel, twinTone, twinsOf, vaultOf, type AccountTone } from '../paper/NexusAccounts'
 import '../paper/nexus-accounts.css'
 import { Button, Loading, Modal } from '../ui'
 import { GLOSSARY, friendlyReason, nexusNow, priceBarOf, sideWords, sourceOf, speedOf, todayOf, type PriceBar } from './friendly'
@@ -60,6 +60,7 @@ export interface SimpleAccount {
   saved: number // what it put in the vault
   mindset: string | null // the 1k account's rules
   goalNote: string | null // how its goal is counted (the 10k account: account + vault)
+  plan: AutopilotAccountPlan | null // its plan by size (daily goal, risk)
 }
 
 const CHALLENGE_STATUS: Record<string, string> = {
@@ -93,6 +94,7 @@ export function accountsOf(snap: AutopilotSnapshot): SimpleAccount[] {
     saved: vaultOf(snap.vault, a.id),
     mindset: null,
     goalNote: snap.main_goal ? `Cuenta + vault: ${money(snap.main_goal.total)}` : null,
+    plan: (snap.plans ?? []).find((p) => p.account_id === a.id) ?? null,
   }
   if (snap.main_goal) {
     main.target = snap.main_goal.target
@@ -118,6 +120,7 @@ export function accountsOf(snap: AutopilotSnapshot): SimpleAccount[] {
           saved: vaultOf(snap.vault, t.id),
           mindset: t.mindset || null,
           goalNote: null,
+          plan: (snap.plans ?? []).find((p) => p.account_id === t.id) ?? null,
         }))
   const challenges = (snap.challenges ?? [])
     .filter((c) => c.status === 'running')
@@ -141,6 +144,7 @@ export function accountsOf(snap: AutopilotSnapshot): SimpleAccount[] {
       saved: 0,
       mindset: null,
       goalNote: null,
+      plan: null,
     }))
   return [{ ...main, name: 'Cuenta 10k' }, ...twin, ...challenges]
 }
@@ -510,12 +514,28 @@ function AccountBox({ acc, onOpen }: { acc: SimpleAccount; onOpen: () => void })
           </span>
         </span>
       )}
+      {acc.plan && <PlanLine plan={acc.plan} />}
       {acc.saved > 0 && (
         <span className="sm-box-saved">
           <PiggyBank size={13} aria-hidden /> {money(acc.saved)} en el vault
         </span>
       )}
     </button>
+  )
+}
+
+function PlanLine({ plan }: { plan: AutopilotAccountPlan }) {
+  const l = planLine(plan)
+  return (
+    <span className={`sm-plan ${l.state}`}>
+      <span className="sm-plan-bar">
+        <span style={{ width: `${Math.max(2, l.progress)}%` }} />
+      </span>
+      <span className="tiny">
+        {l.state === 'hit' ? '✓ Meta del día alcanzada: no abre nuevas hasta mañana · ' : l.state === 'loss' ? 'Pérdida máxima del día: en pausa hasta mañana · ' : ''}
+        {l.label}
+      </span>
+    </span>
   )
 }
 
