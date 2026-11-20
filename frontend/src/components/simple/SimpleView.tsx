@@ -3,7 +3,7 @@
 // and, on a tap, why it opened each one (TradeDetailModal, a bottom sheet on a phone). Read-only; everything else is
 // in the Pro mode. Same data as the Pro view: GET /api/paper/autopilot + the live socket.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Activity, Briefcase, ChevronDown, ChevronRight, CircleHelp, History, LayoutGrid, LogOut, PieChart, PiggyBank, Plus, Server } from 'lucide-react'
+import { Activity, Briefcase, CalendarDays, ChevronDown, ChevronRight, CircleHelp, History, LayoutGrid, LogOut, PieChart, PiggyBank, Plus, Server } from 'lucide-react'
 import { api } from '../../api/client'
 import type { Position } from '../../api/types'
 import type { AutopilotSnapshot } from '../../api/types-autopilot'
@@ -16,6 +16,7 @@ import '../paper/nexus-accounts.css'
 import { Button, Loading, Modal } from '../ui'
 import { GLOSSARY, friendlyReason, nexusNow, priceBarOf, sideWords, sourceOf, speedOf, todayOf, type PriceBar } from './friendly'
 import ServerView from './ServerView'
+import CalendarView from './CalendarView'
 import './simple.css'
 
 const money = (v: number | null | undefined, signed = false) => {
@@ -414,7 +415,7 @@ function List({
   )
 }
 
-type Tab = 'home' | 'history' | 'portfolio' | 'server'
+type Tab = 'home' | 'history' | 'calendar' | 'portfolio' | 'server'
 
 function Hero({ acc }: { acc: SimpleAccount }) {
   const change = acc.equity - acc.initial
@@ -679,6 +680,7 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
   const tabs: { id: Tab; label: string; icon: ReactNode; count?: number }[] = [
     { id: 'home', label: 'Inicio', icon: <Activity size={20} />, count: trades.length || undefined },
     { id: 'history', label: 'Historial', icon: <History size={20} /> },
+    { id: 'calendar', label: 'Calendario', icon: <CalendarDays size={20} /> },
     { id: 'portfolio', label: 'Cartera', icon: <PieChart size={20} />, count: holdings.length || undefined },
     { id: 'server', label: 'Servidor', icon: <Server size={20} /> },
   ]
@@ -708,7 +710,7 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
         )}
       </header>
 
-      {accounts.length > 0 && tab !== 'server' && (
+      {accounts.length > 0 && tab !== 'server' && tab !== 'calendar' && (
         <div className="sm-accounts" role="tablist" aria-label="Cuentas demo">
           <button
             type="button"
@@ -744,7 +746,8 @@ export default function SimpleView({ wsStatus, onPro, onSignOut }: { wsStatus: W
 
       <main className="sm-content">
         {tab === 'server' && <ServerView wsStatus={wsStatus} onHealth={setServerHealth} />}
-        {!snap && !error && tab !== 'server' && <Loading label="Cargando la cuenta…" />}
+        {tab === 'calendar' && <CalendarView toneOfAccount={(id) => toneOf(id, twinList)} />}
+        {!snap && !error && tab !== 'server' && tab !== 'calendar' && <Loading label="Cargando la cuenta…" />}
         {error && !snap && <div className="errorbox">No se pudo cargar la cuenta: {error}</div>}
         {snap && combined && tab === 'home' && (
           <>

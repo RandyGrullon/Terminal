@@ -509,6 +509,17 @@ async def paper_autopilot_journal(fresh: bool = False) -> dict:
     return clean_json(await paper.autopilot_journal(fresh=fresh))
 
 
+@router.get("/api/paper/autopilot/calendar")
+async def paper_autopilot_calendar(start: int | None = None, end: int | None = None) -> dict:
+    """AutopilotCalendar: the closed trades of NEXUS automática's accounts with exit in [start, end) (unix s; default
+    the last 62 days, at most 400), each with its cause and a plain-Spanish lesson; the UI groups them by local day."""
+    paper = _service("paper", "La cuenta demo")
+    try:
+        return clean_json(await paper.calendar(start, end))
+    except PaperError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
 @router.post("/api/paper/autopilot/reset")
 async def paper_autopilot_reset(req: ResetRequest | None = None) -> dict:
     paper = _service("paper", "La cuenta demo")

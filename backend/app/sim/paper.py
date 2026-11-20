@@ -80,6 +80,7 @@ from app.sim import autopilot_vault as V
 from app.sim import autopilot_goal as G
 from app.sim import market_session as MS
 from app.sim import journal as J
+from app.sim import calendar_log as CAL
 from app.sim import trade_plan as TP
 from app.validation.stats import seed_for as S_seed
 from app.sim import metrics as M
@@ -4343,6 +4344,28 @@ class PaperEngine:
                              account_id=aid)
         await self.publish(AUTOPILOT_ACCOUNT)
         return await self.autopilot_snapshot()
+
+    async def calendar(self, start: Any = None, end: Any = None) -> dict[str, Any]:
+        """AutopilotCalendar: the closed trades of NEXUS automática's accounts (3, the small and the challenge accounts)
+        whose exit falls in [start, end) (unix s; default: the last 62 days), newest first, with their cause and lesson."""
+        t1 = int(safe_float(end) or now_s())
+        t0 = int(safe_float(start) or (t1 - 62 * 86400))
+        if t1 <= t0:
+            raise PaperError("El final del periodo debe ser posterior al inicio")
+        if t1 - t0 > 400 * 86400:
+            raise PaperError("El periodo puede ser como mucho de 400 días")
+        ids = [AUTOPILOT_ACCOUNT, *sorted(self._challenges)]
+        rows = await self.rt.db.fetchall(
+            f"SELECT * FROM paper_positions WHERE status='closed' AND account_id IN ({','.join('?' * len(ids))}) "
+            "AND exit_time >= ? AND exit_time < ? ORDER BY exit_time DESC, id DESC LIMIT ?",
+            (*ids, t0, t1, CAL.MAX_TRADES))
+        names: dict[int, str] = {}
+        for r in await self.rt.db.fetchall(
+                f"SELECT id, name FROM paper_accounts WHERE id IN ({','.join('?' * len(ids))})", tuple(ids)):
+            names[int(r["id"])] = str(r["name"])
+        names[AUTOPILOT_ACCOUNT] = "Cuenta 10k"
+        trades = [CAL.entry(dict(r), names) for r in rows]
+        return {"start": t0, "end": t1, "trades": trades, "truncated": len(trades) >= CAL.MAX_TRADES, "note": CAL.NOTE}
 
     async def _twin_view(self, aid: int | None = None) -> dict[str, Any] | None:
         """AutopilotChallenge (kind 'twin') of a running small account (default: the first one), or None."""

@@ -1421,6 +1421,13 @@ same clustered intervals. So far **no improvement is demonstrated**: too few ind
     repeated cause of its losses (its journal), saved in meta `autopilot.weekly`, shown in `status.weekly`, noted and
     sent as an opt-in alert (kind weekly). Terminal: `autopilot` prints the health line, `autopilot semana` the
     report.
+  - **Trading calendar** (`app.sim.calendar_log`, `PaperEngine.calendar(start, end)`,
+    `GET /api/paper/autopilot/calendar?start=&end=` → AutopilotCalendar {start, end, trades: CalendarTrade[], truncated,
+    note}): the closed trades of account 3 and of the small / challenge accounts whose exit falls in [start, end) (unix
+    s; default the last 62 days, at most 400 days, HTTP 400 otherwise; at most `CAL.MAX_TRADES`), newest first, each with
+    its account, why it opened (`meta.context.why`), how it closed, its journal cause (`J.cause_of`, a strategy's
+    early exit as `salida_estrategia_*`), MFE / MAE in R and `lesson` (plain Spanish). The simple mode's «Calendario»
+    tab groups them by the viewer's local day (month grid + the day's log with «¿Por qué perdió?» by cause).
   - **Journal of NEXUS automática** (`app.sim.journal`, `autopilot_journal()`, `GET /api/paper/autopilot/journal`,
     terminal `autopilot diario`): when its trader opens, `open_position(context=)` keeps in `meta.context` what NEXUS
     saw on that bar (regime, score, P(up), the gate's score and win probability; `atr_pct` = ATR % of the fill, none

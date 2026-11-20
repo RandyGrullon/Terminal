@@ -429,3 +429,43 @@ export interface AutopilotUpdate {
   session_aggressive?: boolean // aggressive mode during the New York session only
   per_tf_positions?: boolean // one position per market and timeframe
 }
+
+/** GET /api/paper/autopilot/calendar: the closed trades of NEXUS automática's accounts with exit in [start, end). */
+export interface AutopilotCalendar {
+  start: number // unix s
+  end: number
+  trades: CalendarTrade[] // newest first
+  truncated: boolean
+  note: string
+}
+
+/** One closed trade in the calendar (bitácora): how it opened, how it closed and why it won or lost. */
+export interface CalendarTrade {
+  id: number
+  account_id: number
+  account: string
+  symbol: string
+  tf: string
+  side: 'long' | 'short'
+  qty: number
+  entry_time: number
+  exit_time: number
+  entry_price: number | null
+  exit_price: number | null
+  pnl: number
+  r: number | null
+  result: 'win' | 'loss' | 'flat'
+  exit_reason: string | null
+  exit_label: string | null
+  cause: string // app.sim.journal.CAUSE_LABEL key
+  cause_label: string // Spanish
+  mfe_r: number | null
+  mae_r: number | null
+  held_s: number | null
+  why: string | null // why it opened (Spanish)
+  strategy: string | null
+  nexus_read: string | null
+  gate_line: string | null
+  regime: string | null
+  lesson: string // Spanish: why it ended as it did
+}

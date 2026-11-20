@@ -11,6 +11,7 @@ import type {
   SystemStatus,
   AutopilotComparison,
   BrokerStatus,
+  AutopilotCalendar,
   AutopilotJournal,
   AutopilotChallengeRequest,
   AutopilotGoalRequest,
@@ -331,6 +332,7 @@ export const api = {
       // Against random entries in the same markets (computed on demand, cached by the server; fresh = recompute)
       compare: (fresh = false) => get<AutopilotComparison>('/api/paper/autopilot/compare', fresh ? { fresh: true } : undefined),
       journal: (fresh = false) => get<AutopilotJournal>('/api/paper/autopilot/journal', fresh ? { fresh: true } : undefined),
+      calendar: (start: number, end: number) => get<AutopilotCalendar>('/api/paper/autopilot/calendar', { start, end }),
     },
   },
 
