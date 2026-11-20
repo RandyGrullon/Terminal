@@ -65,6 +65,12 @@ async def main(args) -> int:
             for aid in ids:
                 await conn.execute("update paper_accounts set balance = initial_balance, updated_at = $2 where id = $1",
                                    aid, int(time.time() * 1000))
+            # without trades NEXUS starts account 3 at autopilot.initial_balance (default 1.000 $): keep its own base
+            ini3 = await conn.fetchval("select initial_balance from paper_accounts where id = 3")
+            if ini3:
+                await conn.execute("insert into settings(key, value, updated_at) values ('autopilot.initial_balance', $1, $2) "
+                                   "on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at",
+                                   json.dumps(float(ini3)), int(time.time() * 1000))
             if dead:  # ended challenges: gone (their accounts too)
                 await conn.execute("delete from paper_accounts where id = any($1::bigint[])", dead)
             now = int(time.time())
