@@ -17,4 +17,13 @@ DEFAULTS: dict = {
     "broker.binance_futures_secret": "",
     "broker.binance_mirror_spot": True,  # spot crypto in dollars, long only (a wallet: buys, later sells)
     "broker.binance_mirror_perps": True,  # crypto perpetuals (.P), long and short, with autopilot.perp_leverage
+    # NEXUS automática repeated in a MetaTrader 5 account of any broker (app.broker.mt5_mirror): the account logged in
+    # in the MT5 terminal of this Windows machine (no password is stored). Demo accounts right away; a REAL account
+    # only when the user switches mt5_allow_real on AND types that account's number in mt5_real_login.
+    "broker.mt5_enabled": False,
+    "broker.mt5_path": "",  # terminal64.exe of the MT5 to use (empty: the one already open / the default install)
+    "broker.mt5_symbols": "",  # the broker's names when not found by itself: "XAU=GOLD, BTC=BTCUSD.m"
+    "broker.mt5_max_lots": 0.1,  # cap per order, every account type (0 = send nothing)
+    "broker.mt5_allow_real": False,  # the user's own switch: never turned on by the app
+    "broker.mt5_real_login": "",  # the only REAL account number allowed while mt5_allow_real is on
 }

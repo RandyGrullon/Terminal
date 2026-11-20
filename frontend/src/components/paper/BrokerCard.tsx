@@ -14,7 +14,7 @@ import { fmtMoney, isNum, useInterval } from '../markets/opsUtils'
 const POLL_MS = 30_000
 const SHOW = 8
 
-export type BrokerVenue = 'alpaca' | 'binance'
+export type BrokerVenue = 'alpaca' | 'binance' | 'mt5'
 
 /** The texts and endpoints of each practice venue. */
 const VENUES: Record<
@@ -38,6 +38,15 @@ const VENUES: Record<
     fill: 'Binance',
     load: () => api.brokerBinance.status(),
     sync: () => api.brokerBinance.sync(),
+  },
+  mt5: {
+    title: 'Espejo en MetaTrader 5',
+    sub: 'Repite sus posiciones en la cuenta que tengas abierta en MT5, de cualquier bróker',
+    intro:
+      'Abre MetaTrader 5 en esta PC, inicia sesión en tu cuenta (de cualquier bróker) y activa «Trading algorítmico». NEXUS automática repetirá ahí sus posiciones, con el nombre del símbolo de tu bróker y en lotes. En una cuenta demo funciona al activarlo; en una cuenta REAL no envía nada hasta que tú lo autorices en Ajustes con el número de esa cuenta. NEXUS no guarda tu contraseña de MT5.',
+    fill: 'MT5',
+    load: () => api.brokerMt5.status(),
+    sync: () => api.brokerMt5.sync(),
   },
 }
 
@@ -97,7 +106,18 @@ export function normalizeBroker(raw: unknown): BrokerStatus | null {
   if (typeof o.enabled !== 'boolean') return null
   const a = o.account && typeof o.account === 'object' ? (o.account as Record<string, unknown>) : null
   const account: BrokerAccount | null = a
-    ? { equity: num(a.equity), cash: num(a.cash), buying_power: num(a.buying_power), status: str(a.status), currency: str(a.currency, 'USD') }
+    ? {
+        equity: num(a.equity),
+        cash: num(a.cash),
+        buying_power: num(a.buying_power),
+        status: str(a.status),
+        currency: str(a.currency, 'USD'),
+        ...(num(a.login) !== null ? { login: num(a.login) as number } : {}),
+        ...(typeof a.server === 'string' ? { server: a.server } : {}),
+        ...(typeof a.company === 'string' ? { company: a.company } : {}),
+        ...(typeof a.kind === 'string' ? { kind: a.kind } : {}),
+        ...(num(a.leverage) !== null ? { leverage: num(a.leverage) as number } : {}),
+      }
     : null
   return {
     enabled: o.enabled,
@@ -114,6 +134,9 @@ export function normalizeBroker(raw: unknown): BrokerStatus | null {
     entries: Array.isArray(o.entries) ? o.entries.map(normalizeEntry).filter((e): e is BrokerMirrorEntry => e !== null) : [],
     stats: normalizeStats(o.stats),
     note: str(o.note),
+    ...(num(o.max_lots) !== null ? { max_lots: num(o.max_lots) as number } : {}),
+    ...(typeof o.allow_real === 'boolean' ? { allow_real: o.allow_real } : {}),
+    ...(typeof o.blocked === 'string' || o.blocked === null ? { blocked: (o.blocked as string | null) ?? null } : {}),
   }
 }
 
@@ -187,9 +210,21 @@ export function BrokerView({ status, error, syncing, onSync, onSettings, venue =
       ) : (
         <div className="col gap-2">
           {status.error && <div className="notice ap-brake small">{status.error}</div>}
+          {status.account?.login !== undefined && (
+            <div className="row gap-2 small" style={{ flexWrap: 'wrap' }}>
+              <b>Cuenta {status.account.login}</b>
+              <span className="muted">{[status.account.company, status.account.server].filter(Boolean).join(' · ')}</span>
+              {status.account.kind === 'real' ? (
+                <Badge tone="neg">REAL · dinero real</Badge>
+              ) : (
+                <Badge tone="info">{status.account.kind === 'contest' ? 'Concurso' : 'Demo'}</Badge>
+              )}
+              {isNum(status.max_lots) && <span className="muted">tope {fmtNum(status.max_lots, 2)} lotes por orden</span>}
+            </div>
+          )}
           {status.account && (
             <div className="small">
-              Capital de práctica <b>{money(status.account.equity, status.account.currency)}</b> · efectivo{' '}
+              {venue === 'mt5' ? 'Capital' : 'Capital de práctica'} <b>{money(status.account.equity, status.account.currency)}</b> · efectivo{' '}
               {money(status.account.cash, status.account.currency)}
               {status.last_sync_ms ? <span className="muted"> · sincronizado {fmtAgo(status.last_sync_ms)}</span> : null}
             </div>

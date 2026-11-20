@@ -55,6 +55,9 @@ def test_lock_is_complete_and_within_requirement_ranges():
     assert "pytest" not in pins
     for req in tool.read_requirements():
         name = req.name.lower()
+        if not tool.applies(req, set()):  # a platform-only dependency (MetaTrader5: Windows) is not in the Linux image
+            assert name not in pins, f"{name} no se instala en la imagen: no debe estar en requirements.lock"
+            continue
         assert name in pins, f"{name} falta en requirements.lock"
         assert req.specifier.contains(pins[name], prereleases=True), f"{name}=={pins[name]} no cumple {req}"
 

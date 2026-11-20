@@ -47,6 +47,7 @@ SERVICES: list[tuple[str, str, str]] = [
     ("ai", "app.ai.service", "AIService"),
     ("broker", "app.broker.mirror", "MirrorService"),
     ("broker_binance", "app.broker.binance_mirror", "BinanceMirrorService"),
+    ("broker_mt5", "app.broker.mt5_mirror", "Mt5MirrorService"),
     ("research", "app.sim.research", "ResearchService"),
 ]
 ROUTERS = [

@@ -1,6 +1,8 @@
-// Mirrors of NEXUS automática in the user's PRACTICE accounts (backend app.broker): Alpaca PAPER and Binance's testnets,
-// never real money. GET /api/broker/status and POST /api/broker/sync (Alpaca), GET /api/broker/binance/status and
-// POST /api/broker/binance/sync (Binance testnets) answer a BrokerStatus; the keys are never sent back.
+// Mirrors of NEXUS automática in the user's broker accounts (backend app.broker): Alpaca PAPER and Binance's testnets
+// (practice only), and MetaTrader 5 of any broker (demo, or one REAL account the user authorized by its number).
+// GET /api/broker/status and POST /api/broker/sync (Alpaca), GET /api/broker/binance/status and POST
+// /api/broker/binance/sync (Binance testnets), GET /api/broker/mt5/status and POST /api/broker/mt5/sync (MT5) answer a
+// BrokerStatus; keys and passwords are never sent back.
 // One field per line: tools/contract_check.py compares these interfaces with the live server.
 
 /** The practice account as the venue reports it (Binance testnets: futures margin balance as equity, spot USDT as
@@ -11,6 +13,11 @@ export interface BrokerAccount {
   buying_power: number | null
   status: string
   currency: string
+  login?: number // MetaTrader 5 only: the account open in the terminal
+  server?: string // MT5: the broker's server
+  company?: string // MT5: the broker
+  kind?: string // MT5: demo | contest | real
+  leverage?: number // MT5: the account's leverage (1:N)
 }
 
 /** One position of NEXUS automática and what the mirror did with it. Prices in the market's currency. */
@@ -67,4 +74,7 @@ export interface BrokerStatus {
   entries: BrokerMirrorEntry[]
   stats: BrokerStats
   note: string
+  max_lots?: number // MT5: cap per order (lots)
+  allow_real?: boolean // MT5: the user's switch to allow one REAL account
+  blocked?: string | null // MT5: why it sends nothing to the account open now (a real one not authorized…)
 }

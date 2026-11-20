@@ -26,6 +26,7 @@ export const SERVICE_LABEL: Record<string, string> = {
   ai: 'Copiloto IA (Ollama)',
   broker: 'Espejo en Alpaca (práctica)',
   broker_binance: 'Espejo en el testnet de Binance (práctica)',
+  broker_mt5: 'Espejo en MetaTrader 5',
   research: 'Investigación de estrategias',
   auth: 'Autenticación',
 }

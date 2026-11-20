@@ -21,7 +21,8 @@ re-exported by types.ts, §13). Python must emit exactly those shapes (snake_cas
    (env `NEXUS_DB_PATH`). One command starts everything (`start.bat` / `start.ps1` / `start.sh`).
 2. **Spanish UI**: every user-facing string (labels, terminal output, reasons, warnings, errors in `detail`) is Spanish.
    Code, identifiers and comments in English.
-3. **No real money**: simulation / paper trading only. Never implement broker order routing.
+3. **Brokers**: simulation and practice accounts today (the mirrors' practice URLs are constants). The owner lifted the
+   paper-only rule on 2026-11-19; any real-money connection is switched on by the owner by hand, never by Claude.
 4. **Legit data access only**: official/public endpoints with plain requests. NEVER spoof browser `User-Agent`,
    `Origin`, `Referer` or cookies; never bypass bot checks, captchas or JS challenges; never use `yfinance` /
    `curl_cffi` impersonation; never scrape HTML. Use the shared HTTP client `app.util.http_client()` (honest UA
@@ -2600,6 +2601,37 @@ futures: demo.binance.com → API Management), not valid on the live exchange. O
 - Limits: the testnets' order books are thin and their prices can drift from the real market, so their price
   differences say less than Alpaca's; funding payments of the perpetuals are charged by Demo Trading but not
   by NEXUS's simulation (app.engine.contracts).
+
+### 20.2 MetaTrader 5 of any broker (`app.broker.mt5`, `app.broker.mt5_mirror`)
+
+- `rt.broker_mt5` = `Mt5MirrorService(MirrorService)`: the same reconcile, sent through the official `MetaTrader5`
+  package (Windows only, `requirements.txt` marker `sys_platform == "win32"`) to the MT5 terminal open on this machine.
+  The account is the one the user logged in to in MT5: NEXUS never stores or sends an MT5 password. Every package call
+  runs in a worker thread under one lock (`Mt5Client`); orders carry magic `842003` and the client id as comment, and a
+  client id already in the terminal's deals of the last 7 days is never sent again.
+- Account gate (`Mt5MirrorService.permission`): demo and contest accounts trade when the mirror is on; a REAL account
+  (`account_info().trade_mode == 2`, or an unknown mode) receives nothing unless `broker.mt5_allow_real` is on AND
+  `broker.mt5_real_login` equals that account's login. While the account cannot be used, the positions NEXUS opens are
+  recorded as not mirrored and are never sent later. It also stops when the terminal is disconnected or «Trading
+  algorítmico» is off. The switch is off by default and only the user turns it on in Ajustes (the owner lifted the
+  paper-only rule on 2026-11-19; a real connection is never switched on by Claude).
+- Symbols: `bases_of` (NEXUS symbol → base in dollars: XAU, BTC, AAPL…; other quotes, synthetic markets, the
+  buy-and-hold portfolio, options and index futures with an expiry are not mirrored), then `pick_symbol` (the user's
+  map `broker.mt5_symbols` «XAU=GOLD, BTC=BTCUSD.m», an exact name — XAUUSD, GOLD, BTCUSD, the ticker — or one with a
+  short suffix: XAUUSD.m, XAUUSDm, AAPL.OQ; never a gold quoted in another currency).
+- Size: NEXUS's units / the broker's contract size → lots, capped at `broker.mt5_max_lots` (default 0.1; 0 = nothing)
+  and the symbol's maximum, rounded down to its step; under its minimum lot it is not mirrored. Closes and partial
+  exits are sent against the position's ticket (hedging accounts); if MT5 switched to another account, nothing of the
+  old account is closed until the user goes back to it.
+- Settings: `broker.mt5_enabled` false, `broker.mt5_path` "" (terminal64.exe; empty = the MT5 already open),
+  `broker.mt5_symbols` "", `broker.mt5_max_lots` 0.1, `broker.mt5_allow_real` false, `broker.mt5_real_login` "".
+- API: `GET /api/broker/mt5/status?refresh=` and `POST /api/broker/mt5/sync` → BrokerStatus with provider `mt5`,
+  `paper` false on a real account, `account` plus `login`, `server`, `company`, `kind` (demo | contest | real) and
+  `leverage` (never the holder's name), `max_lots`, `allow_real` and `blocked` (why it sends nothing now, or null).
+  Terminal: `espejo mt5` / `espejo mt5 sincroniza`. UI: card «Espejo en MetaTrader 5» (`BrokerCard venue="mt5"`, a red
+  «REAL · dinero real» badge on a real account) and the Ajustes group «MetaTrader 5 (cualquier bróker)».
+- Limits: it needs Windows, the terminal open and the machine on (it does not run in the cloud image); a market order
+  accepts 20 points of deviation; swaps, commissions and the broker's execution are what the comparison measures.
 
 ## 21. Long history and strategy research (RESEARCH, `app.data.importer`, `app.sim.research`)
 

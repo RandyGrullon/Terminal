@@ -348,6 +348,14 @@ que la actives en «Cómo opera»:
   del mínimo…). Nunca usa dinero real: las direcciones de esos entornos son fijas en el código. Su libro de órdenes es
   más fino que el real, así que sus precios pueden alejarse del mercado. En la terminal: `espejo binance` y `espejo
   binance sincroniza`.
+- **Espejo en MetaTrader 5, de cualquier bróker** (opcional, desactivado por defecto; solo Windows): abre MT5 en esta
+  PC, inicia sesión en tu cuenta y activa «Trading algorítmico». En *Ajustes → MetaTrader 5* actívalo y NEXUS
+  automática repetirá ahí sus posiciones, en lotes y con el nombre del símbolo de tu bróker (XAUUSD, GOLD, XAUUSD.m…;
+  si no lo encuentra, escríbelo en «Símbolos de tu bróker»). NEXUS no guarda tu contraseña de MT5. Una cuenta **demo**
+  opera al activarlo. Una cuenta **REAL no recibe nada** hasta que tú actives «Permitir cuenta REAL» y escribas el
+  número de esa cuenta; lo que NEXUS abra mientras no está autorizada nunca se envía después. Cada orden tiene un tope
+  de lotes (0,1 por defecto). La validación de NEXUS no encontró evidencia de ventaja: en una cuenta real puede perder
+  dinero; no es asesoría financiera. En la terminal: `espejo mt5` y `espejo mt5 sincroniza`.
 - **Operaciones por velocidad**: en «Cómo opera» → *Temporalidades* elige hasta 3 a la vez (por ejemplo 5m, 1h y 4h).
   Cada una decide en sus propias velas sobre los mismos mercados, con una sola posición por mercado. Arriba de sus
   posiciones, las pestañas *Rápidas* (velas de hasta 5m), *Medidas* (hasta 2h) y *Largo plazo* (4h o más) separan sus

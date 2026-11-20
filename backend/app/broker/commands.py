@@ -11,7 +11,9 @@ from app.terminal import CommandContext, command
 SYNC_WORDS = ("sincroniza", "sincronizar", "sync")
 STATUS_WORDS = ("estado", "status")
 BINANCE_WORDS = ("binance", "testnet")
-USAGE = "Uso: espejo · espejo sincroniza · espejo binance · espejo binance sincroniza"
+MT5_WORDS = ("mt5", "metatrader")
+USAGE = ("Uso: espejo · espejo sincroniza · espejo binance · espejo binance sincroniza · espejo mt5 · "
+         "espejo mt5 sincroniza")
 
 
 def _service(ctx: CommandContext, attr: str):
@@ -26,19 +28,20 @@ def _money(v, currency: str = "$") -> str:
     return text if text == "—" else f"{text} {currency}"
 
 
-@command("espejo", help="Espejo de NEXUS automática en tus cuentas de práctica (Alpaca paper o el testnet de "
-                        "Binance): estado y posiciones",
-         usage="espejo · espejo sincroniza · espejo binance · espejo binance sincroniza", group="Bróker",
+@command("espejo", help="Espejo de NEXUS automática en tus cuentas de bróker (Alpaca paper, el testnet de "
+                        "Binance o tu cuenta de MetaTrader 5): estado y posiciones",
+         usage="espejo · espejo sincroniza · espejo binance [sincroniza] · espejo mt5 [sincroniza]", group="Bróker",
          aliases=("alpaca", "broker"))
 async def _espejo(ctx: CommandContext) -> None:
     words = [str(a).lower() for a in ctx.args]
     binance = bool(words) and words[0] in BINANCE_WORDS
-    if binance:
+    mt5 = bool(words) and words[0] in MT5_WORDS
+    if binance or mt5:
         words = words[1:]
     if len(words) > 1 or (words and words[0] not in SYNC_WORDS + STATUS_WORDS):
         ctx.fail(USAGE)
-    svc = _service(ctx, "broker_binance" if binance else "broker")
-    venue = "el testnet de Binance" if binance else "Alpaca"
+    svc = _service(ctx, "broker_mt5" if mt5 else "broker_binance" if binance else "broker")
+    venue = "MetaTrader 5" if mt5 else "el testnet de Binance" if binance else "Alpaca"
     if words and words[0] in SYNC_WORDS:
         try:
             st = await svc.sync_now()
@@ -48,7 +51,10 @@ async def _espejo(ctx: CommandContext) -> None:
         st = await svc.overview()
     ctx.data = st
     if not st["enabled"]:
-        if binance:
+        if mt5:
+            ctx.print("Espejo en MetaTrader 5 desactivado: actívalo en Ajustes → MetaTrader 5 con el terminal de MT5 "
+                      "abierto en tu cuenta.", "muted")
+        elif binance:
             ctx.print(f"Espejo en {venue} desactivado: actívalo en Ajustes → Testnet de Binance (práctica) con las "
                       "claves de los testnets de contado y de futuros.", "muted")
         else:
@@ -59,7 +65,10 @@ async def _espejo(ctx: CommandContext) -> None:
     if st["connected"]:
         currency = str(acct.get("currency") or "USD")
         cur = "$" if currency == "USD" else currency
-        label = "Binance Testnet (práctica)" if binance else "Alpaca (cuenta de práctica)"
+        kind = str(acct.get("kind") or "")
+        label = (f"MetaTrader 5 · cuenta {acct.get('login')} ({acct.get('server')}) · "
+                 f"{'REAL' if kind == 'real' else 'demo' if kind == 'demo' else kind}" if mt5
+                 else "Binance Testnet (práctica)" if binance else "Alpaca (cuenta de práctica)")
         ctx.print(f"{label} conectada · capital {_money(acct.get('equity'), cur)} · efectivo "
                   f"{_money(acct.get('cash'), cur)}", "info")
     if st.get("error"):
@@ -70,6 +79,7 @@ async def _espejo(ctx: CommandContext) -> None:
              "—" if e["slip_entry_bps"] is None else f"{fmt_num(e['slip_entry_bps'], 1, signed=True)} pb",
              e.get("reason") or ""] for e in st["entries"][:10]]
     if rows:
-        ctx.table(["Mercado", "Lado", "Estado", "NEXUS", "Binance" if binance else "Alpaca", "Diferencia", "Motivo"],
+        ctx.table(["Mercado", "Lado", "Estado", "NEXUS", "MT5" if mt5 else "Binance" if binance else "Alpaca",
+                   "Diferencia", "Motivo"],
                   rows)
     ctx.print(st["note"], "muted")

@@ -273,6 +273,10 @@ export const api = {
     status: (refresh = false) => get<BrokerStatus>('/api/broker/status', refresh ? { refresh: true } : undefined),
     sync: () => post<BrokerStatus>('/api/broker/sync'),
   },
+  brokerMt5: {
+    status: (refresh = false) => get<BrokerStatus>('/api/broker/mt5/status', refresh ? { refresh: true } : undefined),
+    sync: () => post<BrokerStatus>('/api/broker/mt5/sync'),
+  },
   brokerBinance: {
     status: (refresh = false) => get<BrokerStatus>('/api/broker/binance/status', refresh ? { refresh: true } : undefined),
     sync: () => post<BrokerStatus>('/api/broker/binance/sync'),

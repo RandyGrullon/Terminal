@@ -81,8 +81,10 @@ test('contract: types-broker.ts has one field per line and is re-exported by typ
     return body.split('\n').map((l) => l.trim().match(/^(\w+)(\?)?\s*:/)).filter(Boolean).map((m) => m[1] + (m[2] ?? ''))
   }
   assert.deepEqual(fields('BrokerStatus'), ['enabled', 'provider', 'paper', 'configured', 'connected', 'account', 'error',
-    'last_sync_ms', 'mirror_stocks', 'mirror_crypto', 'mirror_perps', 'entries', 'stats', 'note'])
-  assert.deepEqual(fields('BrokerAccount'), ['equity', 'cash', 'buying_power', 'status', 'currency'])
+    'last_sync_ms', 'mirror_stocks', 'mirror_crypto', 'mirror_perps', 'entries', 'stats', 'note',
+    'max_lots?', 'allow_real?', 'blocked?']) // the last three: MetaTrader 5 only
+  assert.deepEqual(fields('BrokerAccount'), ['equity', 'cash', 'buying_power', 'status', 'currency',
+    'login?', 'server?', 'company?', 'kind?', 'leverage?']) // the optional ones: MetaTrader 5 only
   assert.equal(fields('BrokerMirrorEntry').length, 19)
   assert.ok(fields('BrokerStats').includes('slip_entry_bps') && fields('BrokerStats').includes('text'))
   assert.ok(readFileSync(path.join(SRC, 'api', 'types.ts'), 'utf8').includes("export * from './types-broker'"))

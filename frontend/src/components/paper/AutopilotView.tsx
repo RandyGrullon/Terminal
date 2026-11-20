@@ -1862,6 +1862,7 @@ export default function AutopilotView({ initial = null, section }: { initial?: A
             <div className="dk-stack">
               <BrokerCard />
               <BrokerCard venue="binance" />
+              <BrokerCard venue="mt5" />
             </div>
           </div>
         )

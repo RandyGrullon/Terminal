@@ -126,8 +126,10 @@ pruebas), arranca `tools/pg_start.py` con una carpeta nueva.
   - `broker/`: espejos de NEXUS automática en cuentas de práctica (`alpaca.py` cliente solo de la API de práctica de
     Alpaca, `binance.py` cliente solo de los entornos de práctica de Binance: testnet de contado y Demo Trading de
     futuros, peticiones firmadas; `mirror.py` reconciliación cada 15 s, diferencias de precio con la simulación y base
-    de los espejos; `binance_mirror.py` cripto al contado y perpetuos; `common.py` `BrokerError`; `commands.py` comando
-    `espejo` / `espejo binance`); apagados por defecto.
+    de los espejos; `binance_mirror.py` cripto al contado y perpetuos; `mt5.py` + `mt5_mirror.py` la cuenta abierta en
+    MetaTrader 5 de cualquier bróker (solo Windows; una cuenta real solo con `broker.mt5_allow_real` y su número en
+    `broker.mt5_real_login`, que pone el dueño a mano); `common.py` `BrokerError`; `commands.py` comando
+    `espejo` / `espejo binance` / `espejo mt5`); apagados por defecto.
   - `api/`: routers REST.
 - `frontend/src/`: `api/` (`client.ts`, `ws.ts`, `types.ts` = tipos canónicos; `types-*.ts` = tipos de cada módulo
   (alerts, paper-orders, realtime, validation), reexportados por `types.ts`), `pages/` (una por sección, cargada bajo
@@ -147,10 +149,11 @@ pruebas), arranca `tools/pg_start.py` con una carpeta nueva.
 2. Honestidad: nunca exagerar acierto, certeza ni protección. Estadísticas como «x de n», frente a una referencia;
    sin conclusiones con n < 30 o cuando el intervalo del 95 % incluye la referencia. Avisos de que no es asesoría
    financiera.
-3. Solo simulación / papel: nunca ejecutar órdenes reales ni conectar brokers con dinero real. Los espejos de NEXUS
-   automática solo hablan con la API de práctica de Alpaca y con los entornos de práctica de Binance (testnet de
-   contado y Demo Trading): `app.broker.alpaca.PAPER_URL`, `app.broker.binance.TESTNET_SPOT_URL` y
-   `TESTNET_FUTURES_URL` son constantes, nunca ajustes.
+3. Brókers: hoy la app opera en simulación y en cuentas de práctica. Los espejos de NEXUS automática hablan con la
+   API de práctica de Alpaca y con los entornos de práctica de Binance (testnet de contado y Demo Trading):
+   `app.broker.alpaca.PAPER_URL`, `app.broker.binance.TESTNET_SPOT_URL` y `TESTNET_FUTURES_URL` son constantes.
+   El dueño del proyecto quitó la regla de «solo papel» el 19/11/2026: conectar una cuenta real ya no está prohibido
+   por el proyecto, pero una conexión real la activa siempre el dueño a mano, nunca Claude.
 4. Red: solo endpoints oficiales o públicos, con peticiones normales a través de `app.util.http_client()`. Nunca
    falsificar User-Agent, cabeceras, cookies ni saltarse protecciones anti-bot (por eso Yahoo, Stooq y la búsqueda
    de símbolos de TradingView están excluidos). Una fuente que rechaza al cliente se registra y no se esquiva.
