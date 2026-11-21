@@ -3780,8 +3780,22 @@ class PaperEngine:
         return {"limit_pct": float(limit_pct), "drawdown_pct": round(drawdown, 4),
                 "active": bool(limit_pct > 0 and drawdown >= limit_pct)}
 
+    def _metal_closed(self, symbol: str, now: int | None = None) -> bool:
+        """autopilot.metal_hours: a precious-metal perpetual (XAU / XAG / XPT / XPD on a crypto exchange, which quotes
+        24/7) opens nothing new while the real metal market is closed (it follows CME Globex: Sunday 18:00 to Friday
+        17:00 New York, daily pause 17:00-18:00), when its price is thin and can jump at the reopening."""
+        if not bool(self._setting("autopilot.metal_hours", False)):
+            return False
+        ticker = symbol.upper().partition(":")[2] or symbol.upper()
+        if not ticker.startswith(("XAU", "XAG", "XPT", "XPD")):
+            return False
+        return not MS.cme_session(int(now if now is not None else now_s()))["open"]
+
     async def _market_live(self, symbol: str) -> bool:
-        """A non-24/7 market (stocks, funds, futures, forex…) is open and its quote is a live price."""
+        """A non-24/7 market (stocks, funds, futures, forex…) is open and its quote is a live price; a metal
+        perpetual only while the real metal market is open (autopilot.metal_hours)."""
+        if self._metal_closed(symbol):
+            return False
         if asset_class(symbol) in ALWAYS_OPEN_CLASSES or symbol.upper().startswith("SIM:"):
             return True
         hub = self.rt.hub

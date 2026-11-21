@@ -83,3 +83,25 @@ def test_focus_symbols_trade_every_timeframe_the_rest_only_the_wide_ones(runtime
             await engine.stop()
 
     asyncio.run(scenario())
+
+
+def test_metal_hours_follow_the_real_gold_market(runtime_factory, no_background):
+    """autopilot.metal_hours: the gold perpetual (24/7 on Binance) opens nothing while real gold is closed (Friday
+    17:00 → Sunday 18:00 New York, daily 17-18 h); crypto is not affected; off = the old 24/7 behaviour."""
+    from app.sim import market_session as MS
+    sat = int(MS.datetime(2026, 11, 21, 12, 0, tzinfo=MS.NEW_YORK).timestamp())
+    wed = int(MS.datetime(2026, 11, 18, 12, 0, tzinfo=MS.NEW_YORK).timestamp())
+    pause = int(MS.datetime(2026, 11, 18, 17, 30, tzinfo=MS.NEW_YORK).timestamp())
+
+    async def scenario():
+        async with runtime_factory() as rt:
+            engine = pp.PaperEngine(rt)
+            await engine.start()
+            assert engine._metal_closed(GOLD, sat) is False  # off by default
+            await rt.settings.update({"autopilot.metal_hours": True})
+            assert engine._metal_closed(GOLD, sat) is True and engine._metal_closed(GOLD, pause) is True
+            assert engine._metal_closed(GOLD, wed) is False
+            assert engine._metal_closed(BTC, sat) is False
+            await engine.stop()
+
+    asyncio.run(scenario())

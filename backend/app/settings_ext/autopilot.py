@@ -79,4 +79,6 @@ DEFAULTS: dict = {
     # these symbols trade on every timeframe of autopilot.tfs; the others only on autopilot.wide_tfs (empty = all)
     "autopilot.focus_symbols": [],
     "autopilot.wide_tfs": [],
+    # metal perpetuals (gold…) open nothing new while the real metal market is closed (weekend, daily 17-18 h NY)
+    "autopilot.metal_hours": False,
 }
