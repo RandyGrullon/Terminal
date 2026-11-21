@@ -2027,7 +2027,8 @@ Sources (verified with plain requests from this network):
 
 Rules (settings `macro.*`): **red** = high-impact event of a relevant currency within
 [−block_after_min, +block_before_min] (blackout), or VIX ≥ vix_danger, or VIX intraday ≥ +25 %, or S&P futures
-|Δ| ≥ 3 %. **amber** = high-impact event within warn_before_min (or ≤ 2 h after one), VIX ≥ vix_caution or
+|Δ| ≥ 3 % (with `macro.crypto_stock_block` false the VIX and S&P futures dangers are only amber for the crypto scope,
+which includes gold perps: the calendar blackout still makes it red). **amber** = high-impact event within warn_before_min (or ≤ 2 h after one), VIX ≥ vix_caution or
 VIX Δ ≥ +12 %, S&P futures |Δ| ≥ 1.5 %, DXY |Δ| ≥ 0.8 %, US10Y |Δ| ≥ 10 pb, MOVE ≥ 120; crypto scope also
 Nasdaq futures |Δ| ≥ 2 %, Fear & Greed ≤ 15 / ≥ 85 and extreme BTC funding (|rate| ≥ 0.05 % per 8 h; normal
 ≈ 0.01 %). Daily-change rules are skipped while the US session is closed (Friday 17:00 → Sunday 18:00 New York; the

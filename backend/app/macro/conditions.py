@@ -50,6 +50,7 @@ def settings_view(settings: dict | None) -> SimpleNamespace:
         before=int(number("macro.block_before_min", 30) * 60), after=int(number("macro.block_after_min", 30) * 60),
         warn=int(number("macro.warn_before_min", 120) * 60), vix_caution=number("macro.vix_caution", 22.0),
         vix_danger=number("macro.vix_danger", 30.0), currencies=currencies, tz=s.get(fmt.TZ_SETTING) or None,
+        crypto_stock_block=s.get("macro.crypto_stock_block", True) is not False,
     )
 
 
@@ -81,7 +82,11 @@ def metric_findings(metrics: dict, cfg: SimpleNamespace, crypto: bool, now_s: in
         if ch is not None and not vclosed and abs(ch) >= 1:
             tag += f" ({fmt.pct(ch, 0)})"
         level = C.vix_level(vix, cfg.vix_caution, cfg.vix_danger, vclosed)
-        if level == "danger":
+        if level == "danger" and crypto and not getattr(cfg, "crypto_stock_block", True):
+            # macro.crypto_stock_block off: the stock market's fear gauge warns 24/7 markets (crypto, gold perps) but
+            # does not stop them; the economic calendar's no-trade windows still do
+            out.append(_finding("amber", 10, f"{tag}: volatilidad extrema en bolsa (aviso; no frena cripto)"))
+        elif level == "danger":
             out.append(_finding("red", 10, f"{tag}: volatilidad extrema"))
         elif level == "warn":
             text = "volatilidad alta" if v >= cfg.vix_caution else "la volatilidad se dispara"
@@ -90,7 +95,8 @@ def metric_findings(metrics: dict, cfg: SimpleNamespace, crypto: bool, now_s: in
     level = C.move_level(es.get("change_pct"), C.ES_WARN, C.ES_DANGER, closed)
     if level != "ok":
         text = "movimiento extremo" if level == "danger" else "sesión muy movida"
-        out.append(_finding("red" if level == "danger" else "amber", 12,
+        stop = level == "danger" and not (crypto and not getattr(cfg, "crypto_stock_block", True))
+        out.append(_finding("red" if stop else "amber", 12,
                             f"Futuros S&P 500 {fmt.pct(es.get('change_pct'))}: {text}"))
     nq = q.get("nq") or {}
     if crypto and C.move_level(nq.get("change_pct"), C.NQ_WARN, None, closed) == "warn":

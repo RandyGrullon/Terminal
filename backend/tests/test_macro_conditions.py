@@ -213,3 +213,22 @@ def test_spanish_formatting():
     assert fmt.clock(fomc.ny_time("2026-11-04", 9, 0), "America/New_York") == "9:00"
     assert fmt.day_clock(NOW + 86400, NOW, "America/New_York") == "mañana 12:00"
     assert fmt.day_clock(NOW + 2 * 86400, NOW, "America/New_York") == "vie 12:00"
+
+
+def test_crypto_stock_block_off_only_warns_24_7_markets():
+    """macro.crypto_stock_block off: the VIX / S&P futures in danger only warn crypto (and gold perps, crypto scope);
+    stocks stay stopped and the economic calendar's no-trade windows still stop crypto."""
+    from app.macro.scope import scope_for_symbol
+    hot = quotes(vix={"value": 35.9, "change_pct": 5.0}, es={"change_pct": -3.5})
+    off = {**SETTINGS, "macro.crypto_stock_block": False}
+    gold = scope_for_symbol("BINANCE:XAUUSDT.P")
+    stock = scope_for_symbol("NASDAQ:AAPL")
+
+    def go(scope, settings, events=()):
+        return C.assess(list(events), metrics_with(NOW, hot), NOW, settings, scope)
+
+    assert go(gold, SETTINGS)["level"] == "red"  # default: unchanged
+    relaxed = go(gold, off)
+    assert relaxed["level"] == "amber" and "no frena cripto" in relaxed["headline"]
+    assert go(stock, off)["level"] == "red"
+    assert go(gold, off, [ev("Non-Farm Employment Change", "USD", 10)])["level"] == "red"

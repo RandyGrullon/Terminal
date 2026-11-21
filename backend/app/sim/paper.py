@@ -3629,11 +3629,16 @@ class PaperEngine:
         reads = [r for r in self._autopilot_last.values() if r.get("tf") == cfg["tf"]]
         last = max((int(r["bar_time"]) + tf_s * 1000 for r in reads), default=None)  # the close of its newest bar
         stale = []
+        # with focus symbols (autopilot.focus_symbols / wide_tfs) the others are not decided on the main timeframe
+        focus = {str(s).upper() for s in (self._setting("autopilot.focus_symbols", []) or [])}
+        wide = {normalize_tf(str(t)) for t in (self._setting("autopilot.wide_tfs", []) or []) if t}
+        off_main = bool(focus) and bool(wide) and cfg["tf"] not in wide
         if cfg["enabled"]:
             for sym in watched:
                 read = self._autopilot_last.get(sym)
                 if (sym.startswith("SIM:") or asset_class(sym) not in ALWAYS_OPEN_CLASSES or read is None
-                        or read.get("tf") != cfg["tf"] or sym in held_elsewhere):
+                        or read.get("tf") != cfg["tf"] or sym in held_elsewhere
+                        or (off_main and sym.upper() not in focus)):
                     continue
                 if now > int(read["bar_time"]) // 1000 + 3 * tf_s + HEALTH_GRACE_S:
                     stale.append(sym)

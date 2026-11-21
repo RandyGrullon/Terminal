@@ -144,6 +144,9 @@ DEFAULT_SETTINGS: dict = {
     "macro.warn_before_min": 120,
     "macro.vix_caution": 22.0,
     "macro.vix_danger": 30.0,
+    # the stock market's volatility (VIX, S&P futures) also stops 24/7 markets (crypto and gold perps); off = it only
+    # warns them (amber) while the economic calendar's no-trade windows still stop them
+    "macro.crypto_stock_block": True,
     "macro.currencies": ["USD"],
     # UI (free-form "ui.*" keys are also accepted)
     "ui.language": "es",
